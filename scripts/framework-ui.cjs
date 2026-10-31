@@ -1,8 +1,9 @@
-const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, desktopCapturer } = require('electron');
+const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, desktopCapturer, screen } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { recordDesktop } = require('./desktop-evidence.cjs');
+const { fiveMarkersVisible } = require('./visible-markers.cjs');
 
 if (process.argv.find((arg) => arg.startsWith('--ci-mode=')) !== '--ci-mode=framework-ui' ||
     !process.env.VI_OUTPUT || !process.env.VI_PROVIDER_DIR) {
@@ -35,12 +36,9 @@ async function until(action, label, limit = 20000) {
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
 const status = () => evaluate('window.voice.status()');
 function visibleMarker(png) {
-  const pixels = nativeImage.createFromBuffer(png).toBitmap();
-  let matched = 0;
-  for (let i = 0; i < pixels.length; i += 4) {
-    if (pixels[i] >= 240 && pixels[i + 1] <= 15 && pixels[i + 2] >= 240) matched++;
-  }
-  return matched >= 100;
+  const image = nativeImage.createFromBuffer(png), pixels = image.toBitmap();
+  const { width, height } = image.getSize();
+  return fiveMarkersVisible(pixels, width, height);
 }
 async function click(selector) {
   const point = await evaluate(`(() => {
@@ -100,10 +98,16 @@ async function run() {
     return current.shortcutReady && mainWindow.isVisible();
   }, 'native startup', 35000);
   await evaluate(`(() => {
-    const marker = document.createElement('div');
-    marker.style.cssText = 'position:fixed;right:4px;top:4px;width:40px;height:40px;background:#ff00ff;z-index:2147483647;pointer-events:none';
-    document.body.append(marker);
+    for (const position of ['left:4px;top:4px','right:4px;top:4px',
+      'left:4px;bottom:4px','right:4px;bottom:4px','left:50%;top:50%']) {
+      const marker = document.createElement('div');
+      marker.style.cssText = 'position:fixed;width:24px;height:24px;background:#ff00ff;z-index:2147483647;pointer-events:none;' + position;
+      document.body.append(marker);
+    }
   })()`);
+  const workArea = screen.getPrimaryDisplay().workArea;
+  mainWindow.setBounds({ x: workArea.x + 10, y: workArea.y + 10,
+    width: Math.min(720, workArea.width - 20), height: Math.min(800, workArea.height - 20) });
   mainWindow.setAlwaysOnTop(true);
   mainWindow.show();
   mainWindow.moveTop();

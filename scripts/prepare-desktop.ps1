@@ -10,6 +10,7 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class CiAppIdentity {
+    [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
     [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, int id);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr process);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern int GetApplicationUserModelId(
@@ -24,6 +25,10 @@ public static class CiAppIdentity {
             return GetApplicationUserModelId(process, ref length, name) == 0 ? name.ToString() : "";
         } finally { CloseHandle(process); }
     }
+    public static void Escape() {
+        keybd_event(0x1b, 0, 0, UIntPtr.Zero);
+        keybd_event(0x1b, 0, 2, UIntPtr.Zero);
+    }
 }
 '@
 foreach ($process in Get-Process) {
@@ -35,4 +40,9 @@ foreach ($process in Get-Process) {
         Write-Output "Closing CI onboarding process $($process.Id) ($($process.ProcessName))."
         Stop-Process -Id $process.Id -Force
     }
+}
+Start-Sleep -Seconds 1
+for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    [CiAppIdentity]::Escape()
+    Start-Sleep -Milliseconds 300
 }
