@@ -1,8 +1,9 @@
-const { test } = require('node:test');
+const { test: nodeTest } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { RecordingCues, VoiceWaveform } = require('../../app/audio-feedback.js');
+const test = (name, action) => nodeTest(name, { timeout: 5000 }, action);
 
 function contexts(behavior = () => ({})) {
   const instances = [];
@@ -35,7 +36,7 @@ function contexts(behavior = () => ({})) {
     createOscillator() {
       if (this.behavior.graphError && this.tones.length === 1) throw new Error('graph failed');
       const tone = { type: '', frequency: { value: 0 }, connect: (gain) => gain,
-        start: (at) => { tone.at = at; }, disconnected: 0,
+        start: (at) => { tone.at = at; this.behavior.onStart?.(); }, disconnected: 0,
         stop: (at) => {
           if (at === undefined) { clearTimeout(tone.timer); return; }
           tone.until = at;
@@ -166,6 +167,24 @@ test('close failure is reported, including when playback also fails', async () =
     assert.equal(instances[0].closed, 1);
     assert.ok(instances[0].tones.every((tone) => tone.disconnected === 1));
   }
+});
+
+test('a device change during playback rejects, removes listeners and allows fresh output', async () => {
+  const devices = new EventTarget(), listeners = new Set();
+  const add = devices.addEventListener.bind(devices), remove = devices.removeEventListener.bind(devices);
+  devices.addEventListener = (type, listener) => { listeners.add(listener); add(type, listener); };
+  devices.removeEventListener = (type, listener) => { listeners.delete(listener); remove(type, listener); };
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(require.resolve('../../app/audio-feedback.js'), 'utf8'),
+    { module, navigator: { mediaDevices: devices }, setTimeout, clearTimeout });
+  const { Context, instances } = contexts((index) => index ? {} : {
+    onStart: () => queueMicrotask(() => devices.dispatchEvent(new Event('devicechange'))),
+  });
+  const cues = new module.exports.RecordingCues(Context);
+  await assert.rejects(cues.play('start'), /Sound output device changed/);
+  await cues.play('stop');
+  assert.equal(listeners.size, 0);
+  instances.forEach(released);
 });
 
 test('unknown cues and unavailable WebAudio reject rather than silently succeed', async () => {
