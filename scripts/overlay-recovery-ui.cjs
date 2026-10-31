@@ -1,5 +1,6 @@
 const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, screen, ipcMain } = require('electron');
 const fs = require('node:fs/promises');
+const { writeFileSync } = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
@@ -33,6 +34,7 @@ const helpers = [];
 report.helpers = [];
 report.pointerStates = [];
 report.controlActions = [];
+report.osInputs = [];
 let mainWindow, overlay, service, stopVideo, held = false;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
@@ -58,24 +60,40 @@ const status = async () => {
 async function mouse(mode, point) {
   const location = process.platform === 'win32' ? screen.dipToScreenPoint(point) : point;
   let result;
-  if (process.platform === 'win32') {
-    const handle = overlay.getNativeWindowHandle();
-    const id = handle.readBigUInt64LE().toString();
-    result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
-      '-Window', id, '-Owner', String(process.pid), '-Mode', mode, '-X', String(location.x), '-Y', String(location.y)],
-    { timeout: 15000, windowsHide: true });
-  } else {
-    result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
-      [String(process.pid), mode, String(location.x), String(location.y)], { timeout: 10000 });
+  if (mode === 'down') held = true;
+  const recordInput = (stdout) => {
+    const input = JSON.parse(stdout.trim());
+    report.osInputs.push({ at: Date.now(), stage, mode, ...input });
+    return input;
+  };
+  try {
+    if (process.platform === 'win32') {
+      const handle = overlay.getNativeWindowHandle();
+      const id = handle.readBigUInt64LE().toString();
+      result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
+        '-Window', id, '-Owner', String(process.pid), '-Mode', mode, '-X', String(location.x), '-Y', String(location.y)],
+      { timeout: 15000, windowsHide: true });
+    } else {
+      result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
+        [String(process.pid), mode, String(location.x), String(location.y)], { timeout: 10000 });
+    }
+  } catch (error) {
+    if (error.stdout?.trim()) recordInput(error.stdout);
+    throw error;
   }
-  const input = JSON.parse(result.stdout.trim());
+  const input = recordInput(result.stdout);
   assert.equal(input.ownerVerified, true);
   assert.equal(input.foregroundUnchanged, true);
   report.osForegroundScope = 'native foreground HWND/application unchanged before and after each OS mouse action';
-  if (mode === 'down') held = true;
   if (mode === 'up') held = false;
-  assert.equal(BrowserWindow.getFocusedWindow(), mainWindow, 'Floating overlay stole application focus.');
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused !== mainWindow) {
+    report.focusFailure = { at: Date.now(), stage, mode, nativeForegroundUnchanged: input.foregroundUnchanged,
+      focusedWindow: focused === overlay ? 'overlay' : focused ? 'other-owned' : 'none' };
+  }
+  assert.equal(focused === mainWindow, true, focused === overlay
+    ? 'Floating overlay stole application focus.' : 'Owned application focus baseline changed without focusing the overlay.');
   assert.equal(overlay.isVisible(), true, 'Floating overlay disappeared during OS input.');
 }
 async function pointFor(selector) {
@@ -247,6 +265,11 @@ async function run() {
       (process.platform !== 'win32' || (await status()).nativePointer);
   }, 'full application and native pointer startup', 35000);
   report.initialPointerRestarts = (await status()).nativePointerRestarts;
+  if (process.platform === 'win32') {
+    report.windowIds = { owner: process.pid,
+      main: mainWindow.getNativeWindowHandle().readBigUInt64LE().toString(),
+      overlay: overlay.getNativeWindowHandle().readBigUInt64LE().toString() };
+  }
   mainWindow.focus();
   await until(() => BrowserWindow.getFocusedWindow() === mainWindow, 'owned focus baseline');
   assert.equal(overlay.isFocusable(), false);
@@ -259,7 +282,11 @@ async function run() {
     marker.style.cssText = 'position:fixed;right:4px;bottom:4px;width:14px;height:14px;background:#ff00ff;pointer-events:none;z-index:2147483647';
     document.body.append(marker);
   })()`);
-  stopVideo = await recordDesktop(directory, (png) => assert.ok(markerVisible(png), 'Overlay obscured in desktop evidence.'));
+  stopVideo = await recordDesktop(directory, (png) => {
+    const visible = markerVisible(png);
+    if (!visible) writeFileSync(path.join(directory, 'obscured-desktop.png'), png);
+    assert.ok(visible, 'Overlay obscured in desktop evidence.');
+  });
   await pause(500);
   report.startupVisibilityEvents = { shows, hides, focusChanges };
   assert.equal(hides, 0, 'Overlay disappeared while establishing the startup baseline.');

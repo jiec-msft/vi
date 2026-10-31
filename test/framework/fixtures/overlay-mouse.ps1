@@ -18,6 +18,7 @@ public static class OverlayCiMouse {
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     static void Button(uint flags) {
@@ -32,6 +33,9 @@ public static class OverlayCiMouse {
         GetWindowThreadProcessId(window, out pid);
         if (!IsWindow(window) || pid != owner) throw new InvalidOperationException("Owned window unavailable.");
         IntPtr foreground = GetForegroundWindow();
+        uint foregroundPid;
+        GetWindowThreadProcessId(foreground, out foregroundPid);
+        bool noActivate = (GetWindowLongPtr(window, -20).ToInt64() & 0x08000000L) != 0;
         if (mode != "up" && !SetCursorPos(x, y)) throw new InvalidOperationException("OS cursor unavailable.");
         Thread.Sleep(100);
         POINT point;
@@ -43,8 +47,17 @@ public static class OverlayCiMouse {
         else if (mode == "click") { Button(2); Thread.Sleep(100); Button(4); }
         else if (mode != "move" && mode != "hover") throw new InvalidOperationException("Invalid OS mouse action.");
         Thread.Sleep(100);
-        if (GetForegroundWindow() != foreground) throw new InvalidOperationException("Overlay changed the OS foreground window.");
-        Console.WriteLine("{\"input\":\"win32-SendInput/SetCursorPos\",\"ownerVerified\":true,\"foregroundUnchanged\":true}");
+        IntPtr after = GetForegroundWindow();
+        uint afterPid;
+        GetWindowThreadProcessId(after, out afterPid);
+        bool unchanged = after == foreground;
+        bool noActivateAfter = (GetWindowLongPtr(window, -20).ToInt64() & 0x08000000L) != 0;
+        Console.WriteLine("{\"input\":\"win32-SendInput/SetCursorPos\",\"ownerVerified\":true,\"foregroundUnchanged\":" +
+            (unchanged ? "true" : "false") + ",\"foregroundBefore\":{\"window\":\"" + foreground.ToInt64() +
+            "\",\"pid\":" + foregroundPid + "},\"foregroundAfter\":{\"window\":\"" + after.ToInt64() +
+            "\",\"pid\":" + afterPid + "},\"overlayNoActivate\":" + (noActivate ? "true" : "false") +
+            ",\"overlayNoActivateAfter\":" + (noActivateAfter ? "true" : "false") + "}");
+        if (!unchanged) throw new InvalidOperationException("OS foreground window changed during owned overlay input.");
     }
 }
 '@
