@@ -2,6 +2,7 @@ const { test: nodeTest } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const { EventEmitter } = require('node:events');
 const { RecordingCues, VoiceWaveform } = require('../../app/audio-feedback.js');
 const test = (name, action) => nodeTest(name, { timeout: 5000 }, action);
 
@@ -213,6 +214,36 @@ test('renderer sounds gate suppresses output and visibly reports playback failur
   await vm.runInContext("cue('stop')", scope);
   assert.match(result.textContent, /Sound output unavailable/);
   assert.equal(result.error, 'error');
+});
+
+test('native cue launcher rejects zero-exit probes with empty or incomplete evidence', () => {
+  const source = fs.readFileSync(require.resolve('../../scripts/cues-ci.cjs'), 'utf8');
+  const head = 'a'.repeat(40);
+  const passed = { status: 'passed', headSha: head, contextCount: 23, videoBytes: 100,
+    checks: ['actual-destination-graph-and-pcm'],
+    contexts: Array.from({ length: 23 }, () => ({ state: 'closed', closeCalls: 1 })),
+    recordings: Array.from({ length: 12 }, (_, index) => ({ sampleCount: 100, peak: 0.09, pcmFile: `${index}.wav` })) };
+  function launch(report, code = 0, bytes = 100) {
+    const child = new EventEmitter(), errors = [];
+    const process = { arch: 'arm64', env: { GITHUB_ACTIONS: 'true', VI_EXPECTED_ARCH: 'arm64', VI_CUES_HEAD: head } };
+    const modules = { 'node:assert/strict': assert, 'node:path': require('node:path'),
+      'node:child_process': { spawn: () => child }, electron: 'fixture-electron',
+      'node:fs': { mkdirSync() {}, readFileSync: () => report, statSync: () => ({ size: bytes }) } };
+    vm.runInNewContext(source, { process, require: (name) => modules[name], setTimeout, clearTimeout,
+      console: { log() {}, error: (...args) => errors.push(args) } });
+    child.emit('exit', code);
+    return { code: process.exitCode || 0, errors };
+  }
+  assert.equal(launch(JSON.stringify(passed)).code, 0);
+  for (const report of ['', '{}', JSON.stringify({ ...passed, status: 'failed' }),
+    JSON.stringify({ ...passed, headSha: 'b'.repeat(40) }), JSON.stringify({ ...passed, contexts: [] }),
+    JSON.stringify({ ...passed, videoBytes: 0 }), JSON.stringify({ ...passed, recordings: [] })]) {
+    const result = launch(report);
+    assert.equal(result.code, 1);
+    assert.equal(result.errors.length, 1);
+  }
+  assert.equal(launch(JSON.stringify(passed), 1).code, 1);
+  assert.equal(launch(JSON.stringify(passed), 0, 0).code, 1);
 });
 
 test('waveform changes with microphone level and resets to a quiet baseline', () => {

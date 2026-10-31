@@ -164,6 +164,7 @@ window.runCueProbe = async () => {
     'repeated-fresh-contexts', 'owned-audio-resources-closed');
   for (const fault of ['resume', 'suspend', 'closed', 'devicechange']) {
     outputFault = fault;
+    document.getElementById('current').textContent = `Injected ${fault} failure and fresh-output recovery`;
     document.getElementById('preferences-result').textContent = '';
     await window.playRendererCue('start');
     const failed = observedContexts.at(-1);
@@ -183,7 +184,7 @@ window.runCueProbe = async () => {
     verifyPcm(context, melodies[['start', 'stop', 'cancel'][index]]));
   checks.push('rapid-start-stop-cancel-order');
   probeAssert(observedContexts.every((context) => context.state === 'closed'), 'A context remained open.');
-  document.getElementById('current').textContent = 'PASS: actual PCM and lifecycle checks complete';
+  document.getElementById('current').textContent = 'PASS: PCM and lifecycle checks complete; injected error below is expected';
   return { checks, recordings, contextCount: observedContexts.length,
     outputScope: 'actual-WebAudio-default-destination-with-PCM-observation-tap',
     deviceScope: 'fresh-default-route-and-synthetic-devicechange-event-not-hardware-routing',

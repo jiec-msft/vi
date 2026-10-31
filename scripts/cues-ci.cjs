@@ -20,6 +20,7 @@ child.once('exit', (code) => {
     assert.equal(report.status, 'passed', report.error || report.evidenceError || report.cleanupError);
     assert.equal(report.headSha, process.env.VI_CUES_HEAD);
     assert.equal(report.contextCount, 23);
+    assert.equal(report.contexts.length, report.contextCount);
     assert.equal(report.recordings.length, 12);
     assert.ok(report.videoBytes > 0 && report.checks.includes('actual-destination-graph-and-pcm'));
     assert.ok(report.contexts.every((context) => context.state === 'closed' && context.closeCalls === 1));

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, desktopCapturer, nativeImage, screen } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const { writeFileSync } = require('node:fs');
 const path = require('node:path');
 const { recordDesktop } = require('./desktop-evidence.cjs');
 const { fiveMarkersVisible } = require('./visible-markers.cjs');
@@ -55,7 +56,12 @@ async function run() {
   }
   stopVideo = await recordDesktop(directory, (png) => {
     const image = nativeImage.createFromBuffer(png), size = image.getSize();
-    assert.ok(fiveMarkersVisible(image.toBitmap(), size.width, size.height), 'Cue probe was obscured in desktop evidence.');
+    const marked = fiveMarkersVisible(image.toBitmap(), size.width, size.height);
+    if (!marked && !report.visibilityFailure) {
+      report.visibilityFailure = 'visibility-failure.png';
+      writeFileSync(path.join(directory, report.visibilityFailure), png);
+    }
+    assert.ok(marked, 'Cue probe was obscured in desktop evidence.');
   });
   const result = await window.webContents.executeJavaScript('window.runCueProbe()');
   report.checks = result.checks;

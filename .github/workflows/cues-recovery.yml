@@ -71,6 +71,6 @@ jobs:
             artifacts-ci/cues/report.json
             artifacts-ci/cues/*.wav
             artifacts-ci/cues/desktop.webm
-            artifacts-ci/cues/desktop.png
+            artifacts-ci/cues/*.png
           retention-days: 7
           if-no-files-found: error
