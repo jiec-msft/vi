@@ -76,6 +76,8 @@ jobs:
             artifacts-ci/overlay-recovery/report.json
             artifacts-ci/overlay-recovery/environment.json
             artifacts-ci/overlay-recovery/restore-fault.json
+            artifacts-ci/overlay-recovery/restore-*-fault.json
+            artifacts-ci/overlay-recovery/parent-*.json
             artifacts-ci/overlay-recovery/negative-parent.json
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png

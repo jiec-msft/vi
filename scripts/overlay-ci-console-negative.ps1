@@ -86,7 +86,8 @@ foreach ($case in @('write', 'combined')) {
     } finally {
         try {
             $state = Get-Content -Raw -LiteralPath (Join-Path $directory $reportName) | ConvertFrom-Json -AsHashtable
-            if (!$state.restoreVerified) {
+            $live = Registry-State
+            if (!(Matches-Original $state.original $live)) {
                 & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
                 if ($LASTEXITCODE -ne 0) { throw 'Negative restore fixture cleanup failed.' }
             }
