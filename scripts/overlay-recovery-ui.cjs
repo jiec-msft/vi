@@ -24,6 +24,7 @@ if (process.platform === 'darwin') {
 const report = { platform: process.platform, arch: process.arch, checks: [], helperPids: [],
   mouseScope: 'OS mouse input to owned app window only',
   cursorFailureScope: 'Windows native sampler seam; not a real desktop/RDP transition',
+  controlScope: 'physical Stop/Cancel on preview recordings; Ready Start requires an external input target and is not asserted',
   microphoneScope: 'synthetic-input; no service credentials' };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const execFile = promisify(childProcess.execFile);
@@ -71,7 +72,8 @@ async function physicalDrag(label) {
   await mouse('hover', point);
   await pause(200);
   await mouse('down', point);
-  const target = { x: point.x - 60, y: point.y - 40 };
+  await mouse('move', { x: point.x - 10, y: point.y - 6 });
+  const target = { x: point.x - 70, y: point.y - 46 };
   await mouse('move', target);
   await until(() => overlay.getBounds().x <= before.x - 40 && overlay.getBounds().y <= before.y - 20, label);
   await mouse('up', target);
@@ -93,8 +95,8 @@ async function physicalControls(label) {
   await until(async () => (await status()).phase === 'done', 'physical Stop finalization');
   await pause(1200);
   assert.equal((await status()).phase, 'done', 'Duplicate Stop started another recording.');
-  await mouse('click', await pointFor('#stop'));
-  await until(async () => (await status()).phase === 'recording', 'physical Start');
+  await evaluate('window.voice.toggle()');
+  await until(async () => (await status()).phase === 'recording', 'recording before physical Cancel');
   const before = await clipboard.readText();
   await mouse('click', await pointFor('#cancel'));
   await until(async () => (await status()).phase === 'idle' && await evaluate('capture === undefined'), 'physical Cancel');
