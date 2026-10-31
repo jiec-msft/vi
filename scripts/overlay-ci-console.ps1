@@ -1,4 +1,8 @@
-param([ValidateSet('prepare', 'restore')][string] $Mode = 'prepare')
+param(
+    [ValidateSet('prepare', 'restore')][string] $Mode = 'prepare',
+    [ValidateSet('environment.json', 'restore-fault.json')][string] $ReportName = 'environment.json',
+    [switch] $FailRestoreSnapshot
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or !$env:GITHUB_WORKSPACE -or
@@ -6,7 +10,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     throw 'Console preparation is restricted to an isolated GitHub-hosted Windows runner.'
 }
 $directory = Join-Path $env:GITHUB_WORKSPACE 'artifacts-ci\overlay-recovery'
-$file = Join-Path $directory 'environment.json'
+$file = Join-Path $directory $ReportName
 $registryPath = 'Console\%%Startup'
 $names = @('DelegationConsole', 'DelegationTerminal')
 $consoleHost = '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}'
@@ -32,6 +36,7 @@ function Read-Selection {
     } finally { if ($key) { $key.Dispose() } }
 }
 function Process-Snapshot {
+    if ($Mode -eq 'restore' -and $FailRestoreSnapshot) { throw 'Injected restore Process-Snapshot failure.' }
     $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate)
     if ($all.Count -gt 1024) { throw 'Process diagnostic inventory exceeded its bound.' }
     $byId = @{}
@@ -44,8 +49,7 @@ function Process-Snapshot {
         for ($depth = 0; $depth -lt 8 -and $next -gt 0; $depth++) {
             if (!$byId.ContainsKey($next)) { $chain += @{ pid = $next; missing = $true }; break }
             $item = $byId[$next]
-            if ($item.Name -notmatch '^[\w.-]+\.exe$' -and
-                $item.Name -notin @('System', 'Registry', 'System Idle Process')) {
+            if (!$item.Name -or $item.Name.Length -gt 260 -or $item.Name -match '[\\/\x00-\x1f]') {
                 throw 'Unexpected executable identity in diagnostic chain.'
             }
             $chain += @{ pid = [int] $item.ProcessId; parentPid = [int] $item.ParentProcessId; exe = $item.Name;
@@ -109,13 +113,15 @@ if ($Mode -eq 'restore') {
 if (Test-Path -LiteralPath $file) { throw 'Refusing to overwrite an existing terminal-choice snapshot.' }
 $report = @{ runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; scope = 'current isolated runner HKCU only';
     support = $support; selectedGuid = $consoleHost; selectedHost = 'Windows Console Host';
-    startedAt = [DateTime]::UtcNow.ToString('o'); original = (Read-Selection); before = (Process-Snapshot);
+    startedAt = [DateTime]::UtcNow.ToString('o'); original = (Read-Selection);
     stateSaved = $true; status = 'preparing'; restoreVerified = $false }
 Save-Report
 if (!$env:GITHUB_OUTPUT) { throw 'Workflow output channel unavailable; terminal choice was not changed.' }
 Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'state_saved=true'
 $probe = $null
 try {
+    $report.before = Process-Snapshot
+    Save-Report
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath)
     try {
         foreach ($name in $names) { $key.SetValue($name, $consoleHost, [Microsoft.Win32.RegistryValueKind]::String) }
@@ -135,7 +141,7 @@ try {
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($remaining.Count) { throw 'Pre-existing unowned WSL clients did not exit; no UI or broad process cleanup is permitted.' }
     $report.preExistingWslQuietAt = [DateTime]::UtcNow.ToString('o')
-    $probeFile = Join-Path $directory 'console-probe.json'
+    $probeFile = Join-Path $directory "$([IO.Path]::GetFileNameWithoutExtension($ReportName))-console-probe.json"
     $probeScript = @'
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @"

@@ -10,7 +10,7 @@ on:
       - test/framework/native-types.test.cjs
       - test/framework/fixtures/overlay-mouse.*
       - scripts/overlay-recovery-*.cjs
-      - scripts/overlay-ci-console.ps1
+      - scripts/overlay-ci-console*.ps1
       - .github/workflows/overlay-recovery.yml
 permissions:
   contents: read
@@ -34,6 +34,10 @@ jobs:
       VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
     steps:
       - uses: actions/checkout@v4
+      - name: Verify rollback after an injected restore diagnostic failure
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console-test.ps1
       - name: Select isolated runner Console Host and diagnose Terminal actors
         id: console-host
         if: runner.os == 'Windows'
@@ -67,6 +71,7 @@ jobs:
           path: |
             artifacts-ci/overlay-recovery/report.json
             artifacts-ci/overlay-recovery/environment.json
+            artifacts-ci/overlay-recovery/restore-fault.json
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png
           retention-days: 3
