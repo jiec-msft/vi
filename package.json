@@ -7,7 +7,7 @@
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron app/main.cjs",
-    "test": "node --test test",
+    "test": "node scripts/unit.cjs",
     "smoke": "node scripts/ci.cjs smoke",
     "test:ui": "node scripts/ci.cjs ui"
   },
