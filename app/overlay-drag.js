@@ -67,15 +67,15 @@ function bindDragHandle(handle, bridge, onFailure, view = globalThis, enabled = 
     });
   };
   const release = (action) => {
-    if (pointer === undefined) return;
     const previous = pointer;
     pointer = undefined;
     gesture++;
     if (frame !== undefined) view.cancelAnimationFrame(frame);
     frame = undefined;
     handle.classList.remove('dragging');
-    if (handle.hasPointerCapture(previous)) handle.releasePointerCapture(previous);
     hovered = false;
+    if (previous === undefined) return;
+    if (handle.hasPointerCapture(previous)) handle.releasePointerCapture(previous);
     dispatch(action);
   };
   const cancel = () => release('cancel');

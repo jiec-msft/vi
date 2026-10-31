@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, screen, ipcMain } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -32,6 +32,7 @@ const execFile = promisify(childProcess.execFile);
 const helpers = [];
 report.helpers = [];
 report.pointerStates = [];
+report.controlActions = [];
 let mainWindow, overlay, service, stopVideo, held = false;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
@@ -124,6 +125,43 @@ async function physicalControls(label) {
   assert.deepEqual({ shows, hides, focusChanges }, changes, 'Ready/Listening controls flashed or activated the overlay.');
   report.checks.push(label, `${label}-no-hide-show-or-focus-change`);
 }
+const actionCount = (name) => report.controlActions.filter((action) => action.name === name).length;
+async function interruptedButton(name) {
+  stage = `native-${name}-interrupted-before-release`;
+  const count = actionCount(name), helperCount = helpers.length;
+  await evaluate('window.voice.toggle()');
+  await until(async () => (await status()).phase === 'recording', `recording before interrupted ${name}`);
+  const point = await pointFor(`#${name}`);
+  await mouse('hover', point);
+  await mouse('down', point);
+  const terminal = name === 'stop' ? 'done' : 'idle';
+  await until(async () => (await status()).phase === terminal && await evaluate('capture === undefined'),
+    `native ${name} action completed before release`);
+  assert.equal(actionCount(name), count + 1);
+  await fs.writeFile(unavailable, 'cursor sampling unavailable');
+  await until(async () => (await status()).nativePointerState === 'suspended', `native ${name} press interrupted`);
+  await mouse('up', point);
+  await pause(200);
+  assert.equal(actionCount(name), count + 1, `Interrupted ${name} dispatched again on DOM click.`);
+  assert.equal((await status()).phase, terminal);
+  assert.equal(overlay.isVisible(), true);
+  report.checks.push(`${name}-physical-press-owned-across-native-suspension`);
+  const fallback = name === 'stop' ? 'cancel' : 'stop', fallbackCount = actionCount(fallback);
+  stage = `fresh-fallback-${fallback}-after-interrupted-${name}`;
+  await evaluate('window.voice.toggle()');
+  await until(async () => (await status()).phase === 'recording', `recording before fresh fallback ${fallback}`);
+  const next = await pointFor(`#${fallback}`);
+  await mouse('hover', next);
+  await mouse('click', next);
+  await until(async () => (await status()).phase === (fallback === 'stop' ? 'done' : 'idle'),
+    `fresh fallback ${fallback} completed`);
+  assert.equal(actionCount(fallback), fallbackCount + 1);
+  assert.equal((await status()).nativePointerState, 'suspended');
+  assert.equal(helpers.length, helperCount);
+  report.checks.push(`fresh-fallback-${fallback}-not-suppressed-after-interrupted-${name}`);
+  await fs.unlink(unavailable);
+  await until(async () => (await status()).nativePointer, `native pointer resumed after interrupted ${name}`);
+}
 function markerVisible(png) {
   const image = nativeImage.createFromBuffer(png), pixels = image.toBitmap();
   let count = 0;
@@ -193,6 +231,13 @@ async function run() {
     }
     return child;
   };
+  const installHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, listener) => installHandle(channel, (event, ...args) => {
+    if (event.sender === overlay?.webContents && ['overlay-stop', 'cancel'].includes(channel)) {
+      report.controlActions.push({ name: channel === 'overlay-stop' ? 'stop' : 'cancel', at: Date.now(), stage });
+    }
+    return listener(event, ...args);
+  });
   require('../app/main.cjs');
   await app.whenReady();
   await until(async () => {
@@ -222,6 +267,12 @@ async function run() {
   await physicalDrag('physical-drag');
   await physicalControls('physical-stop-cancel');
   if (process.platform === 'win32') {
+    stage = 'fallback-hover-before-native-readiness';
+    await fs.writeFile(unavailable, 'cursor sampling unavailable');
+    await until(async () => (await status()).nativePointerState === 'suspended', 'fallback before native readiness');
+    await mouse('hover', await pointFor('#drag-handle'));
+    await fs.unlink(unavailable);
+    await until(async () => (await status()).nativePointer, 'native ready after uncaptured DOM hover');
     stage = 'native-cursor-suspension';
     let point = await pointFor('#drag-handle');
     await mouse('hover', point);
@@ -230,6 +281,11 @@ async function run() {
     await fs.writeFile(unavailable, 'cursor sampling unavailable');
     await until(async () => (await status()).nativePointerState === 'suspended', 'temporary cursor suspension');
     const suspended = overlay.getBounds(), helperCount = helpers.length;
+    await mouse('move', { x: point.x - 35, y: point.y - 18 });
+    await mouse('move', { x: point.x - 45, y: point.y - 25 });
+    assert.equal((await status()).nativePointerState, 'suspended');
+    assert.deepEqual(overlay.getBounds(), suspended, 'Fallback restarted the cancelled held gesture during suspension.');
+    report.checks.push('uncaptured-hover-cleared-on-native-readiness', 'suspended-fallback-cannot-restart-held-drag');
     await fs.unlink(unavailable);
     await until(async () => (await status()).nativePointer, 'same helper resumed');
     await mouse('move', { x: point.x - 45, y: point.y - 25 });
@@ -238,6 +294,8 @@ async function run() {
     assert.equal(helpers.length, helperCount, 'Temporary cursor failure restarted the helper.');
     report.checks.push('native-cursor-suspend-cancels-held-drag', 'native-cursor-resume-without-restart');
     await physicalDrag('physical-drag-after-cursor-resume');
+    await interruptedButton('cancel');
+    await interruptedButton('stop');
     stage = 'owned-helper-death';
     point = await pointFor('#drag-handle');
     await mouse('hover', point);
