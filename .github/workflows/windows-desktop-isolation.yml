@@ -84,6 +84,8 @@ jobs:
             if ($report.errors.Count -ne 1) { $failures += "$case had unexpected errors" }
           }
           if ($failures.Count) { throw ($failures -join '; ') }
+          'Both expected nonzero outcomes and all restore/cleanup assertions passed.'
+          exit 0
       - name: Save independent desktop probe evidence
         if: always()
         uses: actions/upload-artifact@v4
