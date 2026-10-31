@@ -101,6 +101,44 @@ class GitHub:
             return json.load(response)
 
 
+def validate_association(pr, run):
+    associations = run.get("pull_requests")
+    require(isinstance(associations, list) and len(associations) == 1,
+            "Run must have exactly one authoritative PR association; missing/fork associations cannot be inferred.")
+    associated = associations[0]
+    require(isinstance(associated, dict) and
+            all(associated.get(key) == pr[key] for key in ("number", "id", "url")),
+            "Run is associated with a different PR.")
+    for side in ("base", "head"):
+        snapshot = associated.get(side)
+        require(isinstance(snapshot, dict) and isinstance(snapshot.get("repo"), dict) and
+                snapshot.get("ref") == pr[side]["ref"] and
+                all(snapshot["repo"].get(key) == pr[side]["repo"][key] for key in ("id", "url")),
+                f"Run association does not match the PR {side} ref/repository.")
+    require(associated["head"].get("sha") == pr["head"]["sha"],
+            "Run association does not match the exact PR head.")
+
+
+def validate_pr_identity(latest, expected):
+    require(latest["state"] == "open" and
+            all(latest[key] == expected[key] for key in ("number", "id", "url")),
+            "PR closed or changed before publication.")
+    for side in ("base", "head"):
+        require(latest[side]["ref"] == expected[side]["ref"] and
+                all(latest[side]["repo"][key] == expected[side]["repo"][key]
+                    for key in ("id", "url", "full_name")),
+                f"PR {side} ref/repository changed before publication.")
+    require(latest["head"]["sha"] == expected["head"]["sha"],
+            "PR head changed before publication.")
+
+
+def validate_manifest_source(manifest, pr, run, timings):
+    require(manifest["repository"] == REPOSITORY and manifest["pr"] == pr["number"] and
+            manifest["run"] == run["id"] and manifest["head"] == pr["head"]["sha"] and
+            manifest["attempt"] == run["run_attempt"] and manifest["jobs"] == timings,
+            "Prepared evidence does not match the successful current source run/attempt/jobs.")
+
+
 def validate_source(pr, run, jobs, workflow_id, allow_active=False):
     require(pr["state"] == "open" and pr["base"]["repo"]["full_name"] == REPOSITORY,
             "PR must be open in the public VI repository.")
@@ -111,6 +149,7 @@ def validate_source(pr, run, jobs, workflow_id, allow_active=False):
             run["path"] == ".github/workflows/ci.yml", "Run must belong to Platform checks.")
     require(run["head_sha"] == pr["head"]["sha"], "Run does not match the exact current PR head.")
     require(run["head_branch"] == pr["head"]["ref"], "Run branch does not match the PR.")
+    validate_association(pr, run)
     active = allow_active and str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
     require((run["status"] == "completed" and run["conclusion"] == "success") or
             (active and run["status"] == "in_progress"),
@@ -137,6 +176,7 @@ def source(api, pr_number, run_id, allow_active=False):
     route = f"/repos/{REPOSITORY}"
     pr = api.request(f"{route}/pulls/{pr_number}")
     run = api.request(f"{route}/actions/runs/{run_id}")
+    require(pr["number"] == pr_number and run["id"] == run_id, "API returned a different PR/run.")
     workflow = api.request(f"{route}/actions/workflows/ci.yml")
     jobs = api.pages(f"{route}/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs", "jobs")
     timings = validate_source(pr, run, jobs, workflow["id"], allow_active)
@@ -269,10 +309,7 @@ def publish(api, pr_number, run_id):
     manifest = json.loads(report_path.read_text(encoding="utf-8"))
     require(set(manifest) == {"repository", "pr", "head", "run", "attempt", "jobs", "files"},
             "Prepared report contains unexpected fields.")
-    require(manifest["repository"] == REPOSITORY and manifest["pr"] == pr_number and
-            manifest["run"] == run_id and manifest["head"] == pr["head"]["sha"] and
-            manifest["attempt"] == run["run_attempt"] and manifest["jobs"] == timings,
-            "Prepared evidence does not match the successful current source run.")
+    validate_manifest_source(manifest, pr, run, timings)
     expected = {f"{platform}-{suite}.{extension}" for platform in PLATFORMS
                 for suite in SUITES for extension in ("webm", "gif", "png")}
     require(len(manifest["files"]) == len(expected) and
@@ -319,12 +356,16 @@ def publish(api, pr_number, run_id):
                     f"https://github.com/{REPOSITORY}/releases/download/{tag}/"),
                 "Asset URL does not belong to the expected public evidence release.")
         urls[name] = asset["browser_download_url"]
-    # Re-fetch immediately before PATCH; do not overwrite intervening edits or a newer head.
-    latest, _, _ = source(api, pr_number, run_id)
-    body = replace_evidence(latest["body"], evidence_body(manifest, urls))
+    block = evidence_body(manifest, urls)
+    latest, latest_run, latest_timings = source(api, pr_number, run_id)
+    validate_manifest_source(manifest, latest, latest_run, latest_timings)
+    # PR PATCH has no verified CAS: a final read narrows, but cannot close, the race window.
+    fresh = api.request(f"{route}/pulls/{pr_number}")
+    validate_pr_identity(fresh, latest)
+    body = replace_evidence(fresh["body"], block)
     result = api.request(f"{route}/pulls/{pr_number}", "PATCH", {"body": body})
-    require(result["body"] == body and result["head"]["sha"] == manifest["head"],
-            "PR update was not accepted for the expected head.")
+    require(result["body"] == body, "PR body update was not accepted.")
+    validate_pr_identity(result, fresh)
     print(f"Published {release['html_url']} and updated PR #{pr_number}.")
 
 

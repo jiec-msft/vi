@@ -59,6 +59,12 @@ head/repository/branch, with all nine jobs within their budgets and both suites'
 nonempty media present. Missing/expired artifacts, stale heads, exceeded budgets
 or missing permissions are explicit blockers. Re-run checks after a new push;
 old evidence is labeled with its exact head and does not validate the new head.
+The run must have exactly one authoritative REST `pull_requests` association
+matching the PR number/id/API URL, base/head repository ids/API URLs, base/head
+refs and head SHA. Missing/empty/ambiguous associations, including unverifiable
+fork associations, are blocked; matching head alone never substitutes for this
+association. Verifiable fork associations are supported. Current base SHA
+freshness remains the responsibility of strict integration checks.
 
 The trusted workflow checks out default-branch publisher code, validates and
 converts allowlisted media without write permissions, then uploads only processed
@@ -68,6 +74,13 @@ named `evidence-pr-...` are public evidence-only prereleases, not application
 downloads. The body update replaces only `<!-- vi-evidence:start -->` through
 `<!-- vi-evidence:end -->`, preserving the rest of the description and closing
 links. Unpaired/duplicate markers fail instead of guessing.
+After uploads, the publisher revalidates the run id, attempt and all job timings
+against the prepared manifest, then reads the PR again immediately before the
+body update. This preserves edits already visible outside the evidence marker
+and rejects a changed/closed PR. The final GET-to-PATCH window is not an atomic
+compare-and-swap: concurrent edits, retargeting, head changes or reruns in that
+window cannot be fully prevented. A post-write mismatch reports failure but
+cannot undo a body update that already occurred.
 
 Bootstrap: a new dispatch workflow must first land on the default branch.
 Before that, maintainers can download this PR's read-only CI-generated
