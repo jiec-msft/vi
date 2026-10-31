@@ -51,7 +51,11 @@ class NativeDelivery {
       if (this.closed) throw new Error('Desktop input helper is closed.');
       const id = ++this.sequence;
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => this.fail('Desktop input timed out. The clipboard may contain the transcript; review the target before using Copy result.'), 8000);
+        const initialization = action === 'ready';
+        const timer = setTimeout(() => this.fail(initialization
+          ? 'Desktop input helper initialization timed out.'
+          : 'Desktop input timed out. The clipboard may contain the transcript; review the target before using Copy result.'),
+        initialization ? 20000 : 8000);
         this.pending = { id, resolve, reject, timer };
         this.process.stdin.write(`${JSON.stringify({ id, action, ...data })}\n`);
       });

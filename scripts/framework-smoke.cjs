@@ -14,7 +14,7 @@ async function main() {
   const profile = path.join(directory, 'profile');
   await fs.mkdir(profile, { recursive: true });
   await fs.writeFile(path.join(profile, 'settings.json'), JSON.stringify({ consent: false, openAtLogin: false,
-    shortcut: 'CommandOrControl+Shift+F9', cancelShortcut: 'CommandOrControl+Shift+F10' }));
+    shortcut: 'CommandOrControl+Alt+Shift+F9', cancelShortcut: 'CommandOrControl+Alt+Shift+F10' }));
   const child = spawn(require('electron'), [path.resolve('app', 'main.cjs'), '--ci-mode=smoke', '--background',
     `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
   { stdio: 'inherit' });
@@ -49,7 +49,7 @@ async function main() {
         params: { expression, returnByValue: true, awaitPromise: true } }));
     });
     let status;
-    const readyBy = Date.now() + 15000;
+    const readyBy = Date.now() + 30000;
     do {
       status = await evaluate('window.voice.status()');
       if (status.phase === 'error') throw new Error(`Framework startup error: ${status.message}`);
