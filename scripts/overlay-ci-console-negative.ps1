@@ -29,11 +29,11 @@ function Matches-Original($original, $actual) {
             $original.values[$name].value -cne $actual.values[$name].value -or
             $original.values[$name].kind -ne $actual.values[$name].kind) { return $false }
     }
-    function Failure-Text($output) {
-        $text = ($output | Out-String) -replace "$([char]27)\[[0-9;]*[a-zA-Z]", ''
-        return $text -replace '\s+', ' '
-    }
     return $true
+}
+function Failure-Text($output) {
+    $text = ($output | Out-String) -replace "$([char]27)\[[0-9;]*[a-zA-Z]", ''
+    return $text -replace '\s+', ' '
 }
 $result = @{ cases = @(); status = 'running'; runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT }
 foreach ($case in @('prepare', 'missing-receipt', 'mismatch')) {
