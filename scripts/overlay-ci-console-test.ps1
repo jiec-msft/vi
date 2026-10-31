@@ -16,17 +16,24 @@ try {
     $report = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Console\%%Startup')
     try {
-        if ([bool] $key -ne $report.original.keyExisted) { throw 'Rollback did not restore original key presence.' }
+        $actual = @{ keyExisted = [bool] $key; values = @{} }
         foreach ($name in @('DelegationConsole', 'DelegationTerminal')) {
-            $original = $report.original.values[$name]
             $exists = $key -and $key.GetValueNames() -contains $name
-            if ([bool] $exists -ne $original.exists) { throw 'Rollback did not restore original value presence.' }
-            if ($exists -and ($key.GetValue($name) -cne $original.value -or
-                $key.GetValueKind($name).ToString() -ne $original.kind)) {
-                throw 'Rollback did not restore original value and kind.'
-            }
+            $actual.values[$name] = @{ exists = [bool] $exists;
+                value = if ($exists) { $key.GetValue($name) } else { $null };
+                kind = if ($exists) { $key.GetValueKind($name).ToString() } else { $null } }
         }
     } finally { if ($key) { $key.Dispose() } }
+    $report.faultObservation = @{ restoreExitCode = $exitCode; actualRegistry = $actual }
+    $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
+    if ($actual.keyExisted -ne $report.original.keyExisted) { throw 'Rollback did not restore original key presence.' }
+    foreach ($name in @('DelegationConsole', 'DelegationTerminal')) {
+        $original = $report.original.values[$name]
+        if ($actual.values[$name].exists -ne $original.exists) { throw 'Rollback did not restore original value presence.' }
+        if ($actual.values[$name].value -cne $original.value -or $actual.values[$name].kind -ne $original.kind) {
+            throw 'Rollback did not restore original value and kind.'
+        }
+    }
     if (!$report.restoreVerified -or $report.restoreDiagnosticError -ne 'Injected restore Process-Snapshot failure.') {
         throw 'Rollback verification or explicit diagnostic error receipt missing.'
     }
@@ -42,4 +49,5 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture cleanup failed.' }
         }
     }
+    exit 0
 }

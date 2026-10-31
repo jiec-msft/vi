@@ -69,11 +69,19 @@ if ($Mode -eq 'restore') {
         $report.selectedGuid -ne $consoleHost -or !$report.stateSaved) {
         throw 'Terminal snapshot does not belong to this run and supported selection.'
     }
-    $report.beforeRestore = Process-Snapshot
+    $report.restoreDiagnosticError = $null
+    try { $report.beforeRestore = Process-Snapshot }
+    catch {
+        $report.beforeRestore = $null
+        $report.restoreDiagnosticError = $_.Exception.Message
+    }
+    Save-Report
     $current = Read-Selection
     foreach ($name in $names) {
         $value = $current.values[$name].value
         if ($value -ne $consoleHost -and $value -ne $report.original.values[$name].value) {
+            $report.status = 'restore-refused-external-change'
+            Save-Report
             throw 'Terminal choice changed outside this preparation; refusing to overwrite it.'
         }
     }
@@ -90,19 +98,31 @@ if ($Mode -eq 'restore') {
         [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKey($registryPath, $false)
     }
     $report.restored = Read-Selection
+    if ($report.restored.keyExisted -ne $report.original.keyExisted) {
+        $report.status = 'restore-preserved-unrelated-key-data'
+        Save-Report
+        throw 'Original key presence could not be restored without deleting unrelated registry data.'
+    }
     foreach ($name in $names) {
         if ($report.restored.values[$name].exists -ne $report.original.values[$name].exists -or
-            $report.restored.values[$name].value -ne $report.original.values[$name].value) {
+            $report.restored.values[$name].value -cne $report.original.values[$name].value -or
+            $report.restored.values[$name].kind -ne $report.original.values[$name].kind) {
             throw 'Original terminal choice was not restored exactly.'
         }
     }
     $report.restoredAt = [DateTime]::UtcNow.ToString('o')
     $report.restoreVerified = $true
-    $report.newTerminalActorsAtRestore = @($report.beforeRestore.chains | Where-Object {
-        $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and
-        $_.rootPid -notin @($report.before.chains | ForEach-Object { $_.rootPid })
-    })
+    $report.newTerminalActorsAtRestore = if ($report.beforeRestore) {
+        @($report.beforeRestore.chains | Where-Object {
+            $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and
+            $_.rootPid -notin @($report.before.chains | ForEach-Object { $_.rootPid })
+        })
+    } else { $null }
+    $report.status = if ($report.restoreDiagnosticError) { 'restored-with-diagnostic-error' } else { 'restored' }
     Save-Report
+    if ($report.restoreDiagnosticError) {
+        throw "Original terminal choice restored; diagnostics failed: $($report.restoreDiagnosticError)"
+    }
     if ($report.newTerminalActorsAtRestore.Count) {
         throw 'New Terminal/WSL actors appeared while Console Host was selected; original choice has been restored.'
     }
