@@ -1,7 +1,11 @@
 param(
     [ValidateSet('prepare', 'restore')][string] $Mode = 'prepare',
-    [ValidateSet('environment.json', 'restore-fault.json')][string] $ReportName = 'environment.json',
-    [switch] $FailRestoreSnapshot
+    [ValidateSet('environment.json', 'restore-fault.json', 'parent-prepare.json', 'parent-missing-receipt.json',
+        'parent-mismatch.json', 'restore-write-fault.json', 'restore-combined-fault.json')]
+    [string] $ReportName = 'environment.json',
+    [switch] $FailRestoreSnapshot,
+    [switch] $FailRestoreReportWrite,
+    [switch] $FailPrepare
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
@@ -17,7 +21,10 @@ $consoleHost = '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}'
 $support = 'https://support.microsoft.com/en-us/windows/apps/command-prompt-and-windows-powershell'
 New-Item -ItemType Directory -Path $directory -Force | Out-Null
 
-function Save-Report { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8 }
+function Save-Report {
+    if ($Mode -eq 'restore' -and $FailRestoreReportWrite) { throw 'Injected restore report write failure.' }
+    $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
+}
 function Read-Selection {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($registryPath)
     try {
@@ -152,6 +159,7 @@ try {
     }
     $report.appliedAt = [DateTime]::UtcNow.ToString('o')
     Save-Report
+    if ($FailPrepare) { throw 'Injected prepare failure.' }
     $existingWsl = @($report.before.chains | Where-Object { $_.exe -eq 'wsl.exe' } | ForEach-Object { $_.rootPid })
     $deadline = [DateTime]::UtcNow.AddSeconds(65)
     do {

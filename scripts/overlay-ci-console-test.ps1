@@ -1,3 +1,4 @@
+param([ValidateSet('none', 'prepare', 'missing-receipt', 'mismatch')][string] $FailParent = 'none')
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
@@ -6,11 +7,14 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
 }
 $helper = Join-Path $PSScriptRoot 'overlay-ci-console.ps1'
 $pwsh = (Get-Process -Id $PID).Path
-$file = Join-Path $env:GITHUB_WORKSPACE 'artifacts-ci\overlay-recovery\restore-fault.json'
+$reportName = if ($FailParent -eq 'none') { 'restore-fault.json' } else { "parent-$FailParent.json" }
+$file = Join-Path $env:GITHUB_WORKSPACE "artifacts-ci\overlay-recovery\$reportName"
 try {
-    & $pwsh -NoProfile -NonInteractive -File $helper prepare -ReportName restore-fault.json
+    $prepareArgs = @('-NoProfile', '-NonInteractive', '-File', $helper, 'prepare', '-ReportName', $reportName)
+    if ($FailParent -eq 'prepare') { $prepareArgs += '-FailPrepare' }
+    & $pwsh @prepareArgs
     if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture preparation failed.' }
-    & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName restore-fault.json -FailRestoreSnapshot
+    & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName -FailRestoreSnapshot
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0) { throw 'Injected restore diagnostic failure returned success.' }
     $report = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
@@ -26,6 +30,7 @@ try {
     } finally { if ($key) { $key.Dispose() } }
     $report.faultObservation = @{ restoreExitCode = $exitCode; actualRegistry = $actual }
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
+    if ($FailParent -eq 'mismatch') { throw 'Injected parent registry mismatch assertion.' }
     if ($actual.keyExisted -ne $report.original.keyExisted) { throw 'Rollback did not restore original key presence.' }
     foreach ($name in @('DelegationConsole', 'DelegationTerminal')) {
         $original = $report.original.values[$name]
@@ -34,6 +39,7 @@ try {
             throw 'Rollback did not restore original value and kind.'
         }
     }
+    if ($FailParent -eq 'missing-receipt') { $report.restoreDiagnosticError = $null }
     if (!$report.restoreVerified -or $report.restoreDiagnosticError -ne 'Injected restore Process-Snapshot failure.') {
         throw 'Rollback verification or explicit diagnostic error receipt missing.'
     }
@@ -45,7 +51,7 @@ try {
     if (Test-Path -LiteralPath $file) {
         $state = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
         if (!$state.restoreVerified) {
-            & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName restore-fault.json
+            & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
             if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture cleanup failed.' }
         }
     }

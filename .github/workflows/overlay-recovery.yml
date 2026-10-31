@@ -34,6 +34,10 @@ jobs:
       VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
     steps:
       - uses: actions/checkout@v4
+      - name: Verify parent failures and diagnostic I/O cannot bypass rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console-negative.ps1
       - name: Verify rollback after an injected restore diagnostic failure
         if: runner.os == 'Windows'
         shell: pwsh
@@ -72,6 +76,7 @@ jobs:
             artifacts-ci/overlay-recovery/report.json
             artifacts-ci/overlay-recovery/environment.json
             artifacts-ci/overlay-recovery/restore-fault.json
+            artifacts-ci/overlay-recovery/negative-parent.json
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png
           retention-days: 3
