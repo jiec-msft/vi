@@ -1,0 +1,14 @@
+[
+  {"id":"h01","kind":"positive","input":"用 make dir.","expected":"用 mkdir."},
+  {"id":"h02","kind":"positive","input":"用 ｍａｋｅ ｄｉｒ 创建路径。","expected":"用 mkdir 创建路径。"},
+  {"id":"h03","kind":"positive","input":"运行 M K D I R 创建路径。","expected":"运行 mkdir 创建路径。"},
+  {"id":"h04","kind":"negative","input":"解释「make dir」的英文含义。","expected":"解释「make dir」的英文含义。"},
+  {"id":"h05","kind":"negative","input":"不要把make dir替换成命令。","expected":"不要把make dir替换成命令。"},
+  {"id":"h06","kind":"negative","input":"The phrase make dir has two words.","expected":"The phrase make dir has two words."},
+  {"id":"h07","kind":"positive","input":"用 make dear 创建路径。","expected":"用 mkdir 创建路径。"},
+  {"id":"h08","kind":"positive","input":"Please run cube control get pods","expected":"Please run kubectl get pods"},
+  {"id":"h09","kind":"positive","input":"运行make dir -p ./example","expected":"运行mkdir -p ./example"},
+  {"id":"h10","kind":"negative","input":"mkdir 已经正确。","expected":"mkdir 已经正确。"},
+  {"id":"h11","kind":"negative","input":"I need a cube control for the toy.","expected":"I need a cube control for the toy."},
+  {"id":"h12","kind":"positive","input":"make directory","expected":"mkdir"}
+]

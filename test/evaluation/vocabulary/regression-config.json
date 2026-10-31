@@ -1,0 +1,12 @@
+{
+  "scope": "developer",
+  "rules": [
+    { "alias": "make directory", "target": "mkdir", "context": true },
+    { "alias": "make dir", "target": "mkdir" },
+    { "alias": "cube control", "target": "kubectl", "context": true },
+    { "alias": "kube control", "target": "kubectl", "context": true },
+    { "alias": "get hub", "target": "GitHub", "context": true },
+    { "alias": "n p m", "target": "npm" },
+    { "alias": "node js", "target": "Node.js" }
+  ]
+}

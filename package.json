@@ -6,7 +6,8 @@
   "license": "MIT",
   "main": "src/main.cjs",
   "scripts": {
-    "test": "node --test test/*.test.cjs",
+    "start": "electron app/main.cjs",
+    "test": "node scripts/unit.cjs",
     "smoke": "node scripts/ci.cjs smoke",
     "test:ui": "node scripts/ci.cjs ui"
   },

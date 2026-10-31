@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VI</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header><span class="badge">MVP PREVIEW <span id="version"></span></span><h1>VI</h1>
+      <p>Speak here. Type there.</p></header>
+    <section>
+      <h2>1. Enable cloud dictation</h2>
+      <p>Your microphone starts locally while provider connects in the background. Audio is temporarily buffered
+        in memory, then sent to your selected speech provider. Audio is not saved by this application.
+        Service access depends on the selected provider and its configuration.
+        Service access is preview-only and may be restricted.</p>
+      <label class="consent"><input type="checkbox" id="consent"> I agree to send recorded audio to provider.</label>
+    </section>
+    <section>
+      <h2>Dictation preferences</h2>
+      <label for="input-device">Input device</label>
+      <div class="row"><select id="input-device"><option value="">System default</option></select>
+        <button id="refresh-devices" title="Refresh microphone list">Refresh</button></div>
+      <p id="device-result">Choose the microphone used on this computer. Test Mic enables device names.</p>
+      <label>Microphone privacy</label>
+      <button id="microphone-privacy">Open Preferences</button>
+      <p id="microphone-help"></p>
+      <label>Microphone test</label>
+      <button id="test-mic">Test Mic</button>
+      <meter id="mic-level" min="0" max="1" value="0" aria-label="Microphone test level"></meter>
+      <p id="mic-test-result" role="status">Test this input for up to 10 seconds. No cloud connection; no audio is saved.</p>
+      <label for="trigger-mode">Shortcut behavior</label>
+      <select id="trigger-mode">
+        <option value="toggle">Toggle (default): press to start, press again to stop</option>
+        <option value="push-to-talk">Push to talk: hold to record, release to finish</option>
+      </select>
+      <p>Speech appears in preview while recording. Stop to paste the final result once at the current caret
+        in the original window. The floating window stays ready for the next recording.
+        No live replacement or automatic undo is performed.</p>
+      <label class="consent"><input type="checkbox" id="auto-copy"> Automatically copy the final transcript to the clipboard</label>
+      <p>Off by default. When enabled, successful recordings replace your clipboard with the final text,
+        including Record preview and recordings where automatic paste was skipped or failed. Partial results,
+        failed transcriptions and recordings cancelled before copying are not copied.
+        A clipboard write already requested from the OS cannot be cancelled or reverted.
+        This option is separate from automatic paste.</p>
+      <label class="consent"><input type="checkbox" id="sounds"> Play start, stop and cancel sounds</label>
+      <label class="consent"><input type="checkbox" id="open-at-login"> Start in the tray when I sign in</label>
+      <p id="startup-state"></p>
+      <label for="record-shortcut">Shortcut</label>
+      <input id="record-shortcut" type="text" spellcheck="false" autocomplete="off">
+      <p>Type an accelerator such as Ctrl+Shift+Space, then check for conflicts and save.</p>
+      <label for="cancel-binding">Cancel shortcut</label>
+      <input id="cancel-binding" type="text" spellcheck="false" autocomplete="off">
+      <div class="row"><button id="check-shortcuts">Check for conflicts</button>
+        <button id="save-preferences">Save preferences</button></div>
+      <p id="preferences-result" role="status"></p>
+    </section>
+    <section>
+      <h2>Service provider</h2>
+      <p id="provider-state"></p>
+      <label for="provider-endpoint">Endpoint override (optional)</label>
+      <input id="provider-endpoint" type="url" autocomplete="off" spellcheck="false">
+      <p>Leave empty to use the provider's defaults. Only configure a service you trust.</p>
+      <button id="save-provider">Save provider options</button>
+      <p id="provider-result" role="status"></p>
+    </section>
+    <section>
+      <h2>Plugins</h2>
+      <p>Enable or disable plugins here. Each plugin manages its configuration in its own folder.
+        Local plugins are trusted code, not sandboxed; text filtering does not prevent audio upload.</p>
+      <fieldset id="plugin-fields">
+        <div id="plugin-list"></div>
+      </fieldset>
+      <p id="plugin-result" role="status"></p>
+    </section>
+<section>
+      <h2>2. Dictate into a text field</h2>
+      <p>Focus the target field, press <kbd id="shortcut">Ctrl+Shift+Space</kbd>, speak, then press again.
+        Cancel with <kbd id="cancel-shortcut">Ctrl+Shift+Backspace</kbd>.
+        In push-to-talk mode, hold the shortcut and release to finish instead.
+        Short speech segments finalize internally while recording continues; nothing is pasted until you stop.</p>
+      <p>You may type or move the caret during recording. Stop pastes at the current caret or replaces the
+        current selection, just like ordinary Paste. Our review window returns to the background before pasting;
+        switching to another external window skips paste without stealing focus.
+        A paste request cannot prove the target accepted it: review the field before manually pasting again.
+        The app cannot detect every password box.
+        Do not use terminals, password fields, or sensitive forms.
+        Automatic paste temporarily uses the clipboard and restores its previous supported formats;
+        a newer user copy is not overwritten. Auto-copy intentionally keeps the final transcript in the clipboard.
+        If you stop before provider is connected, the recorded audio is sent when the connection is ready.</p>
+      <div class="row"><button id="toggle" class="primary">Record preview</button>
+        <button id="cancel">Cancel</button><button id="copy">Copy result</button></div>
+      <p id="status" role="status"></p>
+      <p id="input-state"></p>
+      <canvas id="waveform" width="500" height="32" aria-label="Live microphone waveform"></canvas>
+      <textarea id="result" readonly aria-label="Transcript" placeholder="Live transcript appears here. Preview never auto-pastes."></textarea>
+      <div class="row"><button id="show-original" disabled>Compare original</button>
+        <button id="copy-original" disabled>Copy unprocessed original...</button></div>
+      <textarea id="original-result" readonly hidden aria-label="Original transcript"></textarea>
+    </section>
+    <footer>This window supports the taskbar and Alt+Tab while open.
+      Minimizing or closing hides it in the system tray; reopen it from the tray menu.
+      Diagnostics contain only timing, byte counts and state changes, never tokens, audio or transcripts.
+      macOS requires Microphone and Accessibility permissions. OS security settings and elevated applications
+      can block automatic paste.</footer>
+  </main>
+  <script src="audio-feedback.js"></script>
+  <script src="plugins-ui.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

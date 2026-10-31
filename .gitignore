@@ -1,3 +1,4 @@
 node_modules/
 artifacts-ci/
 .tmp/
+native/macos-delivery

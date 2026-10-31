@@ -1,0 +1,9 @@
+{
+  "id": "local.technical-vocabulary",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "entry": "index.cjs",
+  "hooks": ["final.transform"],
+  "privacy": { "suppressUnprocessed": false },
+  "description": "Conservative spoken aliases for technical vocabulary. Configure rules before enabling."
+}
