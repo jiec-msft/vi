@@ -35,3 +35,15 @@ npm run test:ui
 ```
 
 Smoke/UI commands open native windows and are intended for isolated CI desktops.
+
+## Service provider boundary
+
+Service providers are loaded through a versioned `service-provider` manifest.
+The host requires `open`, `audio`, `finish`, `close` and event subscriptions.
+CI downloads a checksum-pinned public provider artifact and supplies only a
+loopback endpoint and a synthetic credential source. It exercises the client's
+actual protocol implementation without a live external service or account.
+
+Providers are trusted local code, not a security sandbox. Other providers can
+implement the same interface. Artifact availability is independent of app
+source and no application installer is produced by this CI.
