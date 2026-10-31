@@ -1,0 +1,115 @@
+name: PR evidence
+on:
+  pull_request:
+    paths:
+      - .github/scripts/evidence*
+      - .github/workflows/evidence.yml
+      - .github/workflows/ci.yml
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open PR number (exact current head is required)
+        required: true
+      run_id:
+        description: Successful Platform checks run for this PR head
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: evidence-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    name: Evidence publisher tests
+    runs-on: windows-2025
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require trusted dispatch ref
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          TRUSTED_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          if ($env:DISPATCH_REF -ne $env:TRUSTED_REF) {
+            throw 'BLOCKED: dispatch this publisher from the default branch only.'
+          }
+      - name: Test publishing guards
+        run: python -m unittest discover -s .github/scripts -p evidence_test.py -v
+  prepare:
+    name: Prepare trusted evidence
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: windows-2025
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare media tools
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+            $env:Path += ";C:\ProgramData\chocolatey\bin"
+          }
+          (Get-Command ffmpeg -ErrorAction Stop).Source
+          (Get-Command ffprobe -ErrorAction Stop).Source
+      - name: Validate and convert without write permissions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VI_EVIDENCE_PR: ${{ inputs.pr_number }}
+          VI_EVIDENCE_RUN: ${{ inputs.run_id }}
+        run: python .github/scripts/evidence.py prepare
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trusted-pr-evidence
+          path: evidence-public/*
+          retention-days: 3
+          if-no-files-found: error
+  publish:
+    name: Publish trusted evidence
+    if: github.event_name == 'workflow_dispatch'
+    needs: prepare
+    runs-on: windows-2025
+    timeout-minutes: 3
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: trusted-pr-evidence
+          path: evidence-public
+      - name: Revalidate head and publish media only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VI_EVIDENCE_PR: ${{ inputs.pr_number }}
+          VI_EVIDENCE_RUN: ${{ inputs.run_id }}
+        run: python .github/scripts/evidence.py publish

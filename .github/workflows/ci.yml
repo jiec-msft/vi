@@ -4,11 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: checks-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'merge_group' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   checks:
     name: ${{ matrix.check }} (${{ matrix.platform.os }}, ${{ matrix.platform.arch }})
@@ -70,3 +73,43 @@ jobs:
             artifacts-ci/**/desktop.png
           retention-days: 3
           if-no-files-found: warn
+  evidence-preview:
+    name: PR evidence preview
+    if: github.event_name == 'pull_request'
+    needs: checks
+    runs-on: windows-2025
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare media tools
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+            $env:Path += ";C:\ProgramData\chocolatey\bin"
+          }
+          (Get-Command ffmpeg -ErrorAction Stop).Source
+          (Get-Command ffprobe -ErrorAction Stop).Source
+      - name: Validate source and prepare public previews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VI_EVIDENCE_PR: ${{ github.event.pull_request.number }}
+          VI_EVIDENCE_RUN: ${{ github.run_id }}
+        run: python .github/scripts/evidence.py prepare
+      - name: Save publishable evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-evidence-preview
+          path: evidence-public/*
+          retention-days: 3
+          if-no-files-found: error
