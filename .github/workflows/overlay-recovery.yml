@@ -10,6 +10,7 @@ on:
       - test/framework/native-types.test.cjs
       - test/framework/fixtures/overlay-mouse.*
       - scripts/overlay-recovery-*.cjs
+      - scripts/overlay-ci-console.ps1
       - .github/workflows/overlay-recovery.yml
 permissions:
   contents: read
@@ -33,6 +34,11 @@ jobs:
       VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
     steps:
       - uses: actions/checkout@v4
+      - name: Select isolated runner Console Host and diagnose Terminal actors
+        id: console-host
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console.ps1 prepare
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -49,6 +55,10 @@ jobs:
         run: .\scripts\prepare-desktop.ps1
       - name: Assert physical drag and bounded helper recovery
         run: node scripts/overlay-recovery-ci.cjs
+      - name: Restore isolated runner terminal choice
+        if: always() && runner.os == 'Windows' && steps.console-host.outputs.state_saved == 'true'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console.ps1 restore
       - name: Save native overlay evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,6 +66,7 @@ jobs:
           name: overlay-recovery-${{ matrix.platform.os }}
           path: |
             artifacts-ci/overlay-recovery/report.json
+            artifacts-ci/overlay-recovery/environment.json
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png
           retention-days: 3

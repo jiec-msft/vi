@@ -1,0 +1,207 @@
+param([ValidateSet('prepare', 'restore')][string] $Mode = 'prepare')
+$ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
+    $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or !$env:GITHUB_WORKSPACE -or
+    $env:GITHUB_RUN_ID -notmatch '^\d+$' -or $env:GITHUB_RUN_ATTEMPT -notmatch '^\d+$') {
+    throw 'Console preparation is restricted to an isolated GitHub-hosted Windows runner.'
+}
+$directory = Join-Path $env:GITHUB_WORKSPACE 'artifacts-ci\overlay-recovery'
+$file = Join-Path $directory 'environment.json'
+$registryPath = 'Console\%%Startup'
+$names = @('DelegationConsole', 'DelegationTerminal')
+$consoleHost = '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}'
+$support = 'https://support.microsoft.com/en-us/windows/apps/command-prompt-and-windows-powershell'
+New-Item -ItemType Directory -Path $directory -Force | Out-Null
+
+function Save-Report { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8 }
+function Read-Selection {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($registryPath)
+    try {
+        $values = @{}
+        foreach ($name in $names) {
+            $exists = $key -and $key.GetValueNames() -contains $name
+            $value = if ($exists) { $key.GetValue($name) } else { $null }
+            $kind = if ($exists) { $key.GetValueKind($name).ToString() } else { $null }
+            $parsed = [guid]::Empty
+            if ($exists -and ($kind -ne 'String' -or ![guid]::TryParse($value, [ref] $parsed))) {
+                throw 'Unexpected default-terminal value type or non-GUID content.'
+            }
+            $values[$name] = @{ exists = [bool] $exists; value = $value; kind = $kind }
+        }
+        return @{ keyExisted = [bool] $key; values = $values }
+    } finally { if ($key) { $key.Dispose() } }
+}
+function Process-Snapshot {
+    $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate)
+    if ($all.Count -gt 1024) { throw 'Process diagnostic inventory exceeded its bound.' }
+    $byId = @{}
+    foreach ($item in $all) { $byId[[int] $item.ProcessId] = $item }
+    $roots = @($all | Where-Object { $_.Name -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe',
+        'wslhost.exe', 'OpenConsole.exe', 'conhost.exe') -or $_.ProcessId -eq $PID })
+    $chains = foreach ($root in $roots) {
+        $chain = @()
+        $next = [int] $root.ProcessId
+        for ($depth = 0; $depth -lt 8 -and $next -gt 0; $depth++) {
+            if (!$byId.ContainsKey($next)) { $chain += @{ pid = $next; missing = $true }; break }
+            $item = $byId[$next]
+            if ($item.Name -notmatch '^[\w.-]+\.exe$' -and
+                $item.Name -notin @('System', 'Registry', 'System Idle Process')) {
+                throw 'Unexpected executable identity in diagnostic chain.'
+            }
+            $chain += @{ pid = [int] $item.ProcessId; parentPid = [int] $item.ParentProcessId; exe = $item.Name;
+                createdAt = if ($item.CreationDate) { $item.CreationDate.ToUniversalTime().ToString('o') } else { $null };
+                creationUnavailable = !$item.CreationDate }
+            if ($item.ParentProcessId -eq $next) { break }
+            $next = [int] $item.ParentProcessId
+        }
+        @{ rootPid = [int] $root.ProcessId; exe = $root.Name; chain = $chain }
+    }
+    return @{ at = [DateTime]::UtcNow.ToString('o'); chains = @($chains) }
+}
+
+if ($Mode -eq 'restore') {
+    $report = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
+    if ($report.runId -ne $env:GITHUB_RUN_ID -or $report.attempt -ne $env:GITHUB_RUN_ATTEMPT -or
+        $report.selectedGuid -ne $consoleHost -or !$report.stateSaved) {
+        throw 'Terminal snapshot does not belong to this run and supported selection.'
+    }
+    $report.beforeRestore = Process-Snapshot
+    $current = Read-Selection
+    foreach ($name in $names) {
+        $value = $current.values[$name].value
+        if ($value -ne $consoleHost -and $value -ne $report.original.values[$name].value) {
+            throw 'Terminal choice changed outside this preparation; refusing to overwrite it.'
+        }
+    }
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath)
+    try {
+        foreach ($name in $names) {
+            $original = $report.original.values[$name]
+            if ($original.exists) { $key.SetValue($name, $original.value, [Microsoft.Win32.RegistryValueKind]::String) }
+            else { $key.DeleteValue($name, $false) }
+        }
+        $empty = $key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0
+    } finally { $key.Dispose() }
+    if (!$report.original.keyExisted -and $empty) {
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKey($registryPath, $false)
+    }
+    $report.restored = Read-Selection
+    foreach ($name in $names) {
+        if ($report.restored.values[$name].exists -ne $report.original.values[$name].exists -or
+            $report.restored.values[$name].value -ne $report.original.values[$name].value) {
+            throw 'Original terminal choice was not restored exactly.'
+        }
+    }
+    $report.restoredAt = [DateTime]::UtcNow.ToString('o')
+    $report.restoreVerified = $true
+    $report.newTerminalActorsAtRestore = @($report.beforeRestore.chains | Where-Object {
+        $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and
+        $_.rootPid -notin @($report.before.chains | ForEach-Object { $_.rootPid })
+    })
+    Save-Report
+    if ($report.newTerminalActorsAtRestore.Count) {
+        throw 'New Terminal/WSL actors appeared while Console Host was selected; original choice has been restored.'
+    }
+    Write-Output 'Original HKCU terminal choice restored and verified.'
+    exit 0
+}
+
+if (Test-Path -LiteralPath $file) { throw 'Refusing to overwrite an existing terminal-choice snapshot.' }
+$report = @{ runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; scope = 'current isolated runner HKCU only';
+    support = $support; selectedGuid = $consoleHost; selectedHost = 'Windows Console Host';
+    startedAt = [DateTime]::UtcNow.ToString('o'); original = (Read-Selection); before = (Process-Snapshot);
+    stateSaved = $true; status = 'preparing'; restoreVerified = $false }
+Save-Report
+if (!$env:GITHUB_OUTPUT) { throw 'Workflow output channel unavailable; terminal choice was not changed.' }
+Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'state_saved=true'
+$probe = $null
+try {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath)
+    try {
+        foreach ($name in $names) { $key.SetValue($name, $consoleHost, [Microsoft.Win32.RegistryValueKind]::String) }
+    } finally { $key.Dispose() }
+    $report.applied = Read-Selection
+    foreach ($name in $names) {
+        if ($report.applied.values[$name].value -ne $consoleHost) { throw 'Supported Console Host choice was not applied.' }
+    }
+    $report.appliedAt = [DateTime]::UtcNow.ToString('o')
+    Save-Report
+    $existingWsl = @($report.before.chains | Where-Object { $_.exe -eq 'wsl.exe' } | ForEach-Object { $_.rootPid })
+    $deadline = [DateTime]::UtcNow.AddSeconds(65)
+    do {
+        $remaining = @($existingWsl | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if (!$remaining.Count) { break }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($remaining.Count) { throw 'Pre-existing unowned WSL clients did not exit; no UI or broad process cleanup is permitted.' }
+    $report.preExistingWslQuietAt = [DateTime]::UtcNow.ToString('o')
+    $probeFile = Join-Path $directory 'console-probe.json'
+    $probeScript = @'
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public static class OwnedConsoleProbe {
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+    public static string Read() {
+        uint owner;
+        IntPtr window = GetConsoleWindow();
+        GetWindowThreadProcessId(window, out owner);
+        if (window == IntPtr.Zero || owner == 0) throw new InvalidOperationException("No owned console host.");
+        string host = Process.GetProcessById((int)owner).ProcessName;
+        return "{\"clientPid\":" + Process.GetCurrentProcess().Id + ",\"consolePid\":" + owner +
+            ",\"consoleHost\":\"" + host + "\"}";
+    }
+}
+"@
+'@
+    $probeScript += "`n[OwnedConsoleProbe]::Read() | Set-Content -LiteralPath '$($probeFile.Replace("'", "''"))' -Encoding utf8`nStart-Sleep -Seconds 2"
+    $probe = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+        -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand',
+            [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))) -WindowStyle Hidden -PassThru
+    $report.probeProcess = @{ pid = $probe.Id; role = 'owned-console-probe'; startedAt = [DateTime]::UtcNow.ToString('o') }
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    while (!(Test-Path -LiteralPath $probeFile) -and !$probe.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (!(Test-Path -LiteralPath $probeFile)) { throw 'Owned console host probe did not produce a readiness receipt.' }
+    $report.probe = Get-Content -Raw -LiteralPath $probeFile | ConvertFrom-Json -AsHashtable
+    if ($report.probe.clientPid -ne $probe.Id -or $report.probe.consoleHost -ne 'conhost') {
+        throw 'New owned console was not hosted by Windows Console Host.'
+    }
+    if (!$probe.WaitForExit(5000) -or $probe.ExitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
+    $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
+    $deadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $consoleProcess = Get-Process -Id $report.probe.consolePid -ErrorAction SilentlyContinue
+        if (!$consoleProcess) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($consoleProcess) { throw 'Owned probe console host did not exit after its client.' }
+    $report.probeProcess.consoleObservedAbsentAt = [DateTime]::UtcNow.ToString('o')
+    $report.afterProbe = Process-Snapshot
+    $originalActors = @($report.before.chains | ForEach-Object { $_.rootPid })
+    $newDelegated = @($report.afterProbe.chains | Where-Object {
+        $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and $_.rootPid -notin $originalActors
+    })
+    if ($newDelegated.Count) { throw 'Unexpected new Terminal/WSL actor appeared despite Console Host selection.' }
+    $report.status = 'prepared'
+    $report.preparedAt = [DateTime]::UtcNow.ToString('o')
+    Save-Report
+    Write-Output 'Supported HKCU Console Host selection and owned new-console host verified; no WSL update or broad cleanup.'
+} catch {
+    $report.status = 'failed'
+    $report.error = $_.Exception.Message
+    Save-Report
+    throw
+} finally {
+    if ($probe) {
+        if (!$probe.HasExited) {
+            Stop-Process -Id $probe.Id -Force
+            if (!$probe.WaitForExit(2000)) { throw 'Owned console probe could not be reaped.' }
+        }
+        $probe.Dispose()
+    }
+}
