@@ -3,7 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 
-async function recordDesktop(directory) {
+async function recordDesktop(directory, verifyFrame = () => {}) {
   const recorder = new BrowserWindow({ show: false, webPreferences: {
     preload: path.resolve('src', 'recorder-preload.cjs'), sandbox: true,
     contextIsolation: true, backgroundThrottling: false,
@@ -24,7 +24,11 @@ async function recordDesktop(directory) {
     return sources[0].thumbnail.toPNG();
   };
   await recorder.loadFile(path.resolve('src', 'recorder.html'));
-  const capture = async () => recorder.webContents.send('frame', await screenshot());
+  const capture = async () => {
+    const png = await screenshot();
+    recorder.webContents.send('frame', png);
+    verifyFrame(png);
+  };
   await capture();
   const timer = setInterval(() => {
     if (!inFlight) inFlight = capture().catch((error) => { captureError = error; })

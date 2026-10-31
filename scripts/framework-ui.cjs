@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, systemPreferences } = require('electron');
+const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, desktopCapturer } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -33,6 +33,14 @@ async function until(action, label, limit = 20000) {
 }
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
 const status = () => evaluate('window.voice.status()');
+function visibleMarker(png) {
+  const pixels = nativeImage.createFromBuffer(png).toBitmap();
+  let matched = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i] === 255 && pixels[i + 1] === 0 && pixels[i + 2] === 255 && pixels[i + 3] === 255) matched++;
+  }
+  return matched >= 100;
+}
 async function click(selector) {
   const point = await evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
@@ -90,7 +98,22 @@ async function run() {
     if (current.phase === 'error') throw new Error(current.message);
     return current.shortcutReady && mainWindow.isVisible();
   }, 'native startup', 35000);
-  stopVideo = await recordDesktop(directory);
+  await evaluate(`(() => {
+    const marker = document.createElement('div');
+    marker.style.cssText = 'position:fixed;right:4px;top:4px;width:40px;height:40px;background:#ff00ff;z-index:2147483647;pointer-events:none';
+    document.body.append(marker);
+  })()`);
+  mainWindow.setAlwaysOnTop(true);
+  mainWindow.show();
+  mainWindow.moveTop();
+  await until(async () => {
+    const sources = await desktopCapturer.getSources({ types: ['screen'],
+      thumbnailSize: { width: 1280, height: 720 } });
+    return sources[0] && visibleMarker(sources[0].thumbnail.toPNG());
+  }, 'application visible on desktop');
+  stopVideo = await recordDesktop(directory, (png) =>
+    assert.ok(visibleMarker(png), 'Application was obscured in desktop video.'));
+  report.checks.push('application-visible-in-desktop-video');
   report.checks.push('full-framework-startup');
   assert.equal(await evaluate("document.getElementById('toggle').disabled"), true);
   await click('#consent');
