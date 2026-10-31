@@ -45,6 +45,12 @@ jobs:
       - name: Startup smoke
         if: matrix.check == 'smoke'
         run: npm run smoke
+      - name: Build native framework helper
+        if: matrix.check == 'smoke'
+        run: node scripts/build-native.cjs
+      - name: Full framework startup
+        if: matrix.check == 'smoke'
+        run: node scripts/framework-smoke.cjs
       - name: UI
         if: matrix.check == 'ui'
         run: npm run test:ui

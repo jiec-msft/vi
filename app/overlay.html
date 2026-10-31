@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <title>Dictation status</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+  <div class="pill">
+    <div id="drag-handle" class="drag" title="Hold the left mouse button here to move. Release to save the position.">
+      <span class="dot"></span><div class="feedback"><span id="message">Connecting</span>
+        <canvas id="wave" width="104" height="20" aria-label="Microphone waveform"></canvas></div>
+    </div>
+    <button id="stop" title="Stop and finish dictation" aria-label="Stop">&#9632;</button>
+    <button id="cancel" title="Cancel dictation" aria-label="Cancel">&#215;</button>
+  </div>
+  <script src="audio-feedback.js"></script>
+  <script src="overlay-drag.js"></script>
+  <script src="overlay.js"></script>
+</body>
+</html>

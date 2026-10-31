@@ -47,3 +47,19 @@ actual protocol implementation without a live external service or account.
 Providers are trusted local code, not a security sandbox. Other providers can
 implement the same interface. Artifact availability is independent of app
 source and no application installer is produced by this CI.
+
+## Application framework
+
+`npm start` opens the generic application: microphone preferences, configurable
+shortcuts, Toggle/Push-to-talk, floating status, text plugins and final-only
+delivery. Real transcription requires a compatible installed provider; the
+framework does not select a live service by itself.
+
+Provider defaults belong to the installed plugin's `config.json`. The application
+only displays a user-supplied endpoint override, stored locally. Changing it
+requires confirming trust because the provider may send credentials and speech.
+
+Startup CI also launches this full framework independently, without choosing a
+service, and verifies readiness and clean shutdown. Runtime feature tests are
+expanded incrementally; the minimal capability probe is not a claim that all
+application features are already covered on every platform.

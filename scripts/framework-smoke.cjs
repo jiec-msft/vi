@@ -1,0 +1,64 @@
+const { spawn } = require('node:child_process');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const WebSocket = require('ws');
+const net = require('node:net');
+
+async function main() {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  await new Promise((resolve) => server.close(resolve));
+  const directory = path.resolve('artifacts-ci', 'framework-smoke');
+  await fs.mkdir(directory, { recursive: true });
+  const profile = path.join(directory, 'profile');
+  await fs.mkdir(profile, { recursive: true });
+  await fs.writeFile(path.join(profile, 'settings.json'), JSON.stringify({ consent: false, openAtLogin: false,
+    shortcut: 'CommandOrControl+Shift+F9', cancelShortcut: 'CommandOrControl+Shift+F10' }));
+  const child = spawn(require('electron'), [path.resolve('app', 'main.cjs'), '--ci-mode=smoke', '--background',
+    `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
+  { stdio: 'inherit' });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const timeout = setTimeout(() => child.kill(), 60000);
+  let socket;
+  try {
+    const deadline = Date.now() + 20000;
+    let page;
+    while (!page && Date.now() < deadline) {
+      try {
+        page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((item) => item.title === 'VI');
+      } catch {}
+      if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!page) throw new Error('Framework renderer did not start.');
+    socket = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+    let id = 0;
+    const pending = new Map();
+    socket.on('message', (bytes) => {
+      const message = JSON.parse(bytes.toString()), job = pending.get(message.id);
+      if (!job) return;
+      pending.delete(message.id);
+      if (message.error || message.result.exceptionDetails) job.reject(new Error('Framework evaluation failed.'));
+      else job.resolve(message.result.result.value);
+    });
+    const evaluate = (expression) => new Promise((resolve, reject) => {
+      const current = ++id;
+      pending.set(current, { resolve, reject });
+      socket.send(JSON.stringify({ id: current, method: 'Runtime.evaluate',
+        params: { expression, returnByValue: true, awaitPromise: true } }));
+    });
+    const status = await evaluate('window.voice.status()');
+    if (status.phase !== 'idle' || !status.shortcutReady) throw new Error('Framework did not reach idle/shortcut readiness.');
+    const options = await evaluate('window.voice.providerOptions()');
+    if (options.available) throw new Error('Startup-only fixture should not silently select a service.');
+    await evaluate('window.voice.ciQuit()');
+    await exited;
+    if (child.exitCode !== 0) throw new Error('Framework did not exit cleanly.');
+    await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify({
+      status: 'passed', platform: process.platform, arch: process.arch,
+      providerSelected: false, checks: ['full-framework-startup', 'idle', 'shortcuts', 'normal-exit'],
+    }, null, 2));
+  } finally { clearTimeout(timeout); socket?.close(); if (child.exitCode === null) child.kill(); }
+}
+main().catch((error) => { console.error(error.message); process.exitCode = 1; });

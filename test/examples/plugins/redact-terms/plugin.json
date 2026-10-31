@@ -1,0 +1,9 @@
+{
+  "id": "example.redact-terms",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "entry": "index.cjs",
+  "hooks": ["final.transform", "output.guard"],
+  "privacy": { "suppressUnprocessed": true },
+  "description": "Literal term filtering example, not DLP or pre-upload audio redaction."
+}

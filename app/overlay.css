@@ -1,0 +1,13 @@
+* { box-sizing: border-box; }
+body { margin: 0; padding: 3px; color: #e5e7eb; background: transparent; font: 11px system-ui, sans-serif; overflow: hidden; user-select: none; }
+.pill { height: 48px; display: flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid #475569; border-radius: 24px; background: #111827f2; }
+.drag { -webkit-app-region: no-drag; touch-action: none; cursor: grab; display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; height: 34px; }
+.drag.dragging { cursor: grabbing; }
+.feedback { display: flex; flex-direction: column; min-width: 0; }
+#message { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 108px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: #f87171; flex-shrink: 0; }
+.dot.inactive { background: #94a3b8; }
+.dot.error { background: #fbbf24; }
+button { -webkit-app-region: no-drag; width: 25px; height: 28px; padding: 0; color: #e2e8f0; border: 0; border-radius: 14px; background: #334155; font: 16px system-ui; cursor: pointer; }
+button:disabled { opacity: .35; cursor: default; }
+#wave { width: 104px; height: 20px; }
