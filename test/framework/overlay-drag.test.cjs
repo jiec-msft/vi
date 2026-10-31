@@ -92,3 +92,20 @@ test('readiness switching cancels DOM capture without starting a native gesture'
   assert.deepEqual(f.actions, ['start', 'cancel']);
   assert.deepEqual(f.failures, []);
 });
+
+test('readiness cancellation clears an uncaptured hover before fallback sees a held mouse', () => {
+  let enabled = true;
+  const f = handleFixture(() => enabled);
+  f.send('pointermove', { buttons: 0 });
+  enabled = false;
+  f.binding.cancel();
+  enabled = true;
+  f.binding.cancel();
+  f.send('pointermove');
+  assert.deepEqual(f.actions, []);
+  assert.equal(f.frames.size, 0);
+  f.send('pointermove', { buttons: 0 });
+  f.send('pointerdown');
+  f.send('pointerup', { buttons: 0 });
+  assert.deepEqual(f.actions, ['start', 'end']);
+});
