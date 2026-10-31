@@ -36,6 +36,7 @@ report.pointerStates = [];
 report.controlActions = [];
 report.osInputs = [];
 let mainWindow, overlay, service, stopVideo, held = false;
+let ownedDownReceipt;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
 report.windowEvents = [];
@@ -60,10 +61,15 @@ const status = async () => {
 async function mouse(mode, point) {
   const location = process.platform === 'win32' ? screen.dipToScreenPoint(point) : point;
   let result;
-  if (mode === 'down') held = true;
+  if (process.platform === 'darwin' && mode === 'down') held = true;
   const recordInput = (stdout) => {
     const input = JSON.parse(stdout.trim());
     report.osInputs.push({ at: Date.now(), stage, mode, ...input });
+    if (input.ownedDownInjected && input.ownerVerified && input.leftHeldAfter) {
+      held = true;
+      ownedDownReceipt = input;
+    }
+    if (mode === 'up' && input.leftHeldAfter === false) { held = false; ownedDownReceipt = undefined; }
     return input;
   };
   try {
@@ -95,7 +101,8 @@ async function mouse(mode, point) {
     assert.equal(input.overlayNoActivateAfter, true);
   }
   report.osForegroundScope = 'native foreground HWND/application unchanged before and after each OS mouse action';
-  if (mode === 'up') held = false;
+  if (process.platform === 'darwin' && mode === 'down') held = true;
+  if (process.platform === 'darwin' && mode === 'up') held = false;
   const focused = BrowserWindow.getFocusedWindow();
   if (focused !== mainWindow) {
     report.focusFailure = { at: Date.now(), stage, mode, nativeForegroundUnchanged: input.foregroundUnchanged,
@@ -383,7 +390,30 @@ run().catch((error) => {
   };
   try {
     if (held && overlay && !overlay.isDestroyed()) {
-      await mouse('up', screen.getCursorScreenPoint());
+      if (process.platform === 'win32') {
+        if (!ownedDownReceipt) throw new Error('Owned down receipt missing; mouse cleanup authority cannot be verified.');
+        let result;
+        try {
+          result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
+            '-Window', ownedDownReceipt.ownedWindow, '-Owner', String(process.pid), '-Mode', 'up',
+            '-CleanupOwnedDown', '-OwnedDownReceipt', JSON.stringify(ownedDownReceipt)], { timeout: 15000, windowsHide: true });
+        } catch (error) {
+          if (error.stdout?.trim()) report.cleanupRelease = JSON.parse(error.stdout.trim());
+          report.cleanupBlocked = { reason: error.message, remainingHeld: report.cleanupRelease?.leftHeldAfter ?? 'unknown' };
+          throw error;
+        }
+        report.cleanupRelease = JSON.parse(result.stdout.trim());
+        assert.equal(report.cleanupRelease.cleanupUpOnly, true);
+        assert.equal(report.cleanupRelease.leftHeldAfter, false);
+        held = false;
+        ownedDownReceipt = undefined;
+      } else {
+        await mouse('up', screen.getCursorScreenPoint());
+      }
+    } else if (held) {
+      report.cleanupBlocked = { reason: 'original owned window no longer live', remainingHeld: true };
+      throw new Error('Owned mouse cleanup could not validate the destroyed original window.');
     }
   } catch (error) { cleanupFailure('mouse-release', error); }
   try { if (stopVideo) Object.assign(report, await stopVideo()); }

@@ -10,6 +10,7 @@ on:
       - test/framework/native-types.test.cjs
       - test/framework/fixtures/overlay-mouse.*
       - scripts/overlay-recovery-*.cjs
+      - scripts/overlay-release-*.cjs
       - scripts/overlay-ci-console*.ps1
       - scripts/overlay-ci-child.ps1
       - scripts/overlay-ci-attribution*.ps1
@@ -74,6 +75,9 @@ jobs:
         run: .\scripts\overlay-ci-quiet.ps1
       - name: Assert physical drag and bounded helper recovery
         run: node scripts/overlay-recovery-ci.cjs
+      - name: Verify rejected normal input still releases an owned press only in cleanup
+        if: runner.os == 'Windows'
+        run: node scripts/overlay-release-ci.cjs
       - name: Restore isolated runner terminal choice
         if: always() && runner.os == 'Windows' && steps.console-host.outputs.state_saved == 'true'
         shell: pwsh
@@ -85,6 +89,7 @@ jobs:
           name: overlay-recovery-${{ matrix.platform.os }}
           path: |
             artifacts-ci/overlay-recovery/report.json
+            artifacts-ci/overlay-recovery/release-negative.json
             artifacts-ci/overlay-recovery/environment.json
             artifacts-ci/overlay-recovery/attribution-tests.json
             artifacts-ci/overlay-recovery/quiet.json

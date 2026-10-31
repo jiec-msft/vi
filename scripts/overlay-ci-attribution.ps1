@@ -34,9 +34,14 @@ function Get-ActorAttribution($actor, $records, $seeds, $events, $controlStarted
             @($samePid | Where-Object { $_.parentPid -ne $current.parentPid -or $_.exe -ne $current.exe }).Count) {
             return @{ attribution = 'unknown'; reason = 'conflicting-generation-or-observations'; actor = $actor; path = $path }
         }
-        if ($birthEvents.Count -eq 1 -and ($null -eq $birthEvents[0].session -or
-            $birthEvents[0].session -ne $current.session -or $birthEvents[0].parentPid -ne $current.parentPid)) {
-            return @{ attribution = 'unknown'; reason = 'event-CIM-conflict'; actor = $actor; path = $path }
+        if ($birthEvents.Count -eq 1) {
+            $eventTime = [DateTime]::MinValue
+            if ($null -eq $birthEvents[0].session -or $birthEvents[0].session -ne $current.session -or
+                $birthEvents[0].parentPid -ne $current.parentPid -or $birthEvents[0].exe -ne $current.exe -or
+                !$birthEvents[0].observedAt -or ![DateTime]::TryParse($birthEvents[0].observedAt, [ref] $eventTime) -or
+                $eventTime.ToUniversalTime() -lt ([DateTime] $current.createdAt).ToUniversalTime()) {
+                return @{ attribution = 'unknown'; reason = 'event-CIM-conflict'; actor = $actor; path = $path }
+            }
         }
         $path += $current
         $owned = @($seeds | Where-Object { (Identity-Key $_) -eq $key })

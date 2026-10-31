@@ -14,6 +14,11 @@ $daemon = Record 90 0 $old 0 $true
 $expired = @{} + $seed + @{ exitedAt = '2026-01-01T00:00:15Z' }
 $unobserved = @{} + $seed
 $unobserved.observedAt = '2026-01-01T00:00:15Z'
+$wrongEvent = @{} + $owned
+$wrongEvent.exe = 'pwsh.exe'
+$earlyEvent = @{} + $owned
+$earlyEvent.observedAt = '2026-01-01T00:00:15Z'
+$endedAfterChild = @{} + $seed + @{ exitedAt = '2026-01-01T00:00:25Z' }
 $tests = @(
     @{ name = 'owned-same-name-session-zero'; actor = $owned; records = @($seed, $owned); seeds = @($seed); expected = 'owned' },
     @{ name = 'unowned-pre-existing-parent-same-name'; actor = $external; records = @($external, $daemon); seeds = @($seed); expected = 'unowned' },
@@ -31,7 +36,13 @@ $tests = @(
     @{ name = 'event-only-parent-does-not-supply-birth'; actor = (Record 4 2 $later 0); records = @($seed, (Record 4 2 $later 0));
         seeds = @($seed); events = @((Record 2 1 $null 0)); expected = 'unknown' },
     @{ name = 'repeated-consistent-CIM-not-independent-proof'; actor = $owned; records = @($seed, $seed, $owned);
-        seeds = @($seed); expected = 'owned' }
+        seeds = @($seed); expected = 'owned' },
+    @{ name = 'event-exe-conflict'; actor = $owned; records = @($seed, $owned);
+        seeds = @($seed); events = @($wrongEvent); expected = 'unknown' },
+    @{ name = 'event-before-CIM-birth'; actor = $owned; records = @($seed, $owned);
+        seeds = @($seed); events = @($earlyEvent); expected = 'unknown' },
+    @{ name = 'late-event-after-parent-exit-is-not-creation-time'; actor = $owned; records = @($endedAfterChild, $owned);
+        seeds = @($endedAfterChild); events = @($owned); expected = 'owned' }
 )
 $results = foreach ($test in $tests) {
     $result = Get-ActorAttribution $test.actor $test.records $test.seeds @($test.events) $start
