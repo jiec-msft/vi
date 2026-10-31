@@ -1,0 +1,19 @@
+{
+  "name": "vi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voice Input",
+  "license": "MIT",
+  "main": "src/main.cjs",
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "smoke": "node scripts/ci.cjs smoke",
+    "test:ui": "node scripts/ci.cjs ui"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "electron": "45.1.0"
+  }
+}

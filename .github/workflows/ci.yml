@@ -1,0 +1,57 @@
+name: Platform checks
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: ${{ matrix.check }} (${{ matrix.platform.os }}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: ${{ matrix.check == 'ui' && 10 || 3 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [unit, smoke, ui]
+        platform:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+          - { os: macos-15, arch: arm64 }
+    env:
+      VI_EXPECTED_ARCH: ${{ matrix.platform.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install unit dependencies
+        if: matrix.check == 'unit'
+        run: npm ci --omit=dev --no-audit --no-fund
+      - name: Install app dependencies
+        if: matrix.check != 'unit'
+        run: npm ci --no-audit --no-fund
+      - name: Unit
+        if: matrix.check == 'unit'
+        run: npm test
+      - name: Startup smoke
+        if: matrix.check == 'smoke'
+        run: npm run smoke
+      - name: UI
+        if: matrix.check == 'ui'
+        run: npm run test:ui
+      - name: Save test evidence
+        if: always() && matrix.check != 'unit'
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ matrix.platform.os }}-${{ matrix.check }}
+          path: |
+            artifacts-ci/**/report.json
+            artifacts-ci/**/desktop.webm
+            artifacts-ci/**/desktop.png
+          retention-days: 3
+          if-no-files-found: warn
