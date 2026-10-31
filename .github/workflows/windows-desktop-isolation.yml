@@ -101,3 +101,70 @@ jobs:
             artifacts-ci/owned-desktop/**/desktop.webm
           retention-days: 3
           if-no-files-found: error
+  preview:
+    name: Independent owned desktop previews
+    needs: probe
+    if: needs.probe.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: owned-desktop-windows-*
+          path: probe-input
+      - name: Prepare desktop-specific public media
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+            $env:Path += ';C:\ProgramData\chocolatey\bin'
+          }
+          (Get-Command ffmpeg -ErrorAction Stop).Source
+          (Get-Command ffprobe -ErrorAction Stop).Source
+          New-Item -ItemType Directory -Path 'probe-public' | Out-Null
+          foreach ($platform in @(
+            @{ Name = 'owned-desktop-windows-2025-x64'; Arch = 'x64' },
+            @{ Name = 'owned-desktop-windows-11-arm-arm64'; Arch = 'arm64' }
+          )) {
+            foreach ($case in @('normal', 'failure', 'timeout')) {
+              $source = Join-Path $PWD "probe-input\$($platform.Name)\$case"
+              $receipt = Get-Content -LiteralPath (Join-Path $source 'report.json') -Raw | ConvertFrom-Json
+              $fixture = Get-Content -LiteralPath (Join-Path $source 'fixture-report.json') -Raw | ConvertFrom-Json
+              if ($receipt.runId -cne $env:GITHUB_RUN_ID -or $receipt.attempt -cne $env:GITHUB_RUN_ATTEMPT -or
+                  $receipt.headSha -cne $env:VI_PROBE_HEAD -or $receipt.arch -cne $platform.Arch -or
+                  -not $receipt.originalRestored -or -not $receipt.ownedDesktopRemoved -or
+                  -not $fixture.trustedOsClick -or $fixture.frameCount -lt 3 -or
+                  $fixture.videoScope -cne 'desktop' -or $fixture.videoBytes -le 0) {
+                throw 'Independent desktop evidence receipt mismatch.'
+              }
+              $stem = "$($platform.Arch)-$case"
+              $video = Join-Path $source 'desktop.webm'
+              & ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json $video
+              if ($LASTEXITCODE -ne 0) { throw 'Independent desktop video could not be decoded.' }
+              & ffmpeg -hide_banner -loglevel error -i $video -t 5 -filter_complex `
+                'fps=6,scale=640:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse' `
+                -y "probe-public\$stem.gif"
+              if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath "probe-public\$stem.gif").Length -eq 0) {
+                throw 'Independent desktop GIF conversion failed.'
+              }
+              Copy-Item -LiteralPath $video -Destination "probe-public\$stem.webm"
+              Copy-Item -LiteralPath (Join-Path $source 'desktop.png') -Destination "probe-public\$stem.png"
+              Copy-Item -LiteralPath (Join-Path $source 'report.json') -Destination "probe-public\$stem-report.json"
+              Copy-Item -LiteralPath (Join-Path $source 'fixture-report.json') -Destination "probe-public\$stem-fixture.json"
+              Copy-Item -LiteralPath (Join-Path $source 'input-after.json') -Destination "probe-public\$stem-input.json"
+            }
+          }
+      - name: Save independent publishable probe media
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-desktop-public-preview
+          path: probe-public/*
+          retention-days: 3
+          if-no-files-found: error

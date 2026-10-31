@@ -387,9 +387,13 @@ public static class ViCiDesktop
             CleanupJob(defaultJob, errors, report, "defaultJobCleanup");
             bool processHandlesClosed = true;
             foreach (var process in new[] { child, background }) {
-                if (process.process != IntPtr.Zero && !CloseHandle(process.process)) {
-                    processHandlesClosed = false;
-                    errors.Add("Close owned process handle failed: " + Marshal.GetLastWin32Error());
+                if (process.process != IntPtr.Zero) {
+                    if (WaitForSingleObject(process.process, 5000) != 0)
+                        errors.Add("Owned process did not signal exit after job cleanup.");
+                    if (!CloseHandle(process.process)) {
+                        processHandlesClosed = false;
+                        errors.Add("Close owned process handle failed: " + Marshal.GetLastWin32Error());
+                    }
                 }
             }
             report["processHandlesClosed"] = processHandlesClosed;
@@ -405,13 +409,26 @@ public static class ViCiDesktop
             }
             report["desktopHandlesClosed"] = handlesClosed;
             if (owned != IntPtr.Zero && handlesClosed) {
-                IntPtr remaining = OpenDesktopW(ownedName, 0, false, ReadSwitch);
-                int lastError = Marshal.GetLastWin32Error();
-                if (remaining != IntPtr.Zero) {
-                    errors.Add("Owned desktop still exists after cleanup.");
-                    if (!CloseDesktop(remaining)) errors.Add("Close remaining desktop readback failed.");
-                } else if (lastError != 2) errors.Add("Owned desktop disappearance readback failed: " + lastError);
-                else report["ownedDesktopRemoved"] = true;
+                // USER window teardown can outlast job accounting and process exit.
+                var removalClock = Stopwatch.StartNew();
+                bool removed = false;
+                do {
+                    IntPtr remaining = OpenDesktopW(ownedName, 0, false, ReadSwitch);
+                    int lastError = Marshal.GetLastWin32Error();
+                    if (remaining == IntPtr.Zero) {
+                        if (lastError == 2) removed = true;
+                        else errors.Add("Owned desktop disappearance readback failed: " + lastError);
+                        break;
+                    }
+                    if (!CloseDesktop(remaining)) {
+                        errors.Add("Close remaining desktop readback failed.");
+                        break;
+                    }
+                    Thread.Sleep(100);
+                } while (removalClock.Elapsed.TotalSeconds < 5);
+                report["ownedDesktopRemovalSeconds"] = removalClock.Elapsed.TotalSeconds;
+                report["ownedDesktopRemoved"] = removed;
+                if (!removed) errors.Add("Owned desktop still exists after bounded cleanup readback.");
             }
             report["originalRestored"] = restored;
             report["elapsedSeconds"] = clock.Elapsed.TotalSeconds;
