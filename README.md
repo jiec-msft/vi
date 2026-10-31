@@ -60,6 +60,10 @@ only displays a user-supplied endpoint override, stored locally. Changing it
 requires confirming trust because the provider may send credentials and speech.
 
 Startup CI also launches this full framework independently, without choosing a
-service, and verifies readiness and clean shutdown. Runtime feature tests are
-expanded incrementally; the minimal capability probe is not a claim that all
-application features are already covered on every platform.
+service, and verifies readiness and clean shutdown. UI CI additionally exercises
+its real renderer and main process: consent, local microphone meter without
+network traffic, recording/finalization, cancel, clipboard copying, preference
+persistence, text-plugin processing and original comparison. Both UI suites
+record the desktop. The framework suite uses synthetic microphone permission;
+TCC/hardware permissions, physical shortcut/PTT dispatch, dragging and
+cross-application accessibility remain separate acceptance gates.

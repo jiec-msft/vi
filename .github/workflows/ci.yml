@@ -2,11 +2,12 @@ name: Platform checks
 on:
   workflow_dispatch:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
 concurrency:
-  group: checks-${{ github.ref }}
+  group: checks-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   checks:
@@ -46,7 +47,7 @@ jobs:
         if: matrix.check == 'smoke'
         run: npm run smoke
       - name: Build native framework helper
-        if: matrix.check == 'smoke'
+        if: matrix.check != 'unit'
         run: node scripts/build-native.cjs
       - name: Full framework startup
         if: matrix.check == 'smoke'

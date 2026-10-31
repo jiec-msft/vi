@@ -9,7 +9,7 @@
     "start": "electron app/main.cjs",
     "test": "node scripts/unit.cjs",
     "smoke": "node scripts/ci.cjs smoke",
-    "test:ui": "node scripts/ci.cjs ui"
+    "test:ui": "node scripts/ci.cjs ui && node scripts/ci.cjs framework-ui"
   },
   "dependencies": {
     "ws": "8.22.0"
