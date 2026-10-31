@@ -19,6 +19,49 @@ function assertSelfThread(receipt, desktop) {
   assertCoverage(receipt, 'self-execution-thread-not-all-process-threads');
   assert.ok(finiteTime(receipt.queryStartedAt) <= finiteTime(receipt.queryCompletedAt));
 }
+function ticks(value) {
+  assert.match(value, /^[1-9][0-9]*$/, 'A native readiness diagnostic lacks its monotonic sample.');
+  return BigInt(value);
+}
+function assertReadyDiagnostics(helper, receipt, emissions) {
+  assert.equal(receipt.generation, helper.generation);
+  assert.equal(receipt.monotonicClock, 'native-process-Stopwatch');
+  assert.ok(ticks(receipt.monotonicFrequency) > 0n);
+  assert.ok(ticks(receipt.queryStartedTicks) <= ticks(receipt.queryCompletedTicks));
+  if (helper.role !== 'overlay-pointer') return;
+  const readyEvents = helper.events.filter(({ type }) => type === 'ready');
+  const matched = emissions.filter((value) => value.pid === helper.pid && value.role === helper.role);
+  assert.equal(matched.length, readyEvents.length, 'Each exact pointer READY needs its own native write diagnostic.');
+  let previousReceiveOrder = 0, previousReceiveTicks = 0n, previousWriteTicks = 0n;
+  for (const [index, event] of readyEvents.entries()) {
+    const sequence = index + 1;
+    assert.equal(event.readySequence, sequence);
+    assert.equal(event.message, '{"type":"ready"}');
+    assert.equal(event.monotonicClock, 'Node-process-hrtime-not-native-stopwatch');
+    assert.ok(Number.isInteger(event.receiveOrder) && event.receiveOrder > previousReceiveOrder);
+    assert.ok(ticks(event.receivedTicks) > previousReceiveTicks);
+    previousReceiveOrder = event.receiveOrder;
+    previousReceiveTicks = ticks(event.receivedTicks);
+    const matches = matched.filter((value) => value.readySequence === sequence);
+    assert.equal(matches.length, 1, 'READY sequence must match one immutable native emission.');
+    const emission = matches[0];
+    assert.equal(emission.creationFileTime, receipt.creationFileTime);
+    assert.equal(emission.generation, helper.generation);
+    assert.equal(emission.executionThread, receipt.executionThread);
+    assert.equal(emission.messageBase64, Buffer.from(event.message).toString('base64'));
+    assert.equal(emission.writeApi, 'Console.WriteLine');
+    assert.equal(emission.writeComplete, true);
+    assert.equal(emission.monotonicClock, receipt.monotonicClock);
+    assert.equal(emission.monotonicFrequency, receipt.monotonicFrequency);
+    finiteTime(emission.writeStartedAt);
+    finiteTime(emission.writeCompletedAt);
+    assert.ok(ticks(receipt.queryCompletedTicks) <= ticks(emission.writeStartedTicks) &&
+      previousWriteTicks <= ticks(emission.writeStartedTicks) &&
+      ticks(emission.writeStartedTicks) <= ticks(emission.writeCompletedTicks),
+    `Native query/READY monotonic ordering failed: ${JSON.stringify({ receipt, emission, event })}`);
+    previousWriteTicks = ticks(emission.writeCompletedTicks);
+  }
+}
 function assertDesktopChain(report, desktop) {
   assert.equal(report.windowIds.owner, desktop.ownedPid);
   assert.equal(desktop.initialControllerThreadDesktop, 'Default');
@@ -45,9 +88,13 @@ function assertDesktopChain(report, desktop) {
     assert.equal(observation.membershipApi, 'IsProcessInJob');
     assert.equal(observation.specificJobMember, true);
     assert.equal(observation.liveAtCompletion, true);
+    assert.equal(observation.liveCheckApi, 'WaitForSingleObject');
+    assert.equal(observation.liveCheckWaitState, 258);
+    assert.equal(observation.liveCheckWin32Error, 0);
     assertCoverage(observation, 'specific-job-process-identity-not-thread-desktop');
     assert.ok(finiteTime(observation.processCreatedAt) <= finiteTime(observation.observedAt) &&
-      observation.observedAt <= finiteTime(observation.snapshotCompletedAt));
+      observation.observedAt <= finiteTime(observation.snapshotCompletedAt) &&
+      observation.snapshotCompletedAt <= finiteTime(observation.liveCheckedAt));
     for (const diagnostic of observation.threadObservations || []) {
       if (diagnostic.threadDesktop != null) assert.equal(diagnostic.threadDesktop, desktop.ownedDesktop);
     }
@@ -72,7 +119,7 @@ function assertDesktopChain(report, desktop) {
   assert.equal(context.currentThreadQuery.pid, desktop.controllerPid);
   assert.equal(context.currentThreadQuery.tid, context.callerTid);
   const root = member(desktop.ownedPid, context.rootCreationFileTime);
-  assert.ok(root.snapshotCompletedAt <= finiteTime(desktop.rootWindowSnapshotCompletedAt));
+  assert.ok(root.liveCheckedAt <= finiteTime(desktop.rootWindowSnapshotCompletedAt));
   assert.deepEqual(desktop.rootWindowObservations.map(({ role }) => role), ['mainWindow', 'overlayWindow']);
   for (const window of desktop.rootWindowObservations) {
     assertCoverage(window, 'window-desktop-association');
@@ -128,17 +175,32 @@ function assertDesktopChain(report, desktop) {
     if (next) assert.ok(helper.closedAt <= next.startedAt, 'Helper generations must not overlap.');
     const ready = helper.events.find(({ type }) => type === 'ready');
     assert.ok(ready, 'Required helper never reached readiness.');
-    assert.ok(job.snapshotCompletedAt <= receipt.queryStartedAt &&
-      finiteTime(helper.startedAt) <= receipt.queryCompletedAt && receipt.queryCompletedAt <= finiteTime(ready.at));
-    if (helper.exit) assert.ok(job.snapshotCompletedAt <= helper.exit.at && receipt.queryCompletedAt <= helper.exit.at);
+    assertReadyDiagnostics(helper, receipt, report.nativeReadyReceipts || []);
+    const chronology = JSON.stringify({ pid: helper.pid, role: helper.role, generation: helper.generation,
+      creationFileTime: receipt.creationFileTime, jobCompletedAt: job.snapshotCompletedAt,
+      liveCheckedAt: job.liveCheckedAt, queryStartedAt: receipt.queryStartedAt,
+      queryCompletedAt: receipt.queryCompletedAt, queryCompletedTicks: receipt.queryCompletedTicks,
+      ready, nativeReady: (report.nativeReadyReceipts || []).filter((value) =>
+        value.pid === helper.pid && value.role === helper.role) });
+    assert.ok(job.liveCheckedAt <= receipt.queryStartedAt, `Native self-query predates completed Job/live proof: ${chronology}`);
+    assert.ok(finiteTime(helper.startedAt) <= receipt.queryCompletedAt);
+    assert.ok(receipt.queryCompletedAt <= finiteTime(ready.at), `Native self-query completed after observed readiness: ${chronology}`);
+    if (helper.exit) assert.ok(job.liveCheckedAt <= helper.exit.at && receipt.queryCompletedAt <= helper.exit.at);
   }
   assert.equal(receipts.length, helpers.length, 'Unjoined native receipts cannot stand in for required roles.');
+  assert.equal((report.nativeReadyReceipts || []).length,
+    helpers.filter(({ role }) => role === 'overlay-pointer')
+      .reduce((count, helper) => count + helper.events.filter(({ type }) => type === 'ready').length, 0),
+    'Unjoined READY diagnostics cannot stand in for required generations.');
   for (const receipt of [...report.osInputs, ...(report.cleanupRelease ? [report.cleanupRelease] : [])]) {
     assert.equal(receipt.role, 'os-mouse-driver');
     assertSelfThread(receipt, desktop);
     const job = member(receipt.driverPid, receipt.creationFileTime);
-    assert.ok(job.snapshotCompletedAt <= receipt.queryStartedAt &&
-      receipt.queryCompletedAt <= finiteTime(receipt.processExitObservedAt));
+    assert.ok(job.liveCheckedAt <= receipt.queryStartedAt &&
+      receipt.queryCompletedAt <= finiteTime(receipt.processExitObservedAt),
+    `Driver proof chronology failed: ${JSON.stringify({ pid: receipt.driverPid, creationFileTime: receipt.creationFileTime,
+      jobCompletedAt: job.snapshotCompletedAt, liveCheckedAt: job.liveCheckedAt, queryStartedAt: receipt.queryStartedAt,
+      queryCompletedAt: receipt.queryCompletedAt, processExitObservedAt: receipt.processExitObservedAt })}`);
     assert.ok(job.processCreatedAt <= receipt.queryStartedAt);
     assert.equal(receipt.targetEnumerationApi, 'EnumDesktopWindows');
     assert.equal(receipt.targetEnumeratedOnOwnedDesktop, true);
@@ -157,7 +219,7 @@ function assertDesktopChain(report, desktop) {
     assert.equal(report.initialPointerRestarts, 1);
     const receipt = receipts.find(({ pid }) => pid === failed.pid);
     const job = member(failed.pid, receipt.creationFileTime);
-    assert.ok(job.snapshotCompletedAt < finiteTime(recovery.injectedAt) &&
+    assert.ok(job.liveCheckedAt < finiteTime(recovery.injectedAt) &&
       receipt.queryCompletedAt < recovery.injectedAt, 'Both completed startup proofs must precede the injected exit.');
     assert.ok(recovery.injectedAt <= recovery.failedExitAt &&
       recovery.failedExitAt <= finiteTime(recovery.recoveredReadyAt) &&

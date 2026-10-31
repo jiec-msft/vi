@@ -56,6 +56,7 @@ async function until(action, label, limit = 15000) {
 }
 async function collectNativeDesktopReceipts() {
   report.nativeDesktopReceipts = [];
+  report.nativeReadyReceipts = [];
   for (const helper of report.helpers) {
     const receipt = JSON.parse(await fs.readFile(path.join(directory, `desktop-${helper.role}-${helper.pid}.json`), 'utf8'));
     assert.equal(receipt.pid, helper.pid);
@@ -65,6 +66,13 @@ async function collectNativeDesktopReceipts() {
     assert.equal(receipt.threadDesktop, expectedDesktop);
     assert.equal(receipt.inputDesktop, expectedDesktop);
     report.nativeDesktopReceipts.push(receipt);
+    if (helper.role === 'overlay-pointer') {
+      for (const event of helper.events.filter(({ type }) => type === 'ready')) {
+        const emission = JSON.parse(await fs.readFile(path.join(directory,
+          `desktop-ready-${helper.role}-${helper.pid}-${event.readySequence}.json`), 'utf8'));
+        report.nativeReadyReceipts.push(emission);
+      }
+    }
   }
 }
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
@@ -258,7 +266,7 @@ async function run() {
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
       const quote = (value) => `'${value.replace(/'/g, "''")}'`;
-      const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role}`;
+      const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role} -Generation $env:VI_CI_NATIVE_GENERATION`;
       injected = injected.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'\n${attest('overlay-pointer')}`);
       injected = injected.replace('return !System.IO.File.Exists(', `bool confirmed = false;
         foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()) {
@@ -267,6 +275,23 @@ async function run() {
         }
         if (!confirmed) throw new InvalidOperationException("Native execution attestor unavailable.");
         return !System.IO.File.Exists(`);
+      assert.ok(injected.includes('if (value != null) Console.WriteLine(value);'));
+      injected = injected.replace('    POINT last;', `    POINT last;
+    static void WriteSample(string value) {
+        bool ready = value == "{\\"type\\":\\"ready\\"}";
+        Type attestor = null;
+        if (ready) {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()) {
+                attestor = assembly.GetType("OverlayDesktopAttestor");
+                if (attestor != null) break;
+            }
+            if (attestor == null) throw new InvalidOperationException("Native READY attestor unavailable.");
+            attestor.GetMethod("BeginReadyWrite").Invoke(null, new object[] { value });
+        }
+        Console.WriteLine(value);
+        if (ready) attestor.GetMethod("EndReadyWrite").Invoke(null, new object[] { value });
+    }`)
+        .replace('if (value != null) Console.WriteLine(value);', 'if (value != null) WriteSample(value);');
       const delivery = await fs.readFile(path.resolve('native', 'windows-delivery.ps1'), 'utf8');
       deliveryFile = path.join(directory, 'windows-delivery-ci.ps1');
       await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
@@ -285,20 +310,29 @@ async function run() {
       args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-delivery.ps1'));
     const actual = pointer ? args.map((arg) => arg.endsWith('windows-overlay.ps1') ? helperFile : arg)
       : delivery && deliveryFile ? args.map((arg) => arg.endsWith('windows-delivery.ps1') ? deliveryFile : arg) : args;
-    const child = spawn(file, actual, options);
+    const role = pointer ? 'overlay-pointer' : 'desktop-delivery';
+    const generation = report.helpers.filter((value) => value.role === role).length + 1;
+    const child = spawn(file, actual, expectedDesktop && (pointer || delivery)
+      ? { ...options, env: { ...(options?.env || process.env), VI_CI_NATIVE_GENERATION: String(generation) } } : options);
     if (pointer) {
       helpers.push(child);
       report.helperPids.push(child.pid);
     }
     if (pointer || delivery) {
-      const role = pointer ? 'overlay-pointer' : 'desktop-delivery';
-      const helper = { role, pid: child.pid, generation: report.helpers.filter((value) => value.role === role).length + 1,
+      const helper = { role, pid: child.pid, generation,
         startedAt: Date.now(), stage, events: [], stderrBytes: 0 };
       report.helpers.push(helper);
       const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+      let receiveOrder = 0, readySequence = 0;
       lines.on('line', (line) => {
+        receiveOrder++;
         const type = line.match(/"type":"(ready|cancel|suspended)"/)?.[1];
-        if (type || line.includes('"ready":true')) helper.events.push({ type: type || 'ready', at: Date.now(), stage });
+        if (type || line.includes('"ready":true')) {
+          const eventType = type || 'ready';
+          helper.events.push({ type: eventType, at: Date.now(), stage, message: line, receiveOrder,
+            receivedTicks: process.hrtime.bigint().toString(), monotonicClock: 'Node-process-hrtime-not-native-stopwatch',
+            ...(eventType === 'ready' ? { readySequence: ++readySequence } : {}) });
+        }
         if (line.includes('"ok":false')) helper.events.push({ type: 'request-failed', at: Date.now(), stage });
         if (pointer && type === 'ready' && earlyRecovery) {
           if (helpers.length === 1 && !helper.startupFailureScheduled) {

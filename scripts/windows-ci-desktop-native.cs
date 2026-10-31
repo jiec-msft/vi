@@ -363,6 +363,10 @@ public static class ViCiDesktop
         public string creationFileTime { get; set; }
         public bool specificJobMember { get; set; }
         public bool liveAtCompletion { get; set; }
+        public long liveCheckedAt { get; set; }
+        public string liveCheckApi { get; set; } = "WaitForSingleObject";
+        public uint liveCheckWaitState { get; set; }
+        public int liveCheckWin32Error { get; set; }
         public string coverage { get; set; } = "specific-job-process-identity-not-thread-desktop";
         public string membershipApi { get; set; } = "IsProcessInJob";
         public object firstUnobserved { get; set; }
@@ -417,8 +421,22 @@ public static class ViCiDesktop
                         observation.firstUnobserved = new { pid, api = "Process.Threads",
                             win32Error = error.NativeErrorCode, status = "remote-thread-diagnostic-not-proof" };
                     }
-                    observation.liveAtCompletion = WaitForSingleObject(processHandle, 0) == WaitTimeout;
                     observation.snapshotCompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    observation.liveCheckWaitState = WaitForSingleObject(processHandle, 0);
+                    observation.liveCheckWin32Error = observation.liveCheckWaitState == UInt32.MaxValue
+                        ? Marshal.GetLastWin32Error() : 0;
+                    observation.liveCheckedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    observation.liveAtCompletion = observation.liveCheckWaitState == WaitTimeout;
+                    if (observation.liveCheckWaitState != WaitTimeout && observation.liveCheckWaitState != 0) {
+                        observation.status = "process-live-check-failed-not-proof";
+                        throw new InvalidOperationException("Owned process lifetime API failed: " +
+                            JsonSerializer.Serialize(new { pid, creationFileTime = created.ToString(),
+                                api = observation.liveCheckApi, waitState = observation.liveCheckWaitState,
+                                win32Error = observation.liveCheckWin32Error, observation.snapshotCompletedAt,
+                                observation.liveCheckedAt }));
+                    }
+                    Require(observation.liveCheckedAt >= observation.snapshotCompletedAt,
+                        "Owned process lifetime clock moved backwards after snapshot completion PID " + pid);
                     observation.status = observation.liveAtCompletion
                         ? "verified-specific-job-process-identity" : "exited-before-completed-job-proof";
                     if (observation.liveAtCompletion) {
