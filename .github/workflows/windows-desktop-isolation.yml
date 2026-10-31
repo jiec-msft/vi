@@ -1,0 +1,95 @@
+name: Windows owned desktop probe
+on:
+  pull_request:
+    paths:
+      - scripts/windows-ci-desktop*
+      - .github/workflows/windows-desktop-isolation.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: owned-desktop-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  probe:
+    name: Owned desktop (${{ matrix.os }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+    env:
+      VI_EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install probe dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Pure guard and restore policy
+        shell: pwsh
+        run: |
+          node --test scripts/windows-ci-desktop-probe.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Pure guard tests failed.' }
+          .\scripts\windows-ci-desktop.ps1 -Case policy
+      - name: Real desktop, mouse, capture and normal cleanup
+        id: normal
+        shell: pwsh
+        run: |
+          $env:VI_DESKTOP_PWSH = (Get-Process -Id $PID).Path
+          $electron = Join-Path $PWD 'node_modules\electron\dist\electron.exe'
+          .\scripts\windows-ci-desktop.ps1 -Executable $electron -Output 'artifacts-ci\owned-desktop\normal'
+      - name: Failure and timeout still restore and release ownership
+        if: always() && steps.normal.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          $env:VI_DESKTOP_PWSH = (Get-Process -Id $PID).Path
+          $electron = Join-Path $PWD 'node_modules\electron\dist\electron.exe'
+          $failures = @()
+          foreach ($case in @('failure', 'timeout')) {
+            $directory = Join-Path $PWD "artifacts-ci\owned-desktop\$case"
+            & $env:VI_DESKTOP_PWSH -NoProfile -NonInteractive -File .\scripts\windows-ci-desktop.ps1 `
+              -Executable $electron -Case $case -TimeoutSeconds 30 -Output $directory
+            $code = $LASTEXITCODE
+            $reportPath = Join-Path $directory 'report.json'
+            if ($code -eq 0 -or -not (Test-Path -LiteralPath $reportPath)) {
+              $failures += "$case did not return failure and cleanup receipt"
+              continue
+            }
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            if (-not $report.originalRestored -or -not $report.desktopHandlesClosed -or
+                -not $report.ownedDesktopRemoved -or -not $report.defaultFixtureStayedAlive -or
+                $report.ownedJobCleanup.active -ne 0 -or $report.defaultJobCleanup.active -ne 0) {
+              $failures += "$case cleanup incomplete"
+            }
+            if (($case -eq 'failure' -and $report.childExitCode -ne 37) -or
+                ($case -eq 'timeout' -and ($report.childOutcome -ne 'timeout' -or
+                  -not (Test-Path -LiteralPath (Join-Path $directory 'timeout-ready.json'))))) {
+              $failures += "$case did not reach the intended child outcome"
+            }
+            if ($report.errors.Count -ne 1) { $failures += "$case had unexpected errors" }
+          }
+          if ($failures.Count) { throw ($failures -join '; ') }
+      - name: Save independent desktop probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-desktop-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            artifacts-ci/owned-desktop/**/report.json
+            artifacts-ci/owned-desktop/**/fixture-report.json
+            artifacts-ci/owned-desktop/**/fixture-error.json
+            artifacts-ci/owned-desktop/**/input-*.json
+            artifacts-ci/owned-desktop/**/ready.json
+            artifacts-ci/owned-desktop/**/timeout-ready.json
+            artifacts-ci/owned-desktop/**/desktop.png
+            artifacts-ci/owned-desktop/**/desktop.webm
+          retention-days: 3
+          if-no-files-found: error
