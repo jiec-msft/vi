@@ -285,7 +285,8 @@ public static class ViCiDesktop
         var report = new Dictionary<string, object> {
             ["case"] = testCase, ["runId"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ID"),
             ["attempt"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT"),
-            ["sha"] = Environment.GetEnvironmentVariable("GITHUB_SHA"),
+            ["mergeSha"] = Environment.GetEnvironmentVariable("GITHUB_SHA"),
+            ["headSha"] = Environment.GetEnvironmentVariable("VI_PROBE_HEAD"),
             ["arch"] = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
             ["windowsVersion"] = Environment.OSVersion.Version.ToString(),
             ["desktopFlags"] = 0, ["desktopAccess"] = DesktopAccess,

@@ -23,6 +23,7 @@ jobs:
           - { os: windows-11-arm, arch: arm64 }
     env:
       VI_EXPECTED_ARCH: ${{ matrix.arch }}
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,6 +95,7 @@ jobs:
             artifacts-ci/owned-desktop/**/fixture-error.json
             artifacts-ci/owned-desktop/**/input-*.json
             artifacts-ci/owned-desktop/**/ready.json
+            artifacts-ci/owned-desktop/**/started.json
             artifacts-ci/owned-desktop/**/timeout-ready.json
             artifacts-ci/owned-desktop/**/desktop.png
             artifacts-ci/owned-desktop/**/desktop.webm

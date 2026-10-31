@@ -12,7 +12,7 @@ function hostedGuard(env = process.env, platform = process.platform, arch = proc
 }
 module.exports = { hostedGuard };
 
-if (require.main === module) {
+if (process.versions.electron) {
   hostedGuard();
   run().catch(async (error) => {
     const { app } = require('electron');
@@ -43,6 +43,7 @@ async function run() {
   const role = argument('role'), testCase = argument('case'), desktop = argument('name');
   const directory = path.resolve(argument('output'));
   assert.ok(['default', 'owned'].includes(role) && ['normal', 'failure', 'timeout'].includes(testCase));
+  await fs.writeFile(path.join(directory, 'started.json'), JSON.stringify({ pid: process.pid, role, desktop }));
   app.setPath('userData', path.join(directory, 'profile'));
   app.commandLine.appendSwitch('force-color-profile', 'srgb');
   await app.whenReady();
