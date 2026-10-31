@@ -1,0 +1,172 @@
+name: Windows owned desktop probe
+on:
+  pull_request:
+    paths:
+      - scripts/windows-ci-desktop*
+      - .github/workflows/windows-desktop-isolation.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: owned-desktop-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  probe:
+    name: Owned desktop (${{ matrix.os }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+    env:
+      VI_EXPECTED_ARCH: ${{ matrix.arch }}
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install probe dependencies
+        shell: pwsh
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Probe dependencies failed.' }
+          node -e "console.log(require('electron'))"
+          if ($LASTEXITCODE -ne 0) { throw 'Electron binary preparation failed.' }
+      - name: Pure guard and restore policy
+        shell: pwsh
+        run: |
+          node --test scripts/windows-ci-desktop-probe.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Pure guard tests failed.' }
+          .\scripts\windows-ci-desktop.ps1 -Case policy
+      - name: Real desktop, mouse, capture and normal cleanup
+        id: normal
+        shell: pwsh
+        run: |
+          $env:VI_DESKTOP_PWSH = (Get-Process -Id $PID).Path
+          $electron = Join-Path $PWD 'node_modules\electron\dist\electron.exe'
+          .\scripts\windows-ci-desktop.ps1 -Executable $electron -Output 'artifacts-ci\owned-desktop\normal'
+      - name: Failure and timeout still restore and release ownership
+        if: always() && steps.normal.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          $env:VI_DESKTOP_PWSH = (Get-Process -Id $PID).Path
+          $electron = Join-Path $PWD 'node_modules\electron\dist\electron.exe'
+          $failures = @()
+          foreach ($case in @('failure', 'timeout')) {
+            $directory = Join-Path $PWD "artifacts-ci\owned-desktop\$case"
+            & $env:VI_DESKTOP_PWSH -NoProfile -NonInteractive -File .\scripts\windows-ci-desktop.ps1 `
+              -Executable $electron -Case $case -TimeoutSeconds 30 -Output $directory
+            $code = $LASTEXITCODE
+            $reportPath = Join-Path $directory 'report.json'
+            if ($code -eq 0 -or -not (Test-Path -LiteralPath $reportPath)) {
+              $failures += "$case did not return failure and cleanup receipt"
+              continue
+            }
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            if (-not $report.originalRestored -or -not $report.desktopHandlesClosed -or
+                -not $report.processHandlesClosed -or -not $report.ownedDesktopRemoved -or
+                -not $report.defaultFixtureStayedAlive -or -not $report.defaultFixtureHeartbeatFresh -or
+                $report.ownedJobCleanup.active -ne 0 -or $report.defaultJobCleanup.active -ne 0) {
+              $failures += "$case cleanup incomplete"
+            }
+            if (($case -eq 'failure' -and $report.childExitCode -ne 37) -or
+                ($case -eq 'timeout' -and ($report.childOutcome -ne 'timeout' -or
+                  -not (Test-Path -LiteralPath (Join-Path $directory 'timeout-ready.json'))))) {
+              $failures += "$case did not reach the intended child outcome"
+            }
+            if ($report.errors.Count -ne 1) { $failures += "$case had unexpected errors" }
+          }
+          if ($failures.Count) { throw ($failures -join '; ') }
+          'Both expected nonzero outcomes and all restore/cleanup assertions passed.'
+          exit 0
+      - name: Save independent desktop probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-desktop-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            artifacts-ci/owned-desktop/**/report.json
+            artifacts-ci/owned-desktop/**/fixture-report.json
+            artifacts-ci/owned-desktop/**/fixture-error.json
+            artifacts-ci/owned-desktop/**/input-*.json
+            artifacts-ci/owned-desktop/**/ready.json
+            artifacts-ci/owned-desktop/**/started.json
+            artifacts-ci/owned-desktop/**/timeout-ready.json
+            artifacts-ci/owned-desktop/**/desktop.png
+            artifacts-ci/owned-desktop/**/desktop.webm
+          retention-days: 3
+          if-no-files-found: error
+  preview:
+    name: Independent owned desktop previews
+    needs: probe
+    if: needs.probe.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: owned-desktop-windows-*
+          path: probe-input
+      - name: Prepare desktop-specific public media
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+            $env:Path += ';C:\ProgramData\chocolatey\bin'
+          }
+          (Get-Command ffmpeg -ErrorAction Stop).Source
+          (Get-Command ffprobe -ErrorAction Stop).Source
+          New-Item -ItemType Directory -Path 'probe-public' | Out-Null
+          foreach ($platform in @(
+            @{ Name = 'owned-desktop-windows-2025-x64'; Arch = 'x64' },
+            @{ Name = 'owned-desktop-windows-11-arm-arm64'; Arch = 'arm64' }
+          )) {
+            foreach ($case in @('normal', 'failure', 'timeout')) {
+              $source = Join-Path $PWD "probe-input\$($platform.Name)\$case"
+              $receipt = Get-Content -LiteralPath (Join-Path $source 'report.json') -Raw | ConvertFrom-Json
+              $fixture = Get-Content -LiteralPath (Join-Path $source 'fixture-report.json') -Raw | ConvertFrom-Json
+              if ($receipt.runId -cne $env:GITHUB_RUN_ID -or $receipt.attempt -cne $env:GITHUB_RUN_ATTEMPT -or
+                  $receipt.headSha -cne $env:VI_PROBE_HEAD -or $receipt.arch -cne $platform.Arch -or
+                  -not $receipt.originalRestored -or -not $receipt.ownedDesktopRemoved -or
+                  -not $fixture.trustedOsClick -or $fixture.frameCount -lt 3 -or
+                  $fixture.videoScope -cne 'desktop' -or $fixture.videoBytes -le 0) {
+                throw 'Independent desktop evidence receipt mismatch.'
+              }
+              $stem = "$($platform.Arch)-$case"
+              $video = Join-Path $source 'desktop.webm'
+              & ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json $video
+              if ($LASTEXITCODE -ne 0) { throw 'Independent desktop video could not be decoded.' }
+              & ffmpeg -hide_banner -loglevel error -i $video -t 5 -filter_complex `
+                'fps=6,scale=640:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse' `
+                -y "probe-public\$stem.gif"
+              if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath "probe-public\$stem.gif").Length -eq 0) {
+                throw 'Independent desktop GIF conversion failed.'
+              }
+              Copy-Item -LiteralPath $video -Destination "probe-public\$stem.webm"
+              Copy-Item -LiteralPath (Join-Path $source 'desktop.png') -Destination "probe-public\$stem.png"
+              Copy-Item -LiteralPath (Join-Path $source 'report.json') -Destination "probe-public\$stem-report.json"
+              Copy-Item -LiteralPath (Join-Path $source 'fixture-report.json') -Destination "probe-public\$stem-fixture.json"
+              Copy-Item -LiteralPath (Join-Path $source 'input-after.json') -Destination "probe-public\$stem-input.json"
+            }
+          }
+      - name: Save independent publishable probe media
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-desktop-public-preview
+          path: probe-public/*
+          retention-days: 3
+          if-no-files-found: error
