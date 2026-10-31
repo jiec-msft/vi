@@ -2,7 +2,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { assertDesktopChain } = require('./overlay-ci-desktop.cjs');
+const { assertDesktopChain, assertWrapperOutcome } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Overlay UI checks require an isolated CI runner.');
 const timeoutProbe = process.argv.includes('--desktop-timeout-probe');
@@ -35,6 +35,7 @@ child.once('exit', async (code) => {
   try {
     if (isolated) {
       const desktop = JSON.parse(fs.readFileSync(path.join(metadata, 'report.json')));
+      assertWrapperOutcome(desktop, timeoutProbe ? ['Owned child timed out.'] : []);
       if (!desktop.rootWindowsVerified) throw new Error(`Owned root readiness failed: ${desktop.errors.join('; ')}`);
       report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
       assert.equal(desktop.controllerPid, child.pid);

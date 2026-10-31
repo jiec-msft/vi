@@ -261,6 +261,62 @@ public static class ViCiDesktop
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
     }
+    static Dictionary<string, object> ReadDefaultHeartbeat(ProcessInfo fixture, IntPtr job, IntPtr desktop,
+        string directory, string phase, double? rootElapsedSeconds)
+    {
+        var sample = new Dictionary<string, object> {
+            ["phase"] = phase, ["pid"] = fixture.pid, ["role"] = "default-fixture",
+            ["generation"] = 1, ["coverage"] = "specific-default-job-process-and-heartbeat-not-thread-desktop",
+            ["sampleStartedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ["sampleStartedTicks"] = Stopwatch.GetTimestamp().ToString(),
+            ["monotonicClock"] = "native-wrapper-Stopwatch-not-fixture-Node-clock",
+            ["monotonicFrequency"] = Stopwatch.Frequency.ToString(),
+            ["heartbeatClock"] = "fixture-Node-Date.now",
+            ["rootElapsedSeconds"] = rootElapsedSeconds, ["freshnessLimitMilliseconds"] = 3000
+        };
+        string file = Path.Combine(directory, "default", "heartbeat.json");
+        if (File.Exists(file)) {
+            using (var heartbeat = JsonDocument.Parse(File.ReadAllText(file))) {
+                long at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                long heartbeatAt = heartbeat.RootElement.GetProperty("time").GetInt64();
+                sample["heartbeatPid"] = heartbeat.RootElement.GetProperty("pid").GetUInt32();
+                sample["heartbeatAt"] = heartbeatAt;
+                sample["sampleAt"] = at;
+                sample["ageMilliseconds"] = at - heartbeatAt;
+                sample["heartbeatReadCompletedTicks"] = Stopwatch.GetTimestamp().ToString();
+                sample["fileLastWriteAt"] = new DateTimeOffset(File.GetLastWriteTimeUtc(file)).ToUnixTimeMilliseconds();
+                sample["fileMetadataScope"] = "stat-after-read-may-observe-a-newer-atomic-replacement";
+                sample["heartbeatStatus"] = "read";
+            }
+        } else sample["heartbeatStatus"] = "missing-not-freshness-proof";
+        bool timesRead = GetProcessTimes(fixture.process, out long created, out long exited, out long kernel, out long user);
+        int timesError = timesRead ? 0 : Marshal.GetLastWin32Error();
+        sample["processTimesRead"] = timesRead;
+        sample["processTimesError"] = timesError;
+        sample["creationFileTime"] = timesRead ? created.ToString() : null;
+        sample["processCreatedAt"] = timesRead
+            ? (object)new DateTimeOffset(DateTime.FromFileTimeUtc(created)).ToUnixTimeMilliseconds() : null;
+        bool membershipRead = IsProcessInJob(fixture.process, job, out bool member);
+        int membershipError = membershipRead ? 0 : Marshal.GetLastWin32Error();
+        sample["membershipApi"] = "IsProcessInJob";
+        sample["membershipRead"] = membershipRead;
+        sample["membershipError"] = membershipError;
+        sample["specificDefaultJobMember"] = member;
+        sample["visibleWindowCount"] = VisibleWindows(desktop, fixture.pid);
+        sample["snapshotCompletedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        uint waitState = WaitForSingleObject(fixture.process, 0);
+        int waitError = waitState == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
+        sample["liveCheckApi"] = "WaitForSingleObject";
+        sample["liveCheckWaitState"] = waitState;
+        sample["liveCheckWin32Error"] = waitError;
+        sample["liveCheckedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        sample["sampleCompletedTicks"] = Stopwatch.GetTimestamp().ToString();
+        Require(timesRead && membershipRead && member &&
+            (waitState == 0 || waitState == WaitTimeout) &&
+            (long)sample["liveCheckedAt"] >= (long)sample["snapshotCompletedAt"],
+            "Default fixture identity/lifetime observation failed: " + JsonSerializer.Serialize(sample));
+        return sample;
+    }
     sealed class ThreadDesktopQuery
     {
         public uint pid { get; set; }
@@ -540,6 +596,9 @@ public static class ViCiDesktop
         bool restored = false;
         Stopwatch rootClock = null;
         var descendantDesktops = new Dictionary<string, DesktopObservation>();
+        var defaultHeartbeatSamples = new List<object>();
+        if (entry != "probe") report["defaultHeartbeatSamples"] = defaultHeartbeatSamples;
+        double lastHeartbeatSampleSeconds = -1;
         try {
             Require(Equal(Name(GetProcessWindowStation()), "WinSta0"), "Only WinSta0 is supported.");
             initialThread = GetThreadDesktop(GetCurrentThreadId());
@@ -576,6 +635,8 @@ public static class ViCiDesktop
                 "probe", workingDirectory);
             WaitReady(background, Path.Combine(defaultDirectory, "ready.json"), 20);
             Require(VisibleWindows(original, background.pid) > 0, "Owned default fixture has no visible window.");
+            if (entry != "probe") defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original,
+                directory, "before-owned-root", null));
             ownedJob = NewJob();
             Require(entry == "probe" || !File.Exists(Path.Combine(directory, "ready.json")), "Stale harness readiness receipt refused.");
             rootClock = Stopwatch.StartNew();
@@ -597,6 +658,12 @@ public static class ViCiDesktop
             Require(readyBudget > 0, "Root inclusive wall deadline expired before readiness.");
             Action observe = entry == "probe" ? null : (Action)(() => {
                 Require(Equal(InputName(), ownedName), "Input desktop changed during root readiness.");
+                if (rootClock.Elapsed.TotalSeconds - lastHeartbeatSampleSeconds >= 1) {
+                    Require(defaultHeartbeatSamples.Count < 180, "Default heartbeat diagnostic sample bound exceeded.");
+                    lastHeartbeatSampleSeconds = rootClock.Elapsed.TotalSeconds;
+                    defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original,
+                        directory, "owned-root-running", lastHeartbeatSampleSeconds));
+                }
                 ObserveJobDesktops(ownedJob, ownedName, directory, descendantDesktops);
             });
             WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget, observe);
@@ -614,7 +681,7 @@ public static class ViCiDesktop
             var childClock = entry == "probe" ? Stopwatch.StartNew() : rootClock;
             do {
                 Require(Equal(InputName(), ownedName), "External input desktop changed during probe; refusing.");
-                if (entry != "probe") ObserveJobDesktops(ownedJob, ownedName, directory, descendantDesktops);
+                if (observe != null) observe();
                 state = WaitForSingleObject(child.process, 100);
                 Require(state == 0 || state == WaitTimeout, "Child wait failed.");
             } while (state == WaitTimeout && childClock.Elapsed.TotalSeconds < timeout);
@@ -632,10 +699,23 @@ public static class ViCiDesktop
             Require(WaitForSingleObject(background.process, 0) == WaitTimeout &&
                 VisibleWindows(original, background.pid) > 0, "Owned default fixture did not stay running.");
             report["defaultFixtureStayedAlive"] = true;
-            using (var heartbeat = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "default", "heartbeat.json")))) {
-                Require(heartbeat.RootElement.GetProperty("pid").GetUInt32() == background.pid &&
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - heartbeat.RootElement.GetProperty("time").GetInt64() < 3000,
-                    "Default desktop owned fixture heartbeat is stale.");
+            if (entry == "probe") {
+                using (var heartbeat = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "default", "heartbeat.json")))) {
+                    Require(heartbeat.RootElement.GetProperty("pid").GetUInt32() == background.pid &&
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - heartbeat.RootElement.GetProperty("time").GetInt64() < 3000,
+                        "Default desktop owned fixture heartbeat is stale.");
+                }
+            } else {
+                var finalHeartbeat = ReadDefaultHeartbeat(background, defaultJob, original, directory,
+                    "root-outcome-freshness-check", rootClock.Elapsed.TotalSeconds);
+                report["defaultHeartbeatCheck"] = finalHeartbeat;
+                defaultHeartbeatSamples.Add(finalHeartbeat);
+                Require((string)finalHeartbeat["heartbeatStatus"] == "read" &&
+                    (uint)finalHeartbeat["heartbeatPid"] == background.pid &&
+                    (long)finalHeartbeat["ageMilliseconds"] < 3000 &&
+                    (uint)finalHeartbeat["liveCheckWaitState"] == WaitTimeout &&
+                    (int)finalHeartbeat["visibleWindowCount"] > 0,
+                    "Default desktop owned fixture heartbeat is stale: " + JsonSerializer.Serialize(finalHeartbeat));
             }
             report["defaultFixtureHeartbeatFresh"] = true;
         } catch (Exception error) { errors.Add(error.Message); }
@@ -650,6 +730,9 @@ public static class ViCiDesktop
                     if (decision == "restore") Win32(SwitchDesktop(original), "Restore original input desktop");
                     restored = Equal(InputName(), originalName);
                     Require(restored, "Original input desktop restore readback failed.");
+                    if (entry != "probe" && background.process != IntPtr.Zero)
+                        defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original, directory,
+                            "after-original-restore-before-job-cleanup", rootClock?.Elapsed.TotalSeconds));
                 } catch (Exception error) { errors.Add(error.Message); }
             }
             CleanupJob(ownedJob, errors, report, "ownedJobCleanup");
@@ -659,6 +742,17 @@ public static class ViCiDesktop
                 if (process.process != IntPtr.Zero) {
                     if (WaitForSingleObject(process.process, 5000) != 0)
                         errors.Add("Owned process did not signal exit after job cleanup.");
+                    if (entry != "probe" && process.pid == background.pid) {
+                        bool read = GetProcessTimes(process.process, out long created, out long exited, out long kernel, out long user);
+                        int error = read ? 0 : Marshal.GetLastWin32Error();
+                        report["defaultFixtureExit"] = new { pid = process.pid, processTimesRead = read,
+                            processTimesError = error, creationFileTime = read ? created.ToString() : null,
+                            exitFileTime = read ? exited.ToString() : null,
+                            exitedAt = read && exited > 0
+                                ? (object)new DateTimeOffset(DateTime.FromFileTimeUtc(exited)).ToUnixTimeMilliseconds() : null,
+                            observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+                        if (!read || exited == 0) errors.Add("Default fixture actual exit-time readback failed: " + error);
+                    }
                     if (!CloseHandle(process.process)) {
                         processHandlesClosed = false;
                         errors.Add("Close owned process handle failed: " + Marshal.GetLastWin32Error());

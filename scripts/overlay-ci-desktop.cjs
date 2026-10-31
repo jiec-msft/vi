@@ -62,6 +62,12 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
     previousWriteTicks = ticks(emission.writeCompletedTicks);
   }
 }
+function assertWrapperOutcome(desktop, expectedErrors = []) {
+  assert.ok(Array.isArray(desktop.errors), 'Owned desktop wrapper lacks its raw errors.');
+  assert.deepEqual(desktop.errors, expectedErrors,
+    `Owned desktop wrapper outcome failed: ${JSON.stringify({ childOutcome: desktop.childOutcome,
+      childExitCode: desktop.childExitCode, errors: desktop.errors, defaultHeartbeatCheck: desktop.defaultHeartbeatCheck })}`);
+}
 function assertDesktopChain(report, desktop) {
   assert.equal(report.windowIds.owner, desktop.ownedPid);
   assert.equal(desktop.initialControllerThreadDesktop, 'Default');
@@ -227,4 +233,4 @@ function assertDesktopChain(report, desktop) {
   }
 }
 
-module.exports = { assertDesktopChain };
+module.exports = { assertDesktopChain, assertWrapperOutcome };

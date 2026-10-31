@@ -2,7 +2,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { assertDesktopChain } = require('./overlay-ci-desktop.cjs');
+const { assertDesktopChain, assertWrapperOutcome } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'win32' ||
     process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
@@ -18,8 +18,9 @@ const child = spawn(process.env.VI_DESKTOP_PWSH || 'pwsh', ['-NoProfile', '-NonI
 child.once('error', (error) => { console.error(error.message); process.exitCode = 1; });
 child.once('exit', (code) => {
   try {
-    const report = JSON.parse(fs.readFileSync(path.join(directory, 'release-negative.json')));
     const desktop = JSON.parse(fs.readFileSync(path.join(metadata, 'report.json')));
+    assertWrapperOutcome(desktop, ['Owned child failed with exit code 1.']);
+    const report = JSON.parse(fs.readFileSync(path.join(directory, 'release-negative.json')));
     assert.equal(desktop.controllerPid, child.pid);
     assertDesktopChain(report, desktop);
     assert.equal(code, 1);

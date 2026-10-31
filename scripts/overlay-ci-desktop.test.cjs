@@ -1,6 +1,28 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { assertDesktopChain } = require('./overlay-ci-desktop.cjs');
+const { assertDesktopChain, assertWrapperOutcome } = require('./overlay-ci-desktop.cjs');
+
+test('accepts only the exact expected raw wrapper outcome', () => {
+  for (const errors of [[], ['Owned child timed out.'], ['Owned child failed with exit code 1.']]) {
+    assertWrapperOutcome({ errors }, errors);
+  }
+});
+for (const error of ['Default desktop owned fixture heartbeat is stale.', 'Original restore failed.',
+  'Owned job cleanup failed.', 'Close desktop handle failed.']) {
+  test(`expected timeout cannot absorb ${error}`, () => {
+    assert.throws(() => assertWrapperOutcome({ childOutcome: 'timeout',
+      errors: ['Owned child timed out.', error] }, ['Owned child timed out.']),
+    (failure) => failure.message.includes(error));
+  });
+  test(`expected negative exit cannot absorb ${error}`, () => {
+    assert.throws(() => assertWrapperOutcome({ childOutcome: 'exit', childExitCode: 1,
+      errors: ['Owned child failed with exit code 1.', error] }, ['Owned child failed with exit code 1.']),
+    (failure) => failure.message.includes(error));
+  });
+}
+test('rejects a missing wrapper outcome instead of inventing success', () => {
+  assert.throws(() => assertWrapperOutcome({}), /lacks its raw errors/);
+});
 
 const birth = (pid) => `13300000000000000${pid}`;
 const unknownThread = { pid: 1, tid: 101, api: 'GetThreadDesktop', rawHandle: '0',
