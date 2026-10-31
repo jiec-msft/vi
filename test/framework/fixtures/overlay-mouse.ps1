@@ -1,4 +1,4 @@
-param([long] $Window, [int] $Owner, [string] $Mode, [int] $X, [int] $Y)
+param([long] $Window, [long] $Foreground, [int] $Owner, [string] $Mode, [int] $X, [int] $Y)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') { throw 'OS input is restricted to an isolated CI runner.' }
 Add-Type -TypeDefinition @'
@@ -26,16 +26,21 @@ public static class OverlayCiMouse {
         if (SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT))) != 1)
             throw new InvalidOperationException("OS mouse injection denied.");
     }
-    public static void Run(long handle, int owner, string mode, int x, int y) {
+    public static void Run(long handle, long expected, int owner, string mode, int x, int y) {
         SetThreadDpiAwarenessContext(new IntPtr(-4));
         IntPtr window = new IntPtr(handle);
         uint pid;
         GetWindowThreadProcessId(window, out pid);
         if (!IsWindow(window) || pid != owner) throw new InvalidOperationException("Owned window unavailable.");
+        IntPtr main = new IntPtr(expected);
+        uint mainPid;
+        GetWindowThreadProcessId(main, out mainPid);
+        if (!IsWindow(main) || mainPid != owner) throw new InvalidOperationException("Owned foreground baseline unavailable.");
         IntPtr foreground = GetForegroundWindow();
         uint foregroundPid;
         GetWindowThreadProcessId(foreground, out foregroundPid);
         bool noActivate = (GetWindowLongPtr(window, -20).ToInt64() & 0x08000000L) != 0;
+        if (foreground != main || !noActivate) throw new InvalidOperationException("Owned foreground or no-activate baseline changed before input.");
         if (mode != "up" && !SetCursorPos(x, y)) throw new InvalidOperationException("OS cursor unavailable.");
         Thread.Sleep(100);
         POINT point;
@@ -57,8 +62,9 @@ public static class OverlayCiMouse {
             "\",\"pid\":" + foregroundPid + "},\"foregroundAfter\":{\"window\":\"" + after.ToInt64() +
             "\",\"pid\":" + afterPid + "},\"overlayNoActivate\":" + (noActivate ? "true" : "false") +
             ",\"overlayNoActivateAfter\":" + (noActivateAfter ? "true" : "false") + "}");
-        if (!unchanged) throw new InvalidOperationException("OS foreground window changed during owned overlay input.");
+        if (!unchanged || after != main || !noActivateAfter)
+            throw new InvalidOperationException("Owned foreground or no-activate baseline changed after input.");
     }
 }
 '@
-[OverlayCiMouse]::Run($Window, $Owner, $Mode, $X, $Y)
+[OverlayCiMouse]::Run($Window, $Foreground, $Owner, $Mode, $X, $Y)

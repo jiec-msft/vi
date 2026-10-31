@@ -33,6 +33,18 @@ function Invoke-OverlayChild {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    $start.Environment['VI_OVERLAY_CALLER_PID'] = [string] $PID
+    try {
+        $callerCim = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -OperationTimeoutSec 2 |
+            Select-Object ProcessId, CreationDate, SessionId
+        if (!$callerCim.CreationDate -or $null -eq $callerCim.SessionId) { throw 'Caller CIM birth/session unavailable.' }
+        $start.Environment['VI_OVERLAY_CALLER_CREATED'] = $callerCim.CreationDate.ToUniversalTime().ToString('o')
+        $start.Environment['VI_OVERLAY_CALLER_SESSION'] = [string] $callerCim.SessionId
+    } catch {
+        $start.Environment.Remove('VI_OVERLAY_CALLER_CREATED') | Out-Null
+        $start.Environment.Remove('VI_OVERLAY_CALLER_SESSION') | Out-Null
+        $trace.diagnosticErrors += $_.Exception.Message
+    }
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
     $child = [Diagnostics.Process]::new()
     $child.StartInfo = $start
@@ -45,9 +57,10 @@ function Invoke-OverlayChild {
         $stderr = $child.StandardError.ReadToEndAsync()
         try {
             $identities = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($child.Id) OR ProcessId=$PID" `
-                -OperationTimeoutSec 5 | Select-Object ProcessId, ParentProcessId, Name, CreationDate)
+                -OperationTimeoutSec 5 | Select-Object ProcessId, ParentProcessId, Name, CreationDate, SessionId)
             $trace.identities = @($identities | ForEach-Object {
                 @{ pid = [int] $_.ProcessId; parentPid = [int] $_.ParentProcessId; exe = $_.Name;
+                    session = if ($null -ne $_.SessionId) { [int] $_.SessionId } else { $null };
                     createdAt = $_.CreationDate.ToUniversalTime().ToString('o') }
             })
             $trace.childParentUnknown = !@($identities | Where-Object { $_.ProcessId -eq $child.Id }).Count

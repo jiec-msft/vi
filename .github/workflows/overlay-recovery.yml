@@ -12,6 +12,8 @@ on:
       - scripts/overlay-recovery-*.cjs
       - scripts/overlay-ci-console*.ps1
       - scripts/overlay-ci-child.ps1
+      - scripts/overlay-ci-attribution*.ps1
+      - scripts/overlay-ci-quiet.ps1
       - .github/workflows/overlay-recovery.yml
 permissions:
   contents: read
@@ -35,6 +37,10 @@ jobs:
       VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
     steps:
       - uses: actions/checkout@v4
+      - name: Verify owned actor generation and unknown attribution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-attribution-test.ps1
       - name: Verify parent failures and diagnostic I/O cannot bypass rollback
         if: runner.os == 'Windows'
         shell: pwsh
@@ -62,6 +68,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: .\scripts\prepare-desktop.ps1
+      - name: Wait once for observed interference trees before GUI input
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-quiet.ps1
       - name: Assert physical drag and bounded helper recovery
         run: node scripts/overlay-recovery-ci.cjs
       - name: Restore isolated runner terminal choice
@@ -76,6 +86,8 @@ jobs:
           path: |
             artifacts-ci/overlay-recovery/report.json
             artifacts-ci/overlay-recovery/environment.json
+            artifacts-ci/overlay-recovery/attribution-tests.json
+            artifacts-ci/overlay-recovery/quiet.json
             artifacts-ci/overlay-recovery/restore-fault.json
             artifacts-ci/overlay-recovery/restore-*-fault.json
             artifacts-ci/overlay-recovery/parent-*.json

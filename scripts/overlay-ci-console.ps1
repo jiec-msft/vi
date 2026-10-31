@@ -13,6 +13,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:GITHUB_RUN_ID -notmatch '^\d+$' -or $env:GITHUB_RUN_ATTEMPT -notmatch '^\d+$') {
     throw 'Console preparation is restricted to an isolated GitHub-hosted Windows runner.'
 }
+. (Join-Path $PSScriptRoot 'overlay-ci-attribution.ps1')
 $directory = Join-Path $env:GITHUB_WORKSPACE 'artifacts-ci\overlay-recovery'
 $file = Join-Path $directory $ReportName
 $registryPath = 'Console\%%Startup'
@@ -44,7 +45,7 @@ function Read-Selection {
 }
 function Process-Snapshot {
     if ($Mode -eq 'restore' -and $FailRestoreSnapshot) { throw 'Injected restore Process-Snapshot failure.' }
-    $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate)
+    $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate, SessionId)
     if ($all.Count -gt 1024) { throw 'Process diagnostic inventory exceeded its bound.' }
     $script:lastProcessInventory = $all
     $byId = @{}
@@ -62,6 +63,7 @@ function Process-Snapshot {
             }
             $chain += @{ pid = [int] $item.ProcessId; parentPid = [int] $item.ParentProcessId; exe = $item.Name;
                 createdAt = if ($item.CreationDate) { $item.CreationDate.ToUniversalTime().ToString('o') } else { $null };
+                session = if ($null -ne $item.SessionId) { [int] $item.SessionId } else { $null };
                 creationUnavailable = !$item.CreationDate }
             if ($item.ParentProcessId -eq $next) { break }
             $next = [int] $item.ParentProcessId
@@ -79,7 +81,8 @@ function Read-ProcessStarts($identifier, $baseline) {
             throw 'Unsafe process-start executable metadata.'
         }
         @{ pid = [int] $event.ProcessID; parentPid = [int] $event.ParentProcessID; exe = $event.ProcessName;
-            session = [int] $event.SessionID; createdAt = [DateTime]::FromFileTimeUtc([long] $event.TIME_CREATED).ToString('o') }
+            session = if ($null -ne $event.SessionID) { [int] $event.SessionID } else { $null };
+            observedAt = [DateTime]::FromFileTimeUtc([long] $event.TIME_CREATED).ToString('o') }
     })
     $parentIds = @($starts | ForEach-Object { $_.parentPid } | Select-Object -Unique)
     $existingParents = @($baseline | Where-Object { $_.ProcessId -in $parentIds } | ForEach-Object {
@@ -87,6 +90,7 @@ function Read-ProcessStarts($identifier, $baseline) {
             throw 'Unsafe existing parent executable metadata.'
         }
         @{ pid = [int] $_.ProcessId; parentPid = [int] $_.ParentProcessId; exe = $_.Name;
+            session = if ($null -ne $_.SessionId) { [int] $_.SessionId } else { $null };
             createdAt = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null } }
     })
     return @{ starts = $starts; existingParents = $existingParents; capturedAt = [DateTime]::UtcNow.ToString('o') }
@@ -144,12 +148,8 @@ if ($Mode -eq 'restore') {
         $report.afterRegistryRestore = $null
         $report.restoreDiagnosticError = $_.Exception.Message
     }
-    $report.newTerminalActorsAtRestore = if ($report.afterRegistryRestore) {
-        @($report.afterRegistryRestore.chains | Where-Object {
-            $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and
-            $_.rootPid -notin @($report.before.chains | ForEach-Object { $_.rootPid }) -and
-            (!$_.chain[0].createdAt -or [DateTime] $_.chain[0].createdAt -le [DateTime] $report.restoredAt)
-        })
+    $report.restoreActorAttributions = if ($report.afterRegistryRestore) {
+        @(Get-ReportActorAttributions $report $report.afterRegistryRestore)
     } else { $null }
     $report.status = if ($report.restoreDiagnosticError) { 'restored-with-diagnostic-error' } else { 'restored' }
     $persistError = $null
@@ -160,9 +160,7 @@ if ($Mode -eq 'restore') {
         if ($persistError) { $failures += "report persistence failed: $persistError" }
         throw "Original terminal choice restored; $($failures -join '; ')"
     }
-    if ($report.newTerminalActorsAtRestore.Count) {
-        throw 'New Terminal/WSL actors appeared while Console Host was selected; original choice has been restored.'
-    }
+    Assert-OwnedActorBoundary $report.restoreActorAttributions
     Write-Output 'Original HKCU terminal choice restored and verified.'
     exit 0
 }
@@ -183,6 +181,25 @@ try {
     $report.before = Process-Snapshot
     $baselineInventory = @($script:lastProcessInventory)
     Save-Report
+    $selfChain = @($report.before.chains | Where-Object { $_.rootPid -eq $PID })[0].chain
+    if (!(Identity-Key $selfChain[0])) { throw 'Owned helper CIM birth/session identity missing.' }
+    $selfChain[0].role = 'owned-helper'
+    $report.ownedSeeds = @($selfChain[0])
+    if ($env:VI_OVERLAY_CALLER_PID) {
+        if ($env:VI_OVERLAY_CALLER_PID -notmatch '^[1-9]\d*$' -or !$env:VI_OVERLAY_CALLER_CREATED -or
+            $env:VI_OVERLAY_CALLER_SESSION -notmatch '^\d+$') {
+            throw 'Declared owned caller CIM generation is incomplete.'
+        }
+        $declaredCaller = @{ pid = [int] $env:VI_OVERLAY_CALLER_PID;
+            createdAt = $env:VI_OVERLAY_CALLER_CREATED; session = [int] $env:VI_OVERLAY_CALLER_SESSION }
+        if ($selfChain.Count -lt 2 -or !(Identity-Key $selfChain[1]) -or
+            (Identity-Key $selfChain[1]) -ne (Identity-Key $declaredCaller) -or
+            $selfChain[0].parentPid -ne $declaredCaller.pid) {
+            throw 'Declared owned caller does not match actual CIM parent/birth/session.'
+        }
+        $selfChain[1].role = 'declared-owned-caller'
+        $report.ownedSeeds += $selfChain[1]
+    }
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath)
     try {
         foreach ($name in $names) { $key.SetValue($name, $consoleHost, [Microsoft.Win32.RegistryValueKind]::String) }
@@ -194,15 +211,6 @@ try {
     $report.appliedAt = [DateTime]::UtcNow.ToString('o')
     Save-Report
     if ($FailPrepare) { throw 'Injected prepare failure.' }
-    $existingWsl = @($report.before.chains | Where-Object { $_.exe -eq 'wsl.exe' } | ForEach-Object { $_.rootPid })
-    $deadline = [DateTime]::UtcNow.AddSeconds(65)
-    do {
-        $remaining = @($existingWsl | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-        if (!$remaining.Count) { break }
-        Start-Sleep -Seconds 1
-    } while ([DateTime]::UtcNow -lt $deadline)
-    if ($remaining.Count) { throw 'Pre-existing unowned WSL clients did not exit; no UI or broad process cleanup is permitted.' }
-    $report.preExistingWslQuietAt = [DateTime]::UtcNow.ToString('o')
     $identifier = "overlay-process-starts-$([guid]::NewGuid())"
     Register-CimIndicationEvent -Namespace root\cimv2 -Query 'SELECT * FROM Win32_ProcessStartTrace' `
         -SourceIdentifier $identifier | Out-Null
@@ -250,6 +258,16 @@ public static class OwnedConsoleProbe {
     if ($report.probe.clientPid -ne $probe.Id -or $hosts.Count -ne 1) {
         throw 'Owned client was not correlated with exactly one inbox console host.'
     }
+    $clientIdentity = $hosts[0].chain[1]
+    $hostIdentity = $hosts[0].chain[0]
+    if (!(Identity-Key $clientIdentity) -or !(Identity-Key $hostIdentity) -or
+        $clientIdentity.session -ne $hostIdentity.session -or
+        [DateTime] $hostIdentity.createdAt -lt [DateTime] $clientIdentity.createdAt) {
+        throw 'Owned console host birth/session/parent identity could not be verified.'
+    }
+    $report.ownedSeeds += @($clientIdentity, $hostIdentity)
+    $clientIdentity.role = 'controlled-console-client'
+    $hostIdentity.role = 'controlled-console-host'
     $report.probe.consolePid = $hosts[0].rootPid
     $report.probe.consoleHost = $hosts[0].exe
     $report.probe.hostVerification = 'live Win32_Process host/client parent identity'
@@ -257,6 +275,7 @@ public static class OwnedConsoleProbe {
     $report.probeProcess.createdAt = $hosts[0].chain[1].createdAt
     if (!$probe.WaitForExit(5000) -or $probe.ExitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
     $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
+    $clientIdentity.exitedAt = $report.probeProcess.exitedAt
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     do {
         $consoleProcess = Get-Process -Id $report.probe.consolePid -ErrorAction SilentlyContinue
@@ -265,16 +284,16 @@ public static class OwnedConsoleProbe {
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($consoleProcess) { throw 'Owned probe console host did not exit after its client.' }
     $report.probeProcess.consoleObservedAbsentAt = [DateTime]::UtcNow.ToString('o')
+    $hostIdentity.exitedAt = $report.probeProcess.consoleObservedAbsentAt
     $report.afterProbe = Process-Snapshot
     $report.processStarts = Read-ProcessStarts $watchId $baselineInventory
     if (!@($report.processStarts.starts | Where-Object { $_.pid -eq $probe.Id }).Count) {
         throw 'Owned console probe process-start receipt missing.'
     }
-    $originalActors = @($report.before.chains | ForEach-Object { $_.rootPid })
-    $newDelegated = @(@($report.duringProbe.chains) + @($report.afterProbe.chains) | Where-Object {
-        $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe', 'OpenConsole.exe') -and $_.rootPid -notin $originalActors
-    })
-    if ($newDelegated.Count) { throw 'Unexpected new Terminal/WSL actor appeared despite Console Host selection.' }
+    $report.actorAttributions = @(Get-ReportActorAttributions $report $report.duringProbe) +
+        @(Get-ReportActorAttributions $report $report.afterProbe)
+    $report.completionCriterion = 'owned host/delegation hard gate; unowned or unknown process appearance is diagnostic'
+    Assert-OwnedActorBoundary $report.actorAttributions
     $report.status = 'prepared'
     $report.preparedAt = [DateTime]::UtcNow.ToString('o')
     Save-Report

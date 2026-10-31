@@ -72,7 +72,8 @@ async function mouse(mode, point) {
       const id = handle.readBigUInt64LE().toString();
       result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
-        '-Window', id, '-Owner', String(process.pid), '-Mode', mode, '-X', String(location.x), '-Y', String(location.y)],
+        '-Window', id, '-Foreground', report.windowIds.main, '-Owner', String(process.pid),
+        '-Mode', mode, '-X', String(location.x), '-Y', String(location.y)],
       { timeout: 15000, windowsHide: true });
     } else {
       result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
@@ -85,6 +86,14 @@ async function mouse(mode, point) {
   const input = recordInput(result.stdout);
   assert.equal(input.ownerVerified, true);
   assert.equal(input.foregroundUnchanged, true);
+  if (process.platform === 'win32') {
+    assert.equal(input.foregroundBefore.window, report.windowIds.main);
+    assert.equal(input.foregroundAfter.window, report.windowIds.main);
+    assert.equal(input.foregroundBefore.pid, process.pid);
+    assert.equal(input.foregroundAfter.pid, process.pid);
+    assert.equal(input.overlayNoActivate, true);
+    assert.equal(input.overlayNoActivateAfter, true);
+  }
   report.osForegroundScope = 'native foreground HWND/application unchanged before and after each OS mouse action';
   if (mode === 'up') held = false;
   const focused = BrowserWindow.getFocusedWindow();
