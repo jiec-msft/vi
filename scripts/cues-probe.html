@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Recording cue output probe</title>
+<style>
+  body { background: #101827; color: #e6f0ff; font: 16px system-ui; margin: 0; padding: 28px; overflow: hidden; }
+  h1 { font-size: 24px; margin: 0 0 12px; }
+  p { max-width: 600px; line-height: 1.35; margin: 12px 0; }
+  canvas { width: 600px; height: 96px; background: #182b44; }
+  pre { max-height: 120px; overflow: auto; font-size: 13px; }
+  .error { color: #ffb6b6; }
+  .marker { position: fixed; width: 24px; height: 24px; background: #ff00ff; z-index: 2147483647; pointer-events: none; }
+</style>
+<h1>Recording cue output probe</h1>
+<p>Native Electron, actual WebAudio graph and generated PCM. No microphone, service or account data.</p>
+<p>Graph/PCM evidence is not proof that a physical speaker is audible. Hardware listening remains a manual check.</p>
+<canvas id="waveform" width="600" height="140"></canvas>
+<p id="current">Preparing output probe...</p>
+<p id="preferences-result" role="alert"></p>
+<pre id="results"></pre>
+<div class="marker" style="left:4px;top:4px"></div>
+<div class="marker" style="right:4px;top:4px"></div>
+<div class="marker" style="left:4px;bottom:4px"></div>
+<div class="marker" style="right:4px;bottom:4px"></div>
+<div class="marker" style="left:50%;top:50%"></div>
+<script src="../app/audio-feedback.js"></script>
+<script src="cues-probe.js"></script>
+</html>
