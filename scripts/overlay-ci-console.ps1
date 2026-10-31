@@ -157,26 +157,35 @@ public static class OwnedConsoleProbe {
         GetWindowThreadProcessId(window, out owner);
         if (window == IntPtr.Zero || owner == 0) throw new InvalidOperationException("No owned console host.");
         string host = Process.GetProcessById((int)owner).ProcessName;
-        return "{\"clientPid\":" + Process.GetCurrentProcess().Id + ",\"consolePid\":" + owner +
-            ",\"consoleHost\":\"" + host + "\"}";
+        return "{\"clientPid\":" + Process.GetCurrentProcess().Id + ",\"consoleWindowPid\":" + owner +
+            ",\"consoleWindowProcess\":\"" + host + "\"}";
     }
 }
 "@
 '@
-    $probeScript += "`n[OwnedConsoleProbe]::Read() | Set-Content -LiteralPath '$($probeFile.Replace("'", "''"))' -Encoding utf8`nStart-Sleep -Seconds 2"
+    $probeScript += "`n[OwnedConsoleProbe]::Read() | Set-Content -LiteralPath '$($probeFile.Replace("'", "''"))' -Encoding utf8`nStart-Sleep -Seconds 5"
+    $probeStarted = [DateTime]::UtcNow.ToString('o')
     $probe = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') `
         -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand',
-            [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))) -WindowStyle Hidden -PassThru
-    $report.probeProcess = @{ pid = $probe.Id; role = 'owned-console-probe'; startedAt = [DateTime]::UtcNow.ToString('o') }
+            [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))) -WindowStyle Normal -PassThru
+    $report.probeProcess = @{ pid = $probe.Id; role = 'owned-console-probe'; startedAt = $probeStarted;
+        scope = 'new console before app or OS mouse input' }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     while (!(Test-Path -LiteralPath $probeFile) -and !$probe.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
     }
     if (!(Test-Path -LiteralPath $probeFile)) { throw 'Owned console host probe did not produce a readiness receipt.' }
     $report.probe = Get-Content -Raw -LiteralPath $probeFile | ConvertFrom-Json -AsHashtable
-    if ($report.probe.clientPid -ne $probe.Id -or $report.probe.consoleHost -ne 'conhost') {
-        throw 'New owned console was not hosted by Windows Console Host.'
+    $report.duringProbe = Process-Snapshot
+    $hosts = @($report.duringProbe.chains | Where-Object {
+        $_.exe -eq 'conhost.exe' -and $_.chain[0].parentPid -eq $probe.Id
+    })
+    if ($report.probe.clientPid -ne $probe.Id -or $hosts.Count -ne 1) {
+        throw 'Owned client was not correlated with exactly one inbox console host.'
     }
+    $report.probe.consolePid = $hosts[0].rootPid
+    $report.probe.consoleHost = $hosts[0].exe
+    $report.probe.hostVerification = 'live Win32_Process host/client parent identity'
     if (!$probe.WaitForExit(5000) -or $probe.ExitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
     $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
@@ -189,8 +198,8 @@ public static class OwnedConsoleProbe {
     $report.probeProcess.consoleObservedAbsentAt = [DateTime]::UtcNow.ToString('o')
     $report.afterProbe = Process-Snapshot
     $originalActors = @($report.before.chains | ForEach-Object { $_.rootPid })
-    $newDelegated = @($report.afterProbe.chains | Where-Object {
-        $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and $_.rootPid -notin $originalActors
+    $newDelegated = @(@($report.duringProbe.chains) + @($report.afterProbe.chains) | Where-Object {
+        $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe', 'OpenConsole.exe') -and $_.rootPid -notin $originalActors
     })
     if ($newDelegated.Count) { throw 'Unexpected new Terminal/WSL actor appeared despite Console Host selection.' }
     $report.status = 'prepared'
