@@ -99,8 +99,15 @@ async function run() {
     await until(() => editor.isFocused(), 'owned editor focus');
     await editor.webContents.executeJavaScript("document.getElementById('target').focus()");
     await pause(100);
-    editor.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: [process.platform === 'darwin' ? 'command' : 'control'] });
-    editor.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'V', modifiers: [process.platform === 'darwin' ? 'command' : 'control'] });
+    if (process.platform === 'darwin') {
+      // Exercise the native edit command; synthetic keys do not route Cocoa menu accelerators.
+      editor.webContents.paste();
+      report.pasteDispatch = 'native-editor-command';
+    } else {
+      editor.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: ['control'] });
+      editor.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'V', modifiers: ['control'] });
+      report.pasteDispatch = 'keyboard-event';
+    }
     report.pasteDiagnostics = { clipboardChars: (await clipboard.readText()).length,
       focused: editor.isFocused(), document: await editor.webContents.executeJavaScript("({focused:document.hasFocus(),target:document.activeElement.id})") };
     main.webContents.send('phase', 'Ready');

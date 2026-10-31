@@ -23,6 +23,9 @@ synthetic microphone PCM, OS clipboard delivery to an owned editor, resource
 release, nonactivating window placement and recording. It does not yet prove
 cross-application accessibility, physical dragging, hardware hotplug or system
 permissions outside the test environment.
+macOS clipboard delivery uses the native editor Paste command, not a claim of
+physical Cmd+V injection. The isolated macOS synthetic-input probe disables only
+the audio-service sandbox to read its WAV fixture; renderer sandboxing remains on.
 
 ```text
 npm ci
