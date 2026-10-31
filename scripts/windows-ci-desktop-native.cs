@@ -81,7 +81,7 @@ public static class ViCiDesktop
     static extern bool SwitchDesktop(IntPtr desktop);
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool SetThreadDesktop(IntPtr desktop);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     static extern IntPtr GetThreadDesktop(uint tid);
     [DllImport("user32.dll")]
     static extern IntPtr GetProcessWindowStation();
@@ -273,7 +273,19 @@ public static class ViCiDesktop
             }
         }
     }
-    static void ObserveJobDesktops(IntPtr job, string desktop, Dictionary<uint, object> observations)
+    sealed class DesktopObservation
+    {
+        public uint pid { get; set; }
+        public string executable { get; set; }
+        public string status { get; set; } = "unobserved-not-desktop-proof";
+        public int attempts { get; set; }
+        public long firstJobObservedAt { get; set; }
+        public long observedAt { get; set; }
+        public object firstUnobserved { get; set; }
+        public List<string> threadDesktops { get; set; } = new List<string>();
+        public List<object> threadObservations { get; set; } = new List<object>();
+    }
+    static void ObserveJobDesktops(IntPtr job, string desktop, Dictionary<uint, DesktopObservation> observations)
     {
         const int capacity = 256;
         IntPtr buffer = Marshal.AllocHGlobal(8 + capacity * IntPtr.Size);
@@ -283,21 +295,62 @@ public static class ViCiDesktop
             Require(count >= 0 && count <= capacity, "Owned process inventory exceeded its bound.");
             for (int index = 0; index < count; index++) {
                 uint pid = (uint)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
-                if (observations.ContainsKey(pid)) continue;
+                if (!observations.TryGetValue(pid, out var observation)) {
+                    observation = new DesktopObservation { pid = pid, firstJobObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+                    observations.Add(pid, observation);
+                }
+                if (observation.status == "verified-owned-job-member") continue;
+                observation.attempts++;
+                observation.observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                observation.threadDesktops = new List<string>();
+                observation.threadObservations = new List<object>();
                 Process process = null;
                 try {
                     process = Process.GetProcessById((int)pid);
-                    var names = new List<string>();
+                    observation.executable = process.ProcessName;
+                    bool complete = true;
                     foreach (ProcessThread thread in process.Threads) {
-                        string actual = Name(GetThreadDesktop((uint)thread.Id));
-                        Require(Equal(actual, desktop), "Owned job descendant thread escaped its ordinary desktop.");
-                        if (!names.Contains(actual)) names.Add(actual);
+                        uint tid = (uint)thread.Id;
+                        IntPtr handle = GetThreadDesktop(tid);
+                        int error = Marshal.GetLastWin32Error();
+                        string api = "GetThreadDesktop", actual = null;
+                        if (handle != IntPtr.Zero) {
+                            api = "GetUserObjectInformationW";
+                            var name = new StringBuilder(512);
+                            uint needed;
+                            bool read = GetUserObjectInformationW(handle, 2, name, 1024, out needed);
+                            error = read ? 0 : Marshal.GetLastWin32Error();
+                            if (read) actual = name.ToString();
+                        }
+                        var sample = new { pid, tid, api, rawHandle = handle.ToInt64().ToString(),
+                            win32Error = error, threadDesktop = actual, observedAt = observation.observedAt,
+                            status = actual == null ? "unobserved-not-desktop-proof" : "observed" };
+                        observation.threadObservations.Add(sample);
+                        if (actual == null) {
+                            complete = false;
+                            if (observation.firstUnobserved == null) observation.firstUnobserved = sample;
+                            continue;
+                        }
+                        Require(Equal(actual, desktop), "Owned job descendant thread escaped its ordinary desktop: " +
+                            JsonSerializer.Serialize(sample));
+                        if (!observation.threadDesktops.Contains(actual)) observation.threadDesktops.Add(actual);
                     }
-                    Require(names.Count > 0, "Owned descendant thread desktop was not observable.");
-                    observations[pid] = new { pid, executable = process.ProcessName, threadDesktops = names,
-                        observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), status = "verified-owned-job-member" };
+                    // A failed USER query is not desktop proof; retry the entire snapshot inside the existing wall deadline.
+                    observation.status = complete && observation.threadDesktops.Count > 0
+                        ? "verified-owned-job-member" : "unobserved-not-desktop-proof";
                 } catch (ArgumentException) {
-                    observations[pid] = new { pid, status = "exited-before-observation-not-desktop-proof" };
+                    observation.status = "exited-before-observation-not-desktop-proof";
+                    if (observation.firstUnobserved == null) observation.firstUnobserved = new {
+                        pid, api = "Process.GetProcessById/Threads", observedAt = observation.observedAt,
+                        status = observation.status
+                    };
+                } catch (Win32Exception error) {
+                    observation.status = "process-inventory-error-not-desktop-proof";
+                    var sample = new { pid, api = "Process.ProcessName/Threads", win32Error = error.NativeErrorCode,
+                        observedAt = observation.observedAt, status = observation.status };
+                    if (observation.firstUnobserved == null) observation.firstUnobserved = sample;
+                    if (error.NativeErrorCode != 6 && error.NativeErrorCode != 87 && error.NativeErrorCode != 1168)
+                        throw new InvalidOperationException("Owned process inventory failed: " + JsonSerializer.Serialize(sample), error);
                 } finally { if (process != null) process.Dispose(); }
             }
         } finally { Marshal.FreeHGlobal(buffer); }
@@ -380,7 +433,7 @@ public static class ViCiDesktop
             Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT") + "-" + Guid.NewGuid().ToString("N");
         bool restored = false;
         Stopwatch rootClock = null;
-        var descendantDesktops = new Dictionary<uint, object>();
+        var descendantDesktops = new Dictionary<uint, DesktopObservation>();
         try {
             Require(Equal(Name(GetProcessWindowStation()), "WinSta0"), "Only WinSta0 is supported.");
             initialThread = GetThreadDesktop(GetCurrentThreadId());

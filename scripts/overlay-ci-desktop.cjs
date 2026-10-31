@@ -20,6 +20,16 @@ function assertDesktopChain(report, desktop) {
     const observation = desktop.descendantDesktopObservations.find((value) => value.pid === pid);
     assert.equal(observation?.status, 'verified-owned-job-member', `Desktop/Job inheritance not observed for PID ${pid}.`);
     assert.deepEqual(observation.threadDesktops, [desktop.ownedDesktop]);
+    assert.ok(observation.threadObservations?.length > 0, `PID ${pid} lacks actual thread query receipts.`);
+    for (const thread of observation.threadObservations) {
+      assert.equal(thread.pid, pid);
+      assert.ok(Number.isInteger(thread.tid) && thread.tid > 0);
+      assert.equal(thread.api, 'GetUserObjectInformationW');
+      assert.match(thread.rawHandle, /^[1-9][0-9]*$/);
+      assert.equal(thread.win32Error, 0);
+      assert.equal(thread.status, 'observed');
+      assert.equal(thread.threadDesktop, desktop.ownedDesktop);
+    }
   }
   if (report.startupRecovery) {
     const recovery = report.startupRecovery;
