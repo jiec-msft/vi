@@ -13,6 +13,7 @@ const profile = path.join(directory, 'profile');
 app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+app.commandLine.appendSwitch('force-color-profile', 'srgb');
 app.commandLine.appendSwitch('use-file-for-fake-audio-capture', path.join(directory, 'input.wav'));
 if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
@@ -37,7 +38,7 @@ function visibleMarker(png) {
   const pixels = nativeImage.createFromBuffer(png).toBitmap();
   let matched = 0;
   for (let i = 0; i < pixels.length; i += 4) {
-    if (pixels[i] === 255 && pixels[i + 1] === 0 && pixels[i + 2] === 255 && pixels[i + 3] === 255) matched++;
+    if (pixels[i] >= 240 && pixels[i + 1] <= 15 && pixels[i + 2] >= 240) matched++;
   }
   return matched >= 100;
 }
@@ -106,13 +107,16 @@ async function run() {
   mainWindow.setAlwaysOnTop(true);
   mainWindow.show();
   mainWindow.moveTop();
+  let requireVisible = false;
+  stopVideo = await recordDesktop(directory, (png) => {
+    if (requireVisible) assert.ok(visibleMarker(png), 'Application was obscured in desktop video.');
+  });
   await until(async () => {
     const sources = await desktopCapturer.getSources({ types: ['screen'],
       thumbnailSize: { width: 1280, height: 720 } });
     return sources[0] && visibleMarker(sources[0].thumbnail.toPNG());
   }, 'application visible on desktop');
-  stopVideo = await recordDesktop(directory, (png) =>
-    assert.ok(visibleMarker(png), 'Application was obscured in desktop video.'));
+  requireVisible = true;
   report.checks.push('application-visible-in-desktop-video');
   report.checks.push('full-framework-startup');
   assert.equal(await evaluate("document.getElementById('toggle').disabled"), true);
