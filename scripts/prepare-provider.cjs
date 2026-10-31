@@ -4,8 +4,8 @@ const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
 async function main() {
-  const url = 'https://github.com/jiec-msft/vi-provider/releases/download/v0.1.0/vi-service-provider-0.1.0.tgz';
-  const expected = '8e16c6576c1d2122a6fc0f6d4d009d740ddb190f9e065a022953e2a838eca765';
+  const url = 'https://github.com/jiec-msft/vi-provider/releases/download/v0.1.1/vi-service-provider-0.1.1.tgz';
+  const expected = '2c175cad0873cd4d56a02213c56926b415db5f4f4bd818ace1ec67f32c867e5c';
   const directory = path.resolve('artifacts-ci', 'provider');
   await fs.mkdir(directory, { recursive: true });
   const response = await fetch(url, { signal: AbortSignal.timeout(30000) });

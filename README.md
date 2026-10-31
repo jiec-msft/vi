@@ -60,6 +60,34 @@ only displays a user-supplied endpoint override, stored locally. Changing it
 requires confirming trust because the provider may send credentials and speech.
 
 Startup CI also launches this full framework independently, without choosing a
-service, and verifies readiness and clean shutdown. Runtime feature tests are
-expanded incrementally; the minimal capability probe is not a claim that all
-application features are already covered on every platform.
+service, and verifies readiness and clean shutdown. UI CI additionally exercises
+its real renderer and main process: consent, local microphone meter without
+network traffic, recording/finalization, cancel, clipboard copying, preference
+persistence, text-plugin processing and original comparison. Both UI suites
+record the desktop. The framework suite uses synthetic microphone permission;
+TCC/hardware permissions, physical shortcut/PTT dispatch, dragging and
+cross-application accessibility remain separate acceptance gates.
+
+The framework recording must contain a test-only visual marker in every test
+frame. Windows CI suppresses first-login onboarding only inside the hosted VM,
+so a system setup screen cannot conceal successful renderer-only operations.
+
+Full applications load `plugin.json`, `config.json` and the declared entry module
+from `<userData>/providers/default`, or an explicit `--provider-dir` directory.
+The manifest declares `id`, `kind: "service-provider"`, `apiVersion: 1` and a
+relative `entry`. Its module exports `createSession(options)`. Each recording
+gets a session with:
+
+| Member | Contract |
+| --- | --- |
+| `start()` | Resolve when audio can be sent; reject connection failures. |
+| `audio(buffer)` | Consume 16 kHz, mono PCM16 chunks in order. |
+| `finishTurn()` | Resolve a segment's final string while keeping the connection reusable. |
+| `finish()` | Resolve the last final string and finish the recording. |
+| `stopRecordingDeadline()` | Stop the provider's recording deadline during finalization. |
+| `cancel()`, `close()` | Release owned connections and discard cancelled work. |
+| `on('partial', listener)`, `on('failure', listener)` | Publish preview strings and safe errors. |
+
+`config.json` contains provider-owned options; a saved endpoint override replaces
+only its endpoint. Credentials and transport implementation belong to the
+provider, not the application.

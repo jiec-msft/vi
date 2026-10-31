@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const mode = process.argv[2];
-assert.ok(['smoke', 'ui'].includes(mode));
+assert.ok(['smoke', 'ui', 'framework-ui'].includes(mode));
 const output = path.resolve('artifacts-ci', mode);
 fs.mkdirSync(output, { recursive: true });
 const samples = 16000, wav = Buffer.alloc(44 + samples * 2);
@@ -15,7 +15,8 @@ for (let i = 0; i < samples; i++) wav.writeInt16LE(Math.round(Math.sin(i * 2 * M
 fs.writeFileSync(path.join(output, 'input.wav'), wav);
 const started = Date.now();
 let timedOut = false;
-const child = spawn(require('electron'), [path.resolve('src', 'main.cjs'), `--ci-mode=${mode}`],
+const entry = mode === 'framework-ui' ? path.resolve('scripts', 'framework-ui.cjs') : path.resolve('src', 'main.cjs');
+const child = spawn(require('electron'), [entry, `--ci-mode=${mode}`],
   { env: { ...process.env, VI_OUTPUT: output, VI_EXPECTED_ARCH: process.env.VI_EXPECTED_ARCH || process.arch },
     stdio: 'inherit' });
 const timer = setTimeout(() => { timedOut = true; child.kill(); console.error('Internal test deadline exceeded.'); }, mode === 'smoke' ? 90000 : 420000);
