@@ -21,7 +21,7 @@ window.floatingVoice.onStatus((value) => {
   nativePointer = value.nativePointer;
   recording = value.phase === 'recording';
   const elapsed = `${Math.floor(value.elapsedSeconds / 60)}:${String(value.elapsedSeconds % 60).padStart(2, '0')}`;
-  document.getElementById('message').textContent = value.overlayControlError ? 'Use stop shortcut'
+  document.getElementById('message').textContent = value.overlayControlError ? 'Mouse fallback'
     : value.phase === 'error' ? ({ 'input-confirmation': 'Input not confirmed', input: 'Input error',
       microphone: 'Audio interrupted', cloud: 'Connection error', 'no-speech': 'No speech detected',
       plugin: 'Result blocked by plugin' }[value.errorKind] || 'Stopped: error')

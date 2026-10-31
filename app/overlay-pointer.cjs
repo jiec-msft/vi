@@ -111,7 +111,7 @@ class OverlayPointer {
   notifyFailure(reason) {
     const error = new Error(this.state === 'unavailable'
       ? 'Native floating mouse controls unavailable. Use mouse fallback, the record/stop shortcut or tray menu. Restart the app to retry.'
-      : 'Native floating mouse controls interrupted. Mouse fallback is available while recovery is attempted.');
+      : 'Native floating mouse controls interrupted. Mouse fallback and shortcuts are available while recovery is attempted.');
     error.code = reason;
     this.onFailure(error);
   }
