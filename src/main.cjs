@@ -4,6 +4,7 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { Provider } = require('./provider.cjs');
 const { fakeService } = require('../test/fake-service.cjs');
+const { loadProvider } = require('./provider-host.cjs');
 
 const mode = process.argv.find((arg) => arg.startsWith('--ci-mode='))?.split('=')[1];
 const output = process.env.VI_OUTPUT;
@@ -34,8 +35,15 @@ async function click() {
 }
 async function run() {
   assert.equal(process.arch, process.env.VI_EXPECTED_ARCH);
-  service = await fakeService();
-  provider = new Provider({ endpoint: service.endpoint, credential: 'fixture-credential' });
+  if (process.env.VI_PROVIDER_DIR) {
+    const directory = path.resolve(process.env.VI_PROVIDER_DIR);
+    service = await require(path.join(directory, 'fixtures', 'provider-service.cjs')).createService();
+    provider = loadProvider(directory, { endpoint: service.endpoint,
+      credentialSource: async () => ({ token: 'fixture-credential' }) });
+  } else {
+    service = await fakeService();
+    provider = new Provider({ endpoint: service.endpoint, credential: 'fixture-credential' });
+  }
   provider.on('failure', () => { report.providerFailure = true; });
   await provider.open();
   report.checks.push('native-architecture', 'loopback-provider-start');

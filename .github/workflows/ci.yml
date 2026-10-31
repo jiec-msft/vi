@@ -23,6 +23,7 @@ jobs:
           - { os: macos-15, arch: arm64 }
     env:
       VI_EXPECTED_ARCH: ${{ matrix.platform.arch }}
+      VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,6 +36,9 @@ jobs:
       - name: Install app dependencies
         if: matrix.check != 'unit'
         run: npm ci --no-audit --no-fund
+      - name: Prepare public provider
+        if: matrix.check != 'unit'
+        run: node scripts/prepare-provider.cjs
       - name: Unit
         if: matrix.check == 'unit'
         run: npm test
