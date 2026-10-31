@@ -91,7 +91,9 @@ async function run() {
   ipcMain.handle('finish', async (event) => {
     if (event.sender !== main.webContents) throw new Error('Untrusted finish request.');
     const text = await provider.finish();
-    clipboard.writeText(text);
+    const written = clipboard.writeText(text);
+    report.clipboardAsync = Boolean(written && typeof written.then === 'function');
+    await written;
     if (process.platform === 'darwin') app.focus({ steal: true });
     editor.focus();
     await until(() => editor.isFocused(), 'owned editor focus');
@@ -99,7 +101,7 @@ async function run() {
     await pause(100);
     editor.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: [process.platform === 'darwin' ? 'command' : 'control'] });
     editor.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'V', modifiers: [process.platform === 'darwin' ? 'command' : 'control'] });
-    report.pasteDiagnostics = { clipboardChars: clipboard.readText().length,
+    report.pasteDiagnostics = { clipboardChars: (await clipboard.readText()).length,
       focused: editor.isFocused(), document: await editor.webContents.executeJavaScript("({focused:document.hasFocus(),target:document.activeElement.id})") };
     main.webContents.send('phase', 'Ready');
   });
