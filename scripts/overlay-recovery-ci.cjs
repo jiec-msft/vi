@@ -33,9 +33,10 @@ child.once('exit', async (code) => {
   clearTimeout(timer);
   let report;
   try {
-    report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
     if (isolated) {
       const desktop = JSON.parse(fs.readFileSync(path.join(metadata, 'report.json')));
+      if (!desktop.rootWindowsVerified) throw new Error(`Owned root readiness failed: ${desktop.errors.join('; ')}`);
+      report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
       assert.equal(desktop.controllerPid, child.pid);
       assertDesktopChain(report, desktop);
       if (timeoutProbe) {
@@ -59,7 +60,7 @@ child.once('exit', async (code) => {
       }
       report.desktopIsolation = { metadata: 'desktop-isolation/report.json', rawRootExitCode: desktop.childExitCode,
         originalRestored: desktop.originalRestored, desktopRemoved: desktop.ownedDesktopRemoved };
-    }
+    } else report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
     for (const helper of report.helpers) {
       if (!Number.isInteger(helper.pid)) continue;
       const exists = () => {

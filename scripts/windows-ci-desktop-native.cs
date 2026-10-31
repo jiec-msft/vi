@@ -252,7 +252,7 @@ public static class ViCiDesktop
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
     }
-    static void ValidateHarnessReady(ProcessInfo child, string receipt, string desktop)
+    static void ValidateHarnessReady(ProcessInfo child, string receipt, string desktop, List<object> observations)
     {
         using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
             var root = json.RootElement;
@@ -262,8 +262,11 @@ public static class ViCiDesktop
                 IntPtr window = new IntPtr(Int64.Parse(root.GetProperty(key).GetString()));
                 uint owner;
                 uint tid = GetWindowThreadProcessId(window, out owner);
-                Require(IsWindow(window) && IsWindowVisible(window) && owner == child.pid &&
-                    Equal(Name(GetThreadDesktop(tid)), desktop), "Harness window is not visible on its owned root desktop.");
+                bool exists = IsWindow(window), visible = IsWindowVisible(window);
+                string actual = tid == 0 ? null : Name(GetThreadDesktop(tid));
+                observations.Add(new { role = key, window = window.ToInt64().ToString(), exists, visible, pid = owner, tid, threadDesktop = actual });
+                Require(exists && visible && owner == child.pid && Equal(actual, desktop),
+                    "Harness window is not visible on its owned root desktop.");
             }
         }
     }
@@ -425,7 +428,9 @@ public static class ViCiDesktop
             WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget);
             if (entry != "probe") {
                 Require(rootClock.Elapsed.TotalSeconds < timeout, "Root inclusive wall deadline expired during readiness.");
-                ValidateHarnessReady(child, Path.Combine(directory, "ready.json"), ownedName);
+                var windows = new List<object>();
+                report["rootWindowObservations"] = windows;
+                ValidateHarnessReady(child, Path.Combine(directory, "ready.json"), ownedName, windows);
                 report["rootWindowsVerified"] = true;
             }
             Require(VisibleWindows(owned, child.pid) > 0 && VisibleWindows(owned, background.pid) == 0,

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 function assertDesktopChain(report, desktop) {
   assert.equal(report.windowIds.owner, desktop.ownedPid);
   assert.equal(desktop.initialControllerThreadDesktop, 'Default');
-  assert.equal(desktop.controllerThreadDesktop, desktop.ownedDesktop);
+  assert.equal(desktop.controllerThreadDesktop, 'Default');
   assert.equal(desktop.windowSeparation, true);
   assert.equal(desktop.defaultFixtureStayedAlive, true);
   assert.equal(desktop.defaultFixtureHeartbeatFresh, true);

@@ -307,7 +307,7 @@ async function run() {
   await until(async () => {
     mainWindow = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/index.html'));
     overlay = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/overlay.html'));
-    return mainWindow && overlay && overlay.isVisible() && (await status()).shortcutReady &&
+    return mainWindow && overlay && (!expectedDesktop || mainWindow.isVisible()) && overlay.isVisible() && (await status()).shortcutReady &&
       (process.platform !== 'win32' || (await status()).nativePointer);
   }, 'full application and native pointer startup', 35000);
   report.initialPointerRestarts = (await status()).nativePointerRestarts;

@@ -10,7 +10,7 @@ function fixture() {
     helpers: [{ pid: 5 }], nativeDesktopReceipts: [{ station: 'WinSta0', threadDesktop: name, inputDesktop: name }],
     osInputs: [{ driverPid: 6, station: 'WinSta0', threadDesktop: name, inputDesktop: name }] };
   const desktop = { ownedPid: 1, ownedDesktop: name, initialControllerThreadDesktop: 'Default',
-    controllerThreadDesktop: name, windowSeparation: true,
+    controllerThreadDesktop: 'Default', windowSeparation: true,
     defaultFixtureStayedAlive: true, defaultFixtureHeartbeatFresh: true,
     descendantDesktopObservations: [1, 2, 3, 4, 5, 6].map((pid) =>
       ({ pid, threadDesktops: [name], status: 'verified-owned-job-member' })) };
