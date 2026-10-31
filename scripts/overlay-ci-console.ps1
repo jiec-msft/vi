@@ -76,20 +76,15 @@ if ($Mode -eq 'restore') {
         $report.selectedGuid -ne $consoleHost -or !$report.stateSaved) {
         throw 'Terminal snapshot does not belong to this run and supported selection.'
     }
-    $report.restoreDiagnosticError = $null
-    try { $report.beforeRestore = Process-Snapshot }
-    catch {
-        $report.beforeRestore = $null
-        $report.restoreDiagnosticError = $_.Exception.Message
-    }
-    Save-Report
     $current = Read-Selection
     foreach ($name in $names) {
         $value = $current.values[$name].value
         if ($value -ne $consoleHost -and $value -ne $report.original.values[$name].value) {
             $report.status = 'restore-refused-external-change'
-            Save-Report
-            throw 'Terminal choice changed outside this preparation; refusing to overwrite it.'
+            $message = 'Terminal choice changed outside this preparation; refusing to overwrite it.'
+            try { Save-Report }
+            catch { throw "$message Report persistence also failed: $($_.Exception.Message)" }
+            throw $message
         }
     }
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath)
@@ -107,8 +102,10 @@ if ($Mode -eq 'restore') {
     $report.restored = Read-Selection
     if ($report.restored.keyExisted -ne $report.original.keyExisted) {
         $report.status = 'restore-preserved-unrelated-key-data'
-        Save-Report
-        throw 'Original key presence could not be restored without deleting unrelated registry data.'
+        $message = 'Original key presence could not be restored without deleting unrelated registry data.'
+        try { Save-Report }
+        catch { throw "$message Report persistence also failed: $($_.Exception.Message)" }
+        throw $message
     }
     foreach ($name in $names) {
         if ($report.restored.values[$name].exists -ne $report.original.values[$name].exists -or
@@ -119,16 +116,27 @@ if ($Mode -eq 'restore') {
     }
     $report.restoredAt = [DateTime]::UtcNow.ToString('o')
     $report.restoreVerified = $true
-    $report.newTerminalActorsAtRestore = if ($report.beforeRestore) {
-        @($report.beforeRestore.chains | Where-Object {
+    $report.restoreDiagnosticError = $null
+    try { $report.afterRegistryRestore = Process-Snapshot }
+    catch {
+        $report.afterRegistryRestore = $null
+        $report.restoreDiagnosticError = $_.Exception.Message
+    }
+    $report.newTerminalActorsAtRestore = if ($report.afterRegistryRestore) {
+        @($report.afterRegistryRestore.chains | Where-Object {
             $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe') -and
-            $_.rootPid -notin @($report.before.chains | ForEach-Object { $_.rootPid })
+            $_.rootPid -notin @($report.before.chains | ForEach-Object { $_.rootPid }) -and
+            (!$_.chain[0].createdAt -or [DateTime] $_.chain[0].createdAt -le [DateTime] $report.restoredAt)
         })
     } else { $null }
     $report.status = if ($report.restoreDiagnosticError) { 'restored-with-diagnostic-error' } else { 'restored' }
-    Save-Report
-    if ($report.restoreDiagnosticError) {
-        throw "Original terminal choice restored; diagnostics failed: $($report.restoreDiagnosticError)"
+    $persistError = $null
+    try { Save-Report } catch { $persistError = $_.Exception.Message }
+    if ($report.restoreDiagnosticError -or $persistError) {
+        $failures = @()
+        if ($report.restoreDiagnosticError) { $failures += "diagnostics failed: $($report.restoreDiagnosticError)" }
+        if ($persistError) { $failures += "report persistence failed: $persistError" }
+        throw "Original terminal choice restored; $($failures -join '; ')"
     }
     if ($report.newTerminalActorsAtRestore.Count) {
         throw 'New Terminal/WSL actors appeared while Console Host was selected; original choice has been restored.'
@@ -146,6 +154,7 @@ Save-Report
 if (!$env:GITHUB_OUTPUT) { throw 'Workflow output channel unavailable; terminal choice was not changed.' }
 Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'state_saved=true'
 $probe = $null
+$prepareFailure = $null
 try {
     $report.before = Process-Snapshot
     Save-Report
@@ -235,16 +244,24 @@ public static class OwnedConsoleProbe {
     Save-Report
     Write-Output 'Supported HKCU Console Host selection and owned new-console host verified; no WSL update or broad cleanup.'
 } catch {
+    $prepareFailure = $_.Exception.Message
     $report.status = 'failed'
-    $report.error = $_.Exception.Message
-    Save-Report
-    throw
+    $report.error = $prepareFailure
+    try { Save-Report }
+    catch { $prepareFailure += "; preparation report persistence failed: $($_.Exception.Message)" }
+    throw $prepareFailure
 } finally {
     if ($probe) {
-        if (!$probe.HasExited) {
-            Stop-Process -Id $probe.Id -Force
-            if (!$probe.WaitForExit(2000)) { throw 'Owned console probe could not be reaped.' }
+        try {
+            if (!$probe.HasExited) {
+                Stop-Process -Id $probe.Id -Force
+                if (!$probe.WaitForExit(2000)) { throw 'Owned console probe could not be reaped.' }
+            }
+            $probe.Dispose()
+        } catch {
+            $message = "Owned console probe cleanup failed: $($_.Exception.Message)"
+            if ($prepareFailure) { throw "$prepareFailure; $message" }
+            throw $message
         }
-        $probe.Dispose()
     }
 }

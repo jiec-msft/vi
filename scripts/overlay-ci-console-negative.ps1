@@ -29,6 +29,10 @@ function Matches-Original($original, $actual) {
             $original.values[$name].value -cne $actual.values[$name].value -or
             $original.values[$name].kind -ne $actual.values[$name].kind) { return $false }
     }
+    function Failure-Text($output) {
+        $text = ($output | Out-String) -replace "$([char]27)\[[0-9;]*[a-zA-Z]", ''
+        return $text -replace '\s+', ' '
+    }
     return $true
 }
 $result = @{ cases = @(); status = 'running'; runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT }
@@ -38,11 +42,17 @@ foreach ($case in @('prepare', 'missing-receipt', 'mismatch')) {
     $code = $LASTEXITCODE
     $actual = Registry-State
     $marker = switch ($case) {
+        'prepare' { 'VI_PARENT_FAIL:prepare' }
+        'missing-receipt' { 'VI_PARENT_FAIL:receipt' }
+        'mismatch' { 'VI_PARENT_FAIL:mismatch' }
+    }
+    $reason = switch ($case) {
         'prepare' { 'Injected prepare failure' }
         'missing-receipt' { 'diagnostic error receipt missing' }
         'mismatch' { 'Injected parent registry mismatch assertion' }
     }
-    $witness = ($output | Out-String) -match [regex]::Escape($marker)
+    $text = Failure-Text $output
+    $witness = $text -match [regex]::Escape($marker) -and $text -match [regex]::Escape($reason)
     $matched = Matches-Original $before $actual
     $result.cases += @{ name = "parent-$case"; exitCode = $code; original = $before; actual = $actual;
         originalMatched = $matched; expectedFailureReported = $witness;
@@ -52,6 +62,7 @@ foreach ($case in @('prepare', 'missing-receipt', 'mismatch')) {
 foreach ($case in @('write', 'combined')) {
     $before = Registry-State
     $reportName = if ($case -eq 'write') { 'restore-write-fault.json' } else { 'restore-combined-fault.json' }
+    $caseFailure = $null
     try {
         $prepareOutput = & $pwsh -NoProfile -NonInteractive -File $helper prepare -ReportName $reportName 2>&1
         if ($LASTEXITCODE -ne 0) { throw 'Negative restore fixture preparation failed.' }
@@ -61,7 +72,7 @@ foreach ($case in @('write', 'combined')) {
         $output = & $pwsh @arguments 2>&1
         $code = $LASTEXITCODE
         $actual = Registry-State
-        $text = $output | Out-String
+        $text = Failure-Text $output
         $witness = $text -match 'Injected restore report write failure' -and $text -match 'Original terminal choice restored'
         if ($case -eq 'combined') { $witness = $witness -and $text -match 'Injected restore Process-Snapshot failure' }
         $matched = Matches-Original $before $actual
@@ -69,11 +80,20 @@ foreach ($case in @('write', 'combined')) {
             originalMatched = $matched; expectedFailureReported = $witness;
             passed = $code -ne 0 -and $matched -and $witness }
         $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $directory 'negative-parent.json') -Encoding utf8
+    } catch {
+        $caseFailure = $_.Exception.Message
+        throw
     } finally {
-        $state = Get-Content -Raw -LiteralPath (Join-Path $directory $reportName) | ConvertFrom-Json -AsHashtable
-        if (!$state.restoreVerified) {
-            & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
-            if ($LASTEXITCODE -ne 0) { throw 'Negative restore fixture cleanup failed.' }
+        try {
+            $state = Get-Content -Raw -LiteralPath (Join-Path $directory $reportName) | ConvertFrom-Json -AsHashtable
+            if (!$state.restoreVerified) {
+                & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
+                if ($LASTEXITCODE -ne 0) { throw 'Negative restore fixture cleanup failed.' }
+            }
+        } catch {
+            $message = "Negative restore fixture cleanup failed: $($_.Exception.Message)"
+            if ($caseFailure) { throw "$caseFailure; $message" }
+            throw $message
         }
     }
 }

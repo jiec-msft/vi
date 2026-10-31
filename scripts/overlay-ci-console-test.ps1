@@ -9,14 +9,18 @@ $helper = Join-Path $PSScriptRoot 'overlay-ci-console.ps1'
 $pwsh = (Get-Process -Id $PID).Path
 $reportName = if ($FailParent -eq 'none') { 'restore-fault.json' } else { "parent-$FailParent.json" }
 $file = Join-Path $env:GITHUB_WORKSPACE "artifacts-ci\overlay-recovery\$reportName"
+$parentFailure = $null
+$failureStage = 'prepare'
 try {
     $prepareArgs = @('-NoProfile', '-NonInteractive', '-File', $helper, 'prepare', '-ReportName', $reportName)
     if ($FailParent -eq 'prepare') { $prepareArgs += '-FailPrepare' }
     & $pwsh @prepareArgs
     if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture preparation failed.' }
+    $failureStage = 'restore'
     & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName -FailRestoreSnapshot
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0) { throw 'Injected restore diagnostic failure returned success.' }
+    $failureStage = 'readback'
     $report = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Console\%%Startup')
     try {
@@ -30,7 +34,10 @@ try {
     } finally { if ($key) { $key.Dispose() } }
     $report.faultObservation = @{ restoreExitCode = $exitCode; actualRegistry = $actual }
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
-    if ($FailParent -eq 'mismatch') { throw 'Injected parent registry mismatch assertion.' }
+    if ($FailParent -eq 'mismatch') {
+        $failureStage = 'mismatch'
+        throw 'Injected parent registry mismatch assertion.'
+    }
     if ($actual.keyExisted -ne $report.original.keyExisted) { throw 'Rollback did not restore original key presence.' }
     foreach ($name in @('DelegationConsole', 'DelegationTerminal')) {
         $original = $report.original.values[$name]
@@ -39,6 +46,7 @@ try {
             throw 'Rollback did not restore original value and kind.'
         }
     }
+    $failureStage = 'receipt'
     if ($FailParent -eq 'missing-receipt') { $report.restoreDiagnosticError = $null }
     if (!$report.restoreVerified -or $report.restoreDiagnosticError -ne 'Injected restore Process-Snapshot failure.') {
         throw 'Rollback verification or explicit diagnostic error receipt missing.'
@@ -47,13 +55,24 @@ try {
         actualRegistryReadbackMatchedOriginal = $true; diagnosticFailureExplicit = $true }
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
     Write-Output 'Injected restore diagnostic failed explicitly and original registry state was independently verified.'
+} catch {
+    $parentFailure = $_.Exception.Message
+    try { [Console]::Error.WriteLine("VI_PARENT_FAIL:$failureStage") }
+    catch { $parentFailure += "; failure-stage receipt write failed: $($_.Exception.Message)" }
+    throw $parentFailure
 } finally {
-    if (Test-Path -LiteralPath $file) {
-        $state = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
-        if (!$state.restoreVerified) {
-            & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
-            if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture cleanup failed.' }
+    try {
+        if (Test-Path -LiteralPath $file) {
+            $state = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
+            if (!$state.restoreVerified) {
+                & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
+                if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture cleanup failed.' }
+            }
         }
+    } catch {
+        $message = "Rollback fault fixture cleanup failed: $($_.Exception.Message)"
+        if ($parentFailure) { throw "$parentFailure; $message" }
+        throw $message
     }
-    exit 0
 }
+exit 0
