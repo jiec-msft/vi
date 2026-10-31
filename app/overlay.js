@@ -7,8 +7,17 @@ const failure = (error) => {
   document.getElementById('message').textContent = 'Position not saved';
   document.getElementById('drag-handle').title = error.message;
 };
-bindDragHandle(document.getElementById('drag-handle'), window.floatingVoice, failure, globalThis, () => !nativePointer);
+const dragBinding = bindDragHandle(document.getElementById('drag-handle'), window.floatingVoice, failure,
+  globalThis, () => !nativePointer);
+window.floatingVoice.onPointerCancel(() => {
+  dragBinding.cancel();
+  nativeButton = undefined;
+});
 window.floatingVoice.onStatus((value) => {
+  if (nativePointer !== value.nativePointer) {
+    dragBinding.cancel();
+    nativeButton = undefined;
+  }
   nativePointer = value.nativePointer;
   recording = value.phase === 'recording';
   const elapsed = `${Math.floor(value.elapsedSeconds / 60)}:${String(value.elapsedSeconds % 60).padStart(2, '0')}`;
@@ -51,6 +60,7 @@ const nativeHandled = (name) => nativePointer && nativeButton?.name === name && 
 document.getElementById('stop').onclick = () => { if (!nativeHandled('stop')) void stop(); };
 document.getElementById('cancel').onclick = () => { if (!nativeHandled('cancel')) void cancel(); };
 window.floatingVoice.onPointerDown(({ x, y }) => {
+  if (!nativePointer) return;
   const target = document.elementFromPoint(x, y);
   if (target?.closest('#stop')) {
     nativeButton = { name: 'stop', at: Date.now() };

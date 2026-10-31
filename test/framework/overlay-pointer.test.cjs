@@ -45,7 +45,7 @@ test('observer failure is visible, releases interaction state, and terminates on
   assert.equal(f.failures.length, 1);
   assert.match(f.failures[0], /shortcut/);
   assert.equal(f.pointer.pressed, false);
-  assert.equal(f.process.killed, true);
+  assert.equal(f.process.killed, undefined);
 });
 
 test('helper death clears readiness before notifying consumers and cancels a held gesture', async (t) => {
@@ -109,12 +109,39 @@ test('invalid coordinates, unexpected releases and startup timeout cannot leave 
     const f = fixture(t);
     await f.send({ type: 'ready' });
     await f.send(bad);
-    assert.equal(f.pointer.closed, true);
+    assert.equal(f.pointer.state, 'recovering');
+    assert.equal(f.process.killed, true);
     assert.equal(f.failures.length, 1);
   }
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture(t);
   t.mock.timers.tick(8000);
-  assert.equal(f.pointer.closed, true);
+  assert.equal(f.pointer.state, 'recovering');
   assert.equal(f.failures.length, 1);
+});
+
+test('a helper that cannot be reaped stops recovery rather than overlapping another child', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  await f.send({ type: 'ready' });
+  await f.send({ type: 'down', x: 1000001, y: 0 });
+  t.mock.timers.tick(2000);
+  assert.equal(f.pointer.state, 'unavailable');
+  assert.equal(f.failures.length, 2);
+  f.process.emit('exit', 1);
+  t.mock.timers.tick(60000);
+  assert.equal(f.pointer.restarts, 0);
+});
+
+test('shutdown during retry and late output from a failed helper cannot restore readiness', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  await f.send({ type: 'ready' });
+  f.process.emit('exit', 1);
+  await f.send({ type: 'ready' });
+  assert.equal(f.pointer.ready, false);
+  f.pointer.close();
+  t.mock.timers.tick(60000);
+  assert.equal(f.pointer.state, 'closed');
+  assert.equal(f.events.length, 1);
 });
