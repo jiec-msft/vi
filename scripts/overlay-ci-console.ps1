@@ -46,6 +46,7 @@ function Process-Snapshot {
     if ($Mode -eq 'restore' -and $FailRestoreSnapshot) { throw 'Injected restore Process-Snapshot failure.' }
     $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate)
     if ($all.Count -gt 1024) { throw 'Process diagnostic inventory exceeded its bound.' }
+    $script:lastProcessInventory = $all
     $byId = @{}
     foreach ($item in $all) { $byId[[int] $item.ProcessId] = $item }
     $roots = @($all | Where-Object { $_.Name -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe',
@@ -68,6 +69,27 @@ function Process-Snapshot {
         @{ rootPid = [int] $root.ProcessId; exe = $root.Name; chain = $chain }
     }
     return @{ at = [DateTime]::UtcNow.ToString('o'); chains = @($chains) }
+}
+function Read-ProcessStarts($identifier, $baseline) {
+    $queued = @(Get-Event | Where-Object { $_.SourceIdentifier -eq $identifier })
+    if ($queued.Count -gt 512) { throw 'Process-start diagnostic queue exceeded its bound.' }
+    $starts = @($queued | ForEach-Object {
+        $event = $_.SourceEventArgs.NewEvent
+        if (!$event.ProcessName -or $event.ProcessName.Length -gt 260 -or $event.ProcessName -match '[\\/\x00-\x1f]') {
+            throw 'Unsafe process-start executable metadata.'
+        }
+        @{ pid = [int] $event.ProcessID; parentPid = [int] $event.ParentProcessID; exe = $event.ProcessName;
+            session = [int] $event.SessionID; createdAt = [DateTime]::FromFileTimeUtc([long] $event.TIME_CREATED).ToString('o') }
+    })
+    $parentIds = @($starts | ForEach-Object { $_.parentPid } | Select-Object -Unique)
+    $existingParents = @($baseline | Where-Object { $_.ProcessId -in $parentIds } | ForEach-Object {
+        if (!$_.Name -or $_.Name.Length -gt 260 -or $_.Name -match '[\\/\x00-\x1f]') {
+            throw 'Unsafe existing parent executable metadata.'
+        }
+        @{ pid = [int] $_.ProcessId; parentPid = [int] $_.ParentProcessId; exe = $_.Name;
+            createdAt = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null } }
+    })
+    return @{ starts = $starts; existingParents = $existingParents; capturedAt = [DateTime]::UtcNow.ToString('o') }
 }
 
 if ($Mode -eq 'restore') {
@@ -155,8 +177,11 @@ if (!$env:GITHUB_OUTPUT) { throw 'Workflow output channel unavailable; terminal 
 Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'state_saved=true'
 $probe = $null
 $prepareFailure = $null
+$watchId = $null
+$baselineInventory = @()
 try {
     $report.before = Process-Snapshot
+    $baselineInventory = @($script:lastProcessInventory)
     Save-Report
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath)
     try {
@@ -178,6 +203,11 @@ try {
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($remaining.Count) { throw 'Pre-existing unowned WSL clients did not exit; no UI or broad process cleanup is permitted.' }
     $report.preExistingWslQuietAt = [DateTime]::UtcNow.ToString('o')
+    $identifier = "overlay-process-starts-$([guid]::NewGuid())"
+    Register-CimIndicationEvent -Namespace root\cimv2 -Query 'SELECT * FROM Win32_ProcessStartTrace' `
+        -SourceIdentifier $identifier | Out-Null
+    $watchId = $identifier
+    $report.processStartWatchRegisteredAt = [DateTime]::UtcNow.ToString('o')
     $probeFile = Join-Path $directory "$([IO.Path]::GetFileNameWithoutExtension($ReportName))-console-probe.json"
     $probeScript = @'
 $ErrorActionPreference = 'Stop'
@@ -236,6 +266,10 @@ public static class OwnedConsoleProbe {
     if ($consoleProcess) { throw 'Owned probe console host did not exit after its client.' }
     $report.probeProcess.consoleObservedAbsentAt = [DateTime]::UtcNow.ToString('o')
     $report.afterProbe = Process-Snapshot
+    $report.processStarts = Read-ProcessStarts $watchId $baselineInventory
+    if (!@($report.processStarts.starts | Where-Object { $_.pid -eq $probe.Id }).Count) {
+        throw 'Owned console probe process-start receipt missing.'
+    }
     $originalActors = @($report.before.chains | ForEach-Object { $_.rootPid })
     $newDelegated = @(@($report.duringProbe.chains) + @($report.afterProbe.chains) | Where-Object {
         $_.exe -in @('WindowsTerminal.exe', 'wt.exe', 'wsl.exe', 'OpenConsole.exe') -and $_.rootPid -notin $originalActors
@@ -253,6 +287,7 @@ public static class OwnedConsoleProbe {
     catch { $prepareFailure += "; preparation report persistence failed: $($_.Exception.Message)" }
     throw $prepareFailure
 } finally {
+    $cleanupErrors = @()
     if ($probe) {
         try {
             if (!$probe.HasExited) {
@@ -260,10 +295,21 @@ public static class OwnedConsoleProbe {
                 if (!$probe.WaitForExit(2000)) { throw 'Owned console probe could not be reaped.' }
             }
             $probe.Dispose()
-        } catch {
-            $message = "Owned console probe cleanup failed: $($_.Exception.Message)"
-            if ($prepareFailure) { throw "$prepareFailure; $message" }
-            throw $message
-        }
+        } catch { $cleanupErrors += "Owned console probe cleanup failed: $($_.Exception.Message)" }
+    }
+    if ($watchId) {
+        try { $report.processStarts = Read-ProcessStarts $watchId $baselineInventory }
+        catch { $cleanupErrors += "Process-start diagnostics failed: $($_.Exception.Message)" }
+        try {
+            Unregister-Event -SourceIdentifier $watchId -ErrorAction Stop
+            Get-Event | Where-Object { $_.SourceIdentifier -eq $watchId } | Remove-Event -ErrorAction Stop
+            $report.processStartWatchClosedAt = [DateTime]::UtcNow.ToString('o')
+        } catch { $cleanupErrors += "Owned process-start subscription cleanup failed: $($_.Exception.Message)" }
+        try { Save-Report }
+        catch { $cleanupErrors += "Process-start receipt persistence failed: $($_.Exception.Message)" }
+    }
+    if ($cleanupErrors.Count) {
+        if ($prepareFailure) { $cleanupErrors = @($prepareFailure) + $cleanupErrors }
+        throw ($cleanupErrors -join '; ')
     }
 }
