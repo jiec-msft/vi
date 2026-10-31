@@ -8,11 +8,12 @@ const { fiveMarkersVisible } = require('./visible-markers.cjs');
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Cue probes run only on isolated CI runners.');
 assert.ok(process.argv.includes('--ci-mode=cues') && process.env.VI_CUES_OUTPUT);
 assert.equal(process.arch, process.env.VI_EXPECTED_ARCH);
+app.on('window-all-closed', () => {});
 const directory = path.resolve(process.env.VI_CUES_OUTPUT);
 app.commandLine.appendSwitch('user-data-dir', path.join(directory, 'profile'));
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 if (process.platform === 'darwin') app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
-const report = { platform: process.platform, arch: process.arch, headSha: process.env.GITHUB_SHA,
+const report = { platform: process.platform, arch: process.arch, headSha: process.env.VI_CUES_HEAD,
   physicalSpeakerAudibility: 'not-verified-manual-listening-required' };
 let window, stopVideo;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,7 +47,7 @@ async function run() {
   const end = renderer.indexOf('\nfunction showStatus(');
   assert.ok(end > 0, 'Renderer cue entrypoint was not found.');
   await window.webContents.executeJavaScript(renderer.slice(0, end) +
-    '\nwindow.playRendererCue = kind => cue(kind); window.setCueSounds = enabled => { soundsEnabled = enabled; };');
+    '\nwindow.playRendererCue = kind => cue(kind); window.setCueSounds = enabled => { soundsEnabled = enabled; }; undefined;');
   const deadline = Date.now() + 15000;
   while (!(await visible())) {
     if (Date.now() >= deadline) throw new Error('Cue probe is not visible on the native desktop.');
@@ -71,7 +72,7 @@ async function run() {
   report.status = 'passed';
 }
 run().catch((error) => {
-  report.status = 'failed'; report.error = error.stack; console.error(error); process.exitCode = 1;
+  report.status = 'failed'; report.error = error.stack || String(error); console.error(error); process.exitCode = 1;
 }).finally(async () => {
   try {
     if (window && !window.isDestroyed()) {
@@ -80,14 +81,17 @@ run().catch((error) => {
     }
     if (stopVideo) Object.assign(report, await stopVideo());
   } catch (error) {
-    report.status = 'failed'; report.evidenceError = error.stack; console.error(error); process.exitCode = 1;
+    report.status = 'failed'; report.evidenceError = error.stack || String(error); console.error(error); process.exitCode = 1;
   }
   try {
     window?.destroy();
     await fs.rm(path.join(directory, 'profile'), { recursive: true, force: true });
   } catch (error) {
-    report.status = 'failed'; report.cleanupError = error.stack; console.error(error); process.exitCode = 1;
+    report.status = 'failed'; report.cleanupError = error.stack || String(error); console.error(error); process.exitCode = 1;
   }
   await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
   app.exit(process.exitCode || 0);
+}).catch((error) => {
+  console.error('Cue probe could not persist its final report.', error);
+  app.exit(1);
 });

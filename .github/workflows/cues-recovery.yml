@@ -45,8 +45,11 @@ jobs:
           - { os: macos-15, arch: arm64 }
     env:
       VI_EXPECTED_ARCH: ${{ matrix.platform.arch }}
+      VI_CUES_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
