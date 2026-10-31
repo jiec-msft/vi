@@ -7,21 +7,26 @@ The child is launched with explicit WinSta0 desktop placement and an owned Job.
 Nonzero child exits/timeouts remain nonzero after restore and cleanup.
 Output contains sanitized ownership/restore receipts and child-owned evidence.
 ChildScript is an Electron entry point accepting --desktop-probe-* arguments;
-this interface is a probe, not a replacement for product UI acceptance.
+the default probe is unchanged. Finite P0 entries start the real Electron harness,
+with metadata separated from product assertions and raw exits kept distinct.
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('normal', 'failure', 'timeout', 'input', 'policy')]
     [string] $Case = 'normal',
+    [ValidateSet('probe', 'overlay', 'release-negative')]
+    [string] $Entry = 'probe',
     [string] $Executable,
     [string] $ChildScript = (Join-Path $PSScriptRoot 'windows-ci-desktop-probe.cjs'),
     [string] $Output,
-    [ValidateRange(1, 90)]
+    [ValidateRange(1, 150)]
     [int] $TimeoutSeconds = 45,
     [string] $DesktopName,
     [uint32] $TargetProcessId,
     [int] $X,
-    [int] $Y
+    [int] $Y,
+    [string] $WorkingDirectory = (Get-Location).Path,
+    [switch] $HarnessTimeoutProbe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +66,18 @@ if (-not $Executable -or -not (Test-Path -LiteralPath $Executable -PathType Leaf
     -not (Test-Path -LiteralPath $ChildScript -PathType Leaf)) {
     throw 'Existing executable and child script paths are required.'
 }
+if ($Entry -ne 'probe') {
+    if ($Case -ne 'normal') { throw 'Integration entry does not change original probe case semantics.' }
+    $harness = Join-Path $PSScriptRoot $(if ($Entry -eq 'overlay') { 'overlay-recovery-ui.cjs' } else { 'overlay-release-negative.cjs' })
+    if (-not (Test-Path -LiteralPath $harness -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) { throw 'Existing integration harness and repository cwd required.' }
+    $result = [ViCiDesktop]::RunHarness([IO.Path]::GetFullPath($Executable),
+        [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'windows-ci-desktop-probe.cjs')),
+        [IO.Path]::GetFullPath($harness), [IO.Path]::GetFullPath($Output), $Entry,
+        [IO.Path]::GetFullPath($WorkingDirectory), $TimeoutSeconds, [bool] $HarnessTimeoutProbe)
+    exit $result
+}
+if ($HarnessTimeoutProbe) { throw 'Harness timeout witness is not an original probe case.' }
 $result = [ViCiDesktop]::Run(
     [IO.Path]::GetFullPath($Executable), [IO.Path]::GetFullPath($ChildScript),
     [IO.Path]::GetFullPath($Output), $Case, $TimeoutSeconds

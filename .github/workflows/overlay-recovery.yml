@@ -15,6 +15,8 @@ on:
       - scripts/overlay-ci-child.ps1
       - scripts/overlay-ci-attribution*.ps1
       - scripts/overlay-ci-quiet.ps1
+      - scripts/overlay-ci-desktop*
+      - scripts/windows-ci-desktop*
       - .github/workflows/overlay-recovery.yml
 permissions:
   contents: read
@@ -36,6 +38,7 @@ jobs:
     env:
       VI_EXPECTED_ARCH: ${{ matrix.platform.arch }}
       VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - name: Verify owned actor generation and unknown attribution
@@ -60,6 +63,13 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: Verify strict owned desktop inheritance assertions
+        run: node --test scripts/overlay-ci-desktop.test.cjs
+      - name: Record native PowerShell wrapper executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "VI_DESKTOP_PWSH=$((Get-Process -Id $PID).Path)" >> $env:GITHUB_ENV
       - run: node scripts/prepare-provider.cjs
       - run: node scripts/build-native.cjs
       - name: Build owned macOS mouse driver
@@ -78,6 +88,9 @@ jobs:
       - name: Verify rejected normal input still releases an owned press only in cleanup
         if: runner.os == 'Windows'
         run: node scripts/overlay-release-ci.cjs
+      - name: Verify full harness timeout restores desktop without claiming held-input recovery
+        if: runner.os == 'Windows'
+        run: node scripts/overlay-recovery-ci.cjs --desktop-timeout-probe
       - name: Restore isolated runner terminal choice
         if: always() && runner.os == 'Windows' && steps.console-host.outputs.state_saved == 'true'
         shell: pwsh
@@ -100,5 +113,16 @@ jobs:
             artifacts-ci/overlay-recovery/process-launches.jsonl
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png
+            artifacts-ci/overlay-recovery/desktop-*.json
+            artifacts-ci/overlay-recovery/desktop-isolation/*.json
+            artifacts-ci/overlay-recovery/desktop-isolation/default/*.json
+            artifacts-ci/overlay-recovery/release-desktop-isolation/*.json
+            artifacts-ci/overlay-recovery/release-desktop-isolation/default/*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/report.json
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop.webm
+            artifacts-ci/overlay-recovery/desktop-timeout/*.png
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop-isolation/*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop-isolation/default/*.json
           retention-days: 3
           if-no-files-found: error

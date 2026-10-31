@@ -94,6 +94,8 @@ public static class ViCiDesktop
     [DllImport("user32.dll")]
     static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")]
+    static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")]
     static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
@@ -127,6 +129,8 @@ public static class ViCiDesktop
     static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out Accounting accounting, uint size, IntPtr needed);
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+    static extern bool QueryJobProcesses(IntPtr job, int infoClass, IntPtr buffer, uint size, IntPtr needed);
 
     static void Require(bool condition, string message)
     {
@@ -203,15 +207,20 @@ public static class ViCiDesktop
             throw;
         }
     }
-    static ProcessInfo Start(IntPtr job, string executable, string script, string directory, string desktop, string role, string testCase)
+    static ProcessInfo Start(IntPtr job, string executable, string script, string directory, string desktop, string role, string testCase,
+        string entry = "probe", string workingDirectory = null, bool timeoutProbe = false)
     {
         var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = "WinSta0\\" + desktop };
-        var command = new StringBuilder(Quote(executable) + " " + Quote(script) +
-            " --desktop-probe-role=" + role + " --desktop-probe-case=" + testCase +
-            " " + Quote("--desktop-probe-output=" + directory) + " --desktop-probe-name=" + desktop);
+        string arguments = entry == "probe"
+            ? " --desktop-probe-role=" + role + " --desktop-probe-case=" + testCase +
+                " " + Quote("--desktop-probe-output=" + directory) + " --desktop-probe-name=" + desktop
+            : " --ci-mode=" + (entry == "overlay" ? "overlay-recovery" : "release-negative") +
+                " --ci-owned-desktop=" + desktop + " " + Quote("--ci-desktop-receipt=" + directory) +
+                (timeoutProbe ? " --ci-desktop-timeout-probe" : "");
+        var command = new StringBuilder(Quote(executable) + " " + Quote(script) + arguments);
         ProcessInfo child;
         Win32(CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false,
-            SuspendedNoWindow, IntPtr.Zero, Environment.CurrentDirectory, ref startup, out child), "Create owned suspended child");
+            SuspendedNoWindow, IntPtr.Zero, workingDirectory ?? Environment.CurrentDirectory, ref startup, out child), "Create owned suspended child");
         try {
             Win32(AssignProcessToJobObject(job, child.process), "Assign owned child to job");
             Win32(ResumeThread(child.thread) != UInt32.MaxValue, "Resume owned child");
@@ -230,7 +239,7 @@ public static class ViCiDesktop
             throw;
         }
     }
-    static void WaitReady(ProcessInfo child, string receipt, int seconds)
+    static void WaitReady(ProcessInfo child, string receipt, double seconds)
     {
         var clock = Stopwatch.StartNew();
         while (!File.Exists(receipt)) {
@@ -242,6 +251,50 @@ public static class ViCiDesktop
         using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
+    }
+    static void ValidateHarnessReady(ProcessInfo child, string receipt, string desktop)
+    {
+        using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
+            var root = json.RootElement;
+            Require(root.GetProperty("pid").GetUInt32() == child.pid &&
+                Equal(root.GetProperty("desktop").GetString(), desktop), "Harness readiness root/desktop mismatch.");
+            foreach (string key in new[] { "mainWindow", "overlayWindow" }) {
+                IntPtr window = new IntPtr(Int64.Parse(root.GetProperty(key).GetString()));
+                uint owner;
+                uint tid = GetWindowThreadProcessId(window, out owner);
+                Require(IsWindow(window) && IsWindowVisible(window) && owner == child.pid &&
+                    Equal(Name(GetThreadDesktop(tid)), desktop), "Harness window is not visible on its owned root desktop.");
+            }
+        }
+    }
+    static void ObserveJobDesktops(IntPtr job, string desktop, Dictionary<uint, object> observations)
+    {
+        const int capacity = 256;
+        IntPtr buffer = Marshal.AllocHGlobal(8 + capacity * IntPtr.Size);
+        try {
+            Win32(QueryJobProcesses(job, 3, buffer, (uint)(8 + capacity * IntPtr.Size), IntPtr.Zero), "Read owned job process identities");
+            int count = Marshal.ReadInt32(buffer, 4);
+            Require(count >= 0 && count <= capacity, "Owned process inventory exceeded its bound.");
+            for (int index = 0; index < count; index++) {
+                uint pid = (uint)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
+                if (observations.ContainsKey(pid)) continue;
+                Process process = null;
+                try {
+                    process = Process.GetProcessById((int)pid);
+                    var names = new List<string>();
+                    foreach (ProcessThread thread in process.Threads) {
+                        string actual = Name(GetThreadDesktop((uint)thread.Id));
+                        Require(Equal(actual, desktop), "Owned job descendant thread escaped its ordinary desktop.");
+                        if (!names.Contains(actual)) names.Add(actual);
+                    }
+                    Require(names.Count > 0, "Owned descendant thread desktop was not observable.");
+                    observations[pid] = new { pid, executable = process.ProcessName, threadDesktops = names,
+                        observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), status = "verified-owned-job-member" };
+                } catch (ArgumentException) {
+                    observations[pid] = new { pid, status = "exited-before-observation-not-desktop-proof" };
+                } finally { if (process != null) process.Dispose(); }
+            }
+        } finally { Marshal.FreeHGlobal(buffer); }
     }
     static void CleanupJob(IntPtr job, List<string> errors, Dictionary<string, object> report, string key)
     {
@@ -278,7 +331,25 @@ public static class ViCiDesktop
         if (unhandled != null) throw unhandled;
         return result;
     }
-    static int RunCore(string executable, string script, string directory, string testCase, int timeout)
+    public static int RunHarness(string executable, string sentinel, string script, string directory,
+        string entry, string workingDirectory, int timeout, bool timeoutProbe)
+    {
+        Guard();
+        Require(entry == "overlay" || entry == "release-negative", "Unsupported integration entry.");
+        Require(timeout >= 1 && timeout <= (entry == "overlay" ? 150 : 60), "Integration wall deadline exceeds the existing harness limit.");
+        Require(!timeoutProbe || (entry == "overlay" && timeout == 35), "Timeout witness requires the finite overlay entry/deadline.");
+        int result = 1;
+        Exception unhandled = null;
+        var thread = new Thread(() => {
+            try { result = RunCore(executable, sentinel, directory, "normal", timeout, entry, script, workingDirectory, timeoutProbe); }
+            catch (Exception error) { unhandled = error; }
+        });
+        thread.Start(); thread.Join();
+        if (unhandled != null) throw unhandled;
+        return result;
+    }
+    static int RunCore(string executable, string script, string directory, string testCase, int timeout,
+        string entry = "probe", string harness = null, string workingDirectory = null, bool timeoutProbe = false)
     {
         var clock = Stopwatch.StartNew();
         var errors = new List<string>();
@@ -291,7 +362,8 @@ public static class ViCiDesktop
             ["windowsVersion"] = Environment.OSVersion.Version.ToString(),
             ["desktopFlags"] = 0, ["desktopAccess"] = DesktopAccess,
             ["inheritHandles"] = false, ["security"] = "inherited-window-station-ACL",
-            ["scope"] = "ordinary-hosted-CI-desktop-not-a-security-sandbox"
+            ["scope"] = "ordinary-hosted-CI-desktop-not-a-security-sandbox",
+            ["controllerPid"] = Environment.ProcessId
         };
         IntPtr original = IntPtr.Zero, owned = IntPtr.Zero, defaultJob = IntPtr.Zero, ownedJob = IntPtr.Zero;
         IntPtr initialThread = IntPtr.Zero;
@@ -300,6 +372,8 @@ public static class ViCiDesktop
         string ownedName = "vi-ci-" + Environment.GetEnvironmentVariable("GITHUB_RUN_ID") + "-" +
             Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT") + "-" + Guid.NewGuid().ToString("N");
         bool restored = false;
+        Stopwatch rootClock = null;
+        var descendantDesktops = new Dictionary<uint, object>();
         try {
             Require(Equal(Name(GetProcessWindowStation()), "WinSta0"), "Only WinSta0 is supported.");
             initialThread = GetThreadDesktop(GetCurrentThreadId());
@@ -310,6 +384,7 @@ public static class ViCiDesktop
             report["ownedDesktop"] = ownedName;
             Require(Equal(originalName, "Default") && Equal(Name(initialThread), originalName),
                 "Refusing a non-default original input/thread desktop.");
+            report["initialControllerThreadDesktop"] = Name(initialThread);
             IntPtr collision = OpenDesktopW(ownedName, 0, false, ReadSwitch);
             if (collision != IntPtr.Zero) {
                 Win32(CloseDesktop(collision), "Close colliding desktop");
@@ -329,27 +404,42 @@ public static class ViCiDesktop
             defaultJob = NewJob();
             string defaultDirectory = Path.Combine(directory, "default");
             Directory.CreateDirectory(defaultDirectory);
-            background = Start(defaultJob, executable, script, defaultDirectory, originalName, "default", testCase);
+            background = Start(defaultJob, executable, script, defaultDirectory, originalName, "default", testCase,
+                "probe", workingDirectory);
             WaitReady(background, Path.Combine(defaultDirectory, "ready.json"), 20);
             Require(VisibleWindows(original, background.pid) > 0, "Owned default fixture has no visible window.");
             ownedJob = NewJob();
-            child = Start(ownedJob, executable, script, directory, ownedName, "owned", testCase);
+            Require(entry == "probe" || !File.Exists(Path.Combine(directory, "ready.json")), "Stale harness readiness receipt refused.");
+            rootClock = Stopwatch.StartNew();
+            child = Start(ownedJob, executable, entry == "probe" ? script : harness, directory, ownedName, "owned", testCase,
+                entry, workingDirectory, timeoutProbe);
+            report["entry"] = entry;
+            report["workingDirectory"] = workingDirectory ?? Environment.CurrentDirectory;
             report["ownedPid"] = child.pid;
             report["defaultPid"] = background.pid;
             Require(Equal(InputName(), originalName), "External input desktop changed before switch; refusing.");
             Win32(SwitchDesktop(owned), "Switch to ordinary owned desktop");
             Require(Equal(InputName(), ownedName), "Owned input desktop switch readback failed.");
-            WaitReady(child, Path.Combine(directory, "ready.json"), 20);
+            double readyBudget = entry == "probe" ? 20 : Math.Min(entry == "overlay" ? 35 : 15, timeout - rootClock.Elapsed.TotalSeconds);
+            Require(readyBudget > 0, "Root inclusive wall deadline expired before readiness.");
+            WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget);
+            if (entry != "probe") {
+                Require(rootClock.Elapsed.TotalSeconds < timeout, "Root inclusive wall deadline expired during readiness.");
+                ValidateHarnessReady(child, Path.Combine(directory, "ready.json"), ownedName);
+                report["rootWindowsVerified"] = true;
+            }
             Require(VisibleWindows(owned, child.pid) > 0 && VisibleWindows(owned, background.pid) == 0,
                 "Owned/default window desktop separation failed.");
             report["windowSeparation"] = true;
             uint state;
-            var childClock = Stopwatch.StartNew();
+            var childClock = entry == "probe" ? Stopwatch.StartNew() : rootClock;
             do {
                 Require(Equal(InputName(), ownedName), "External input desktop changed during probe; refusing.");
+                if (entry != "probe") ObserveJobDesktops(ownedJob, ownedName, descendantDesktops);
                 state = WaitForSingleObject(child.process, 100);
                 Require(state == 0 || state == WaitTimeout, "Child wait failed.");
             } while (state == WaitTimeout && childClock.Elapsed.TotalSeconds < timeout);
+            report["rootWallSeconds"] = rootClock.Elapsed.TotalSeconds;
             if (state == WaitTimeout) {
                 report["childOutcome"] = "timeout";
                 errors.Add("Owned child timed out.");
@@ -431,6 +521,9 @@ public static class ViCiDesktop
                 if (!removed) errors.Add("Owned desktop still exists after bounded cleanup readback.");
             }
             report["originalRestored"] = restored;
+            report["descendantDesktopObservations"] = descendantDesktops.Values;
+            if (entry != "probe" && report.TryGetValue("childOutcome", out var outcome) && (string)outcome == "timeout")
+                report["heldInputCleanupScope"] = "root did not complete; held authority/release unknown, not a successful gesture-cleanup proof";
             report["elapsedSeconds"] = clock.Elapsed.TotalSeconds;
             report["errors"] = errors;
             report["passed"] = errors.Count == 0;

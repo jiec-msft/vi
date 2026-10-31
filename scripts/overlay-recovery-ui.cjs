@@ -14,6 +14,10 @@ if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
 }
 const directory = path.resolve(process.env.VI_OUTPUT), profile = path.join(directory, 'profile');
 const unavailable = path.join(directory, 'cursor-unavailable');
+const desktopArgument = process.argv.find((arg) => arg.startsWith('--ci-owned-desktop='));
+const expectedDesktop = desktopArgument?.slice('--ci-owned-desktop='.length);
+const receiptArgument = process.argv.find((arg) => arg.startsWith('--ci-desktop-receipt='));
+const desktopReceipt = receiptArgument?.slice('--ci-desktop-receipt='.length);
 app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -48,6 +52,19 @@ async function until(action, label, limit = 15000) {
   } while (Date.now() < deadline);
   throw new Error(`Overlay evidence deadline: ${label}`);
 }
+async function collectNativeDesktopReceipts() {
+  report.nativeDesktopReceipts = [];
+  for (const helper of report.helpers) {
+    const receipt = JSON.parse(await fs.readFile(path.join(directory, `desktop-${helper.role}-${helper.pid}.json`), 'utf8'));
+    assert.equal(receipt.pid, helper.pid);
+    assert.equal(receipt.role, helper.role);
+    assert.equal(receipt.actualInheritanceVerified, true);
+    assert.equal(receipt.station, 'WinSta0');
+    assert.equal(receipt.threadDesktop, expectedDesktop);
+    assert.equal(receipt.inputDesktop, expectedDesktop);
+    report.nativeDesktopReceipts.push(receipt);
+  }
+}
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
 const status = async () => {
   const value = await evaluate('window.voice.status()');
@@ -79,7 +96,8 @@ async function mouse(mode, point) {
       result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
         '-Window', id, '-Foreground', report.windowIds.main, '-Owner', String(process.pid),
-        '-Mode', mode, '-X', String(location.x), '-Y', String(location.y)],
+        '-Mode', mode, '-X', String(location.x), '-Y', String(location.y),
+        ...(expectedDesktop ? ['-DesktopName', expectedDesktop] : [])],
       { timeout: 15000, windowsHide: true });
     } else {
       result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
@@ -223,6 +241,7 @@ async function run() {
     shortcut: 'CommandOrControl+Alt+Shift+F9', cancelShortcut: 'CommandOrControl+Alt+Shift+F10',
   }));
   let helperFile;
+  let deliveryFile;
   if (process.platform === 'win32') {
     const original = await fs.readFile(path.resolve('native', 'windows-overlay.ps1'), 'utf8');
     const seam = `
@@ -232,8 +251,18 @@ async function run() {
     }
 `;
     assert.ok(original.includes('if (!GetCursorPos(out point))'));
-    const injected = original.replace('    POINT last;', `    POINT last;${seam}`)
+    let injected = original.replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
+    if (expectedDesktop) {
+      const quote = (value) => `'${value.replace(/'/g, "''")}'`;
+      const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -Role ${role}`;
+      injected = injected.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'\n${attest('overlay-pointer')}`);
+      const delivery = await fs.readFile(path.resolve('native', 'windows-delivery.ps1'), 'utf8');
+      deliveryFile = path.join(directory, 'windows-delivery-ci.ps1');
+      await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
+        `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
+        .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1'))));
+    }
     helperFile = path.join(directory, 'windows-overlay-ci.ps1');
     await fs.writeFile(helperFile, injected);
   }
@@ -242,7 +271,8 @@ async function run() {
     const pointer = args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-overlay.ps1'));
     const delivery = file.endsWith('macos-delivery') ||
       args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-delivery.ps1'));
-    const actual = pointer ? args.map((arg) => arg.endsWith('windows-overlay.ps1') ? helperFile : arg) : args;
+    const actual = pointer ? args.map((arg) => arg.endsWith('windows-overlay.ps1') ? helperFile : arg)
+      : delivery && deliveryFile ? args.map((arg) => arg.endsWith('windows-delivery.ps1') ? deliveryFile : arg) : args;
     const child = spawn(file, actual, options);
     if (pointer) {
       helpers.push(child);
@@ -289,6 +319,13 @@ async function run() {
   mainWindow.focus();
   await until(() => BrowserWindow.getFocusedWindow() === mainWindow, 'owned focus baseline');
   assert.equal(overlay.isFocusable(), false);
+  if (expectedDesktop) {
+    assert.ok(desktopReceipt);
+    await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
+      mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
+    await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
+    report.desktopScope = 'ordinary owned CI desktop; not default user desktop acceptance';
+  }
   const windowEvent = (event) => report.windowEvents.push({ event, stage, at: Date.now(), visible: overlay.isVisible() });
   overlay.on('show', () => { shows++; windowEvent('show'); });
   overlay.on('hide', () => { hides++; windowEvent('hide'); });
@@ -307,6 +344,29 @@ async function run() {
   report.startupVisibilityEvents = { shows, hides, focusChanges };
   assert.equal(hides, 0, 'Overlay disappeared while establishing the startup baseline.');
   shows = hides = focusChanges = 0;
+  if (process.argv.includes('--ci-desktop-timeout-probe')) {
+    assert.ok(expectedDesktop && desktopReceipt);
+    await mouse('hover', await pointFor('#drag-handle'));
+    const witness = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
+      '-Window', report.windowIds.overlay, '-Owner', String(process.pid), '-Mode', 'status',
+      '-DesktopName', expectedDesktop], { timeout: 15000, windowsHide: true });
+    report.timeoutWitness = JSON.parse(witness.stdout.trim());
+    report.osInputs.push({ mode: 'status', ...report.timeoutWitness });
+    assert.equal(report.timeoutWitness.leftHeldBefore, false);
+    assert.equal(report.timeoutWitness.leftHeldAfter, false);
+    assert.equal(report.timeoutWitness.releaseSent, false);
+    await collectNativeDesktopReceipts();
+    report.electronProcesses = app.getAppMetrics().map(({ pid, type }) => ({ pid, type }));
+    Object.assign(report, await stopVideo());
+    stopVideo = undefined;
+    report.status = 'timeout-witness-ready';
+    report.timeoutScope = 'intentional stall before any owned press; no guarantee for a killed root with unknown held input';
+    await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
+    await fs.writeFile(path.join(desktopReceipt, 'timeout-ready.json'), JSON.stringify({ pid: process.pid,
+      desktop: expectedDesktop, leftHeld: false }));
+    await new Promise(() => {});
+  }
   await physicalDrag('physical-drag');
   await physicalControls('physical-stop-cancel');
   if (process.platform === 'win32') {
@@ -377,6 +437,10 @@ async function run() {
   assert.equal(hides, 0);
   assert.equal(focusChanges, 0);
   report.finalPointerState = (await status()).nativePointerState;
+  if (expectedDesktop) {
+    await collectNativeDesktopReceipts();
+    report.electronProcesses = app.getAppMetrics().map(({ pid, type }) => ({ pid, type }));
+  }
   report.status = 'passed';
 }
 run().catch((error) => {
@@ -397,7 +461,8 @@ run().catch((error) => {
           result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
             '-Window', ownedDownReceipt.ownedWindow, '-Owner', String(process.pid), '-Mode', 'up',
-            '-CleanupOwnedDown', '-OwnedDownReceipt', JSON.stringify(ownedDownReceipt)], { timeout: 15000, windowsHide: true });
+            '-CleanupOwnedDown', '-OwnedDownReceipt', JSON.stringify(ownedDownReceipt),
+            ...(expectedDesktop ? ['-DesktopName', expectedDesktop] : [])], { timeout: 15000, windowsHide: true });
         } catch (error) {
           if (error.stdout?.trim()) report.cleanupRelease = JSON.parse(error.stdout.trim());
           report.cleanupBlocked = { reason: error.message, remainingHeld: report.cleanupRelease?.leftHeldAfter ?? 'unknown' };

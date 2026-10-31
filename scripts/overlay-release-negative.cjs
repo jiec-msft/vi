@@ -10,7 +10,9 @@ if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'win32' ||
   throw new Error('Failure-release checks require an isolated GitHub-hosted Windows runner.');
 }
 const execute = promisify(execFile), directory = path.resolve(process.env.VI_OUTPUT);
-const report = { scope: 'two owned fixture windows; normal failure remains nonzero', checks: [] };
+const expectedDesktop = process.argv.find((arg) => arg.startsWith('--ci-owned-desktop='))?.slice('--ci-owned-desktop='.length);
+const desktopReceipt = process.argv.find((arg) => arg.startsWith('--ci-desktop-receipt='))?.slice('--ci-desktop-receipt='.length);
+const report = { scope: 'two owned fixture windows; normal failure remains nonzero', checks: [], osInputs: [] };
 let main, overlay, other, ownedDown;
 const handle = (window) => window.getNativeWindowHandle().readBigUInt64LE().toString();
 async function input(mode, cleanup = false, receipt = undefined) {
@@ -19,7 +21,8 @@ async function input(mode, cleanup = false, receipt = undefined) {
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
     '-Window', handle(overlay), '-Foreground', handle(main), '-Owner', String(process.pid),
-    '-Mode', mode, '-X', String(point.x), '-Y', String(point.y)];
+    '-Mode', mode, '-X', String(point.x), '-Y', String(point.y),
+    ...(expectedDesktop ? ['-DesktopName', expectedDesktop] : [])];
   if (cleanup) {
     args.push('-CleanupOwnedDown');
     if (receipt) args.push('-OwnedDownReceipt', JSON.stringify(receipt));
@@ -27,12 +30,19 @@ async function input(mode, cleanup = false, receipt = undefined) {
   try {
     const result = await execute('powershell.exe', args, { timeout: 15000, windowsHide: true });
     const value = JSON.parse(result.stdout.trim());
+    report.osInputs.push({ mode, ...value });
+    if (expectedDesktop) {
+      assert.equal(value.station, 'WinSta0');
+      assert.equal(value.threadDesktop, expectedDesktop);
+      assert.equal(value.inputDesktop, expectedDesktop);
+    }
     if (value.ownedDownInjected && value.ownerVerified && value.leftHeldAfter) ownedDown = value;
     if (mode === 'up' && value.leftHeldAfter === false) ownedDown = undefined;
     return value;
   } catch (error) {
     if (error.stdout?.trim()) {
       const value = JSON.parse(error.stdout.trim());
+      report.osInputs.push({ mode, ...value });
       if (value.ownedDownInjected && value.ownerVerified && value.leftHeldAfter) ownedDown = value;
     }
     throw error;
@@ -57,6 +67,13 @@ async function run() {
   main.show(); main.focus(); overlay.showInactive();
   await new Promise((resolve) => setTimeout(resolve, 300));
   report.windowIds = { owner: process.pid, main: handle(main), overlay: handle(overlay), other: handle(other) };
+  if (expectedDesktop) {
+    assert.ok(desktopReceipt);
+    await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
+      mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
+    await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
+    report.electronProcesses = app.getAppMetrics().map(({ pid, type }) => ({ pid, type }));
+  }
   await rejectedCleanup('noOwnedDown');
   const first = await input('down');
   assert.equal(first.ownedDownInjected, true);
