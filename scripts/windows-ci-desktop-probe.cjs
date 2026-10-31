@@ -68,7 +68,8 @@ async function run() {
   await fs.rename(path.join(directory, 'ready.tmp'), path.join(directory, 'ready.json'));
   if (role === 'default') {
     const timer = setInterval(() => {
-      fs.writeFile(path.join(directory, 'heartbeat.json'), JSON.stringify({ pid: process.pid, time: Date.now() }))
+      fs.writeFile(path.join(directory, 'heartbeat.tmp'), JSON.stringify({ pid: process.pid, time: Date.now() }))
+        .then(() => fs.rename(path.join(directory, 'heartbeat.tmp'), path.join(directory, 'heartbeat.json')))
         .catch((error) => { clearInterval(timer); throw error; });
     }, 250);
     return;

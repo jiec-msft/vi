@@ -65,6 +65,8 @@ public static class ViCiDesktop
     }
     [StructLayout(LayoutKind.Sequential)]
     struct InputEvent { public uint type; public MouseInput mouse; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct UserFlags { public int inherit, reserved; public uint flags; }
     delegate bool EnumWindow(IntPtr window, IntPtr parameter);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -85,6 +87,8 @@ public static class ViCiDesktop
     static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool GetUserObjectInformationW(IntPtr handle, int index, StringBuilder value, uint bytes, out uint needed);
+    [DllImport("user32.dll", EntryPoint = "GetUserObjectInformationW", SetLastError = true)]
+    static extern bool GetUserFlags(IntPtr handle, int index, out UserFlags value, uint bytes, out uint needed);
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool EnumDesktopWindows(IntPtr desktop, EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")]
@@ -215,10 +219,14 @@ public static class ViCiDesktop
             child.thread = IntPtr.Zero;
             return child;
         } catch {
-            Win32(TerminateProcess(child.process, 91), "Terminate failed owned child");
-            Win32(WaitForSingleObject(child.process, 5000) == 0, "Wait failed owned child");
-            if (child.thread != IntPtr.Zero) Win32(CloseHandle(child.thread), "Close failed child thread");
-            Win32(CloseHandle(child.process), "Close failed child process");
+            try {
+                Win32(TerminateProcess(child.process, 91), "Terminate failed owned child");
+                Win32(WaitForSingleObject(child.process, 5000) == 0, "Wait failed owned child");
+            } finally {
+                try {
+                    if (child.thread != IntPtr.Zero) Win32(CloseHandle(child.thread), "Close failed child thread");
+                } finally { Win32(CloseHandle(child.process), "Close failed child process"); }
+            }
             throw;
         }
     }
@@ -279,6 +287,7 @@ public static class ViCiDesktop
             ["attempt"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT"),
             ["sha"] = Environment.GetEnvironmentVariable("GITHUB_SHA"),
             ["arch"] = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
+            ["windowsVersion"] = Environment.OSVersion.Version.ToString(),
             ["desktopFlags"] = 0, ["desktopAccess"] = DesktopAccess,
             ["inheritHandles"] = false, ["security"] = "inherited-window-station-ACL",
             ["scope"] = "ordinary-hosted-CI-desktop-not-a-security-sandbox"
@@ -309,6 +318,13 @@ public static class ViCiDesktop
             owned = CreateDesktopW(ownedName, IntPtr.Zero, IntPtr.Zero, 0, DesktopAccess, IntPtr.Zero);
             Win32(owned != IntPtr.Zero, "Create ordinary owned desktop");
             Require(Equal(Name(owned), ownedName), "Owned desktop identity mismatch.");
+            UserFlags actualFlags;
+            uint needed;
+            Win32(GetUserFlags(owned, 1, out actualFlags, (uint)Marshal.SizeOf<UserFlags>(), out needed), "Read owned desktop flags");
+            Require(actualFlags.inherit == 0 && actualFlags.flags == 0, "Owned desktop unexpectedly inheritable or cross-account hooks allowed.");
+            report["actualDesktopFlags"] = actualFlags.flags;
+            report["actualHandleInheritable"] = actualFlags.inherit != 0;
+            report["controllerThreadDesktop"] = Name(GetThreadDesktop(GetCurrentThreadId()));
             defaultJob = NewJob();
             string defaultDirectory = Path.Combine(directory, "default");
             Directory.CreateDirectory(defaultDirectory);
@@ -346,6 +362,12 @@ public static class ViCiDesktop
             Require(WaitForSingleObject(background.process, 0) == WaitTimeout &&
                 VisibleWindows(original, background.pid) > 0, "Owned default fixture did not stay running.");
             report["defaultFixtureStayedAlive"] = true;
+            using (var heartbeat = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "default", "heartbeat.json")))) {
+                Require(heartbeat.RootElement.GetProperty("pid").GetUInt32() == background.pid &&
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - heartbeat.RootElement.GetProperty("time").GetInt64() < 3000,
+                    "Default desktop owned fixture heartbeat is stale.");
+            }
+            report["defaultFixtureHeartbeatFresh"] = true;
         } catch (Exception error) { errors.Add(error.Message); }
         finally {
             if (original != IntPtr.Zero && originalName != null) {
@@ -362,10 +384,14 @@ public static class ViCiDesktop
             }
             CleanupJob(ownedJob, errors, report, "ownedJobCleanup");
             CleanupJob(defaultJob, errors, report, "defaultJobCleanup");
+            bool processHandlesClosed = true;
             foreach (var process in new[] { child, background }) {
-                if (process.process != IntPtr.Zero && !CloseHandle(process.process))
+                if (process.process != IntPtr.Zero && !CloseHandle(process.process)) {
+                    processHandlesClosed = false;
                     errors.Add("Close owned process handle failed: " + Marshal.GetLastWin32Error());
+                }
             }
+            report["processHandlesClosed"] = processHandlesClosed;
             // GetThreadDesktop is borrowed; detach the fresh controller thread before closing created handles.
             if (initialThread != IntPtr.Zero && !SetThreadDesktop(initialThread))
                 errors.Add("Restore controller thread desktop failed: " + Marshal.GetLastWin32Error());

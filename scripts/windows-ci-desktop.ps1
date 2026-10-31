@@ -1,3 +1,14 @@
+<#
+.SYNOPSIS
+Runs an owned fixture on an ordinary desktop in native GitHub-hosted Windows CI.
+.DESCRIPTION
+No elevation, secure desktops, background-process termination or local GUI use.
+The child is launched with explicit WinSta0 desktop placement and an owned Job.
+Nonzero child exits/timeouts remain nonzero after restore and cleanup.
+Output contains sanitized ownership/restore receipts and child-owned evidence.
+ChildScript is an Electron entry point accepting --desktop-probe-* arguments;
+this interface is a probe, not a replacement for product UI acceptance.
+#>
 [CmdletBinding()]
 param(
     [ValidateSet('normal', 'failure', 'timeout', 'input', 'policy')]

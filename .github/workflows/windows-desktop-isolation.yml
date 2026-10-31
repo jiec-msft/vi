@@ -32,7 +32,12 @@ jobs:
           node-version: '24'
           cache: npm
       - name: Install probe dependencies
-        run: npm ci --no-audit --no-fund
+        shell: pwsh
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Probe dependencies failed.' }
+          node -e "console.log(require('electron'))"
+          if ($LASTEXITCODE -ne 0) { throw 'Electron binary preparation failed.' }
       - name: Pure guard and restore policy
         shell: pwsh
         run: |
@@ -65,7 +70,8 @@ jobs:
             }
             $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
             if (-not $report.originalRestored -or -not $report.desktopHandlesClosed -or
-                -not $report.ownedDesktopRemoved -or -not $report.defaultFixtureStayedAlive -or
+                -not $report.processHandlesClosed -or -not $report.ownedDesktopRemoved -or
+                -not $report.defaultFixtureStayedAlive -or -not $report.defaultFixtureHeartbeatFresh -or
                 $report.ownedJobCleanup.active -ne 0 -or $report.defaultJobCleanup.active -ne 0) {
               $failures += "$case cleanup incomplete"
             }
