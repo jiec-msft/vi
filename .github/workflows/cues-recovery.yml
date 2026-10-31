@@ -32,3 +32,42 @@ jobs:
           node-version: '24'
       - name: Cue lifecycle regressions
         run: node --test test/framework/feedback.test.cjs
+  native:
+    name: Cue PCM and desktop (${{ matrix.platform.os }}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+          - { os: macos-15, arch: arm64 }
+    env:
+      VI_EXPECTED_ARCH: ${{ matrix.platform.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install native Electron
+        run: npm ci --no-audit --no-fund
+      - name: Prepare isolated Windows desktop
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\prepare-desktop.ps1
+      - name: Real WebAudio PCM and renderer cue probe
+        run: node scripts/cues-ci.cjs
+      - name: Save generated cue and desktop evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cue-evidence-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          path: |
+            artifacts-ci/cues/report.json
+            artifacts-ci/cues/*.wav
+            artifacts-ci/cues/desktop.webm
+            artifacts-ci/cues/desktop.png
+          retention-days: 7
+          if-no-files-found: error
