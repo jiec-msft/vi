@@ -172,6 +172,7 @@ async function run() {
     return mainWindow && overlay && overlay.isVisible() && (await status()).shortcutReady &&
       (process.platform !== 'win32' || (await status()).nativePointer);
   }, 'full application and native pointer startup', 35000);
+  report.initialPointerRestarts = (await status()).nativePointerRestarts;
   mainWindow.focus();
   await until(() => BrowserWindow.getFocusedWindow() === mainWindow, 'owned focus baseline');
   assert.equal(overlay.isFocusable(), false);
@@ -212,9 +213,10 @@ async function run() {
     point = await pointFor('#drag-handle');
     await mouse('hover', point);
     await mouse('down', point);
+    const beforeDeath = helpers.length;
     helpers.at(-1).kill();
     await until(async () => !(await status()).nativePointer, 'helper death clears readiness');
-    await until(async () => (await status()).nativePointer && helpers.length === 2, 'owned helper recovered');
+    await until(async () => (await status()).nativePointer && helpers.length === beforeDeath + 1, 'owned helper recovered');
     const recovered = overlay.getBounds();
     await mouse('move', { x: point.x - 30, y: point.y - 20 });
     assert.deepEqual(overlay.getBounds(), recovered, 'Dead helper gesture survived recovery.');
@@ -222,7 +224,7 @@ async function run() {
     await physicalDrag('physical-drag-after-helper-recovery');
     report.checks.push('owned-helper-death-recovery-cancels-gesture');
     stage = 'native-retry-budget';
-    for (let count = 2; count <= 4; count++) {
+    for (let count = helpers.length; count <= 4; count++) {
       helpers.at(-1).kill();
       if (count < 4) await until(async () => (await status()).nativePointer && helpers.length === count + 1, 'bounded retry');
       else await until(async () => (await status()).nativePointerState === 'unavailable', 'retry budget exhausted');
@@ -251,16 +253,20 @@ run().catch((error) => {
   report.status = 'failed'; report.error = error.message; process.exitCode = 1;
   console.error(error.stack);
 }).finally(async () => {
+  const cleanupFailure = (stage, error) => {
+    report.status = 'failed'; process.exitCode = 1;
+    (report.cleanupErrors ||= []).push({ stage, error: error.message });
+    console.error(error.stack);
+  };
   try {
     if (held && overlay && !overlay.isDestroyed()) {
       await mouse('up', screen.getCursorScreenPoint());
     }
-    if (stopVideo) Object.assign(report, await stopVideo());
-    await service?.close();
-  } catch (error) {
-    report.status = 'failed'; report.cleanupError = error.message; process.exitCode = 1;
-    console.error(error.stack);
-  }
+  } catch (error) { cleanupFailure('mouse-release', error); }
+  try { if (stopVideo) Object.assign(report, await stopVideo()); }
+  catch (error) { cleanupFailure('desktop-video', error); }
+  try { await service?.close(); }
+  catch (error) { cleanupFailure('service', error); }
   await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
   app.quit();
 });
