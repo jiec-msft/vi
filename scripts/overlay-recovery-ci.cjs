@@ -80,6 +80,10 @@ child.once('exit', async (code) => {
     process.exitCode = timeoutProbe || (code === 0 && report.status === 'passed') ? 0 : 1;
   } catch (error) {
     console.error(error.message); process.exitCode = 1;
+    if (!report && fs.existsSync(path.join(output, 'report.json'))) {
+      report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
+      console.error(`Raw overlay root outcome: ${JSON.stringify({ status: report.status, error: report.error })}`);
+    }
     if (report) {
       report.status = 'failed'; report.resourcesReleased = false; report.resourceError = error.message;
       fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));

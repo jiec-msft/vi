@@ -16,6 +16,7 @@ on:
       - scripts/overlay-ci-attribution*.ps1
       - scripts/overlay-ci-quiet.ps1
       - scripts/overlay-ci-desktop*
+      - scripts/overlay-ci-heartbeat*
       - scripts/windows-ci-desktop*
       - .github/workflows/overlay-recovery.yml
 permissions:
@@ -70,6 +71,9 @@ jobs:
         shell: pwsh
         run: |
           "VI_DESKTOP_PWSH=$((Get-Process -Id $PID).Path)" >> $env:GITHUB_ENV
+      - name: Verify heartbeat readers do not block atomic producer replacement
+        if: runner.os == 'Windows'
+        run: node --test scripts/overlay-ci-heartbeat.test.cjs
       - run: node scripts/prepare-provider.cjs
       - run: node scripts/build-native.cjs
       - name: Build owned macOS mouse driver
@@ -114,6 +118,7 @@ jobs:
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png
             artifacts-ci/overlay-recovery/desktop-*.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/report.json
             artifacts-ci/overlay-recovery/desktop-isolation/*.json
             artifacts-ci/overlay-recovery/desktop-isolation/default/*.json
             artifacts-ci/overlay-recovery/release-desktop-isolation/*.json

@@ -261,6 +261,14 @@ public static class ViCiDesktop
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
     }
+    public static FileStream OpenHeartbeatSnapshot(string file)
+    {
+        return new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    }
+    public static bool IsDefaultHeartbeatFresh(uint pid, uint heartbeatPid, long heartbeatAt, long sampleAt)
+    {
+        return heartbeatPid == pid && sampleAt - heartbeatAt < 3000;
+    }
     static Dictionary<string, object> ReadDefaultHeartbeat(ProcessInfo fixture, IntPtr job, IntPtr desktop,
         string directory, string phase, double? rootElapsedSeconds)
     {
@@ -276,7 +284,10 @@ public static class ViCiDesktop
         };
         string file = Path.Combine(directory, "default", "heartbeat.json");
         if (File.Exists(file)) {
-            using (var heartbeat = JsonDocument.Parse(File.ReadAllText(file))) {
+            string text;
+            using (var stream = OpenHeartbeatSnapshot(file))
+            using (var reader = new StreamReader(stream, Encoding.UTF8)) { text = reader.ReadToEnd(); }
+            using (var heartbeat = JsonDocument.Parse(text)) {
                 long at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 long heartbeatAt = heartbeat.RootElement.GetProperty("time").GetInt64();
                 sample["heartbeatPid"] = heartbeat.RootElement.GetProperty("pid").GetUInt32();
@@ -458,11 +469,30 @@ public static class ViCiDesktop
                     if (observation.status == "verified-specific-job-process-identity") continue;
                     observation.attempts++;
                     observation.observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    observation.executable = process.ProcessName;
                     Win32(IsProcessInJob(processHandle, job, out bool member), "Query specific owned job PID " + pid);
                     Require(member, "Enumerated process is not in the specific owned job PID " + pid);
                     observation.specificJobMember = member;
-                    try { foreach (ProcessThread thread in process.Threads) {
+                    try {
+                        ProcessThreadCollection threads = null;
+                        string inventoryApi = "Process.ProcessName";
+                        try {
+                            observation.executable = process.ProcessName;
+                            inventoryApi = "Process.Threads";
+                            threads = process.Threads;
+                        }
+                        catch (InvalidOperationException error) {
+                            uint exitedWait = WaitForSingleObject(processHandle, 0);
+                            int exitedWaitError = exitedWait == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
+                            var sample = new { pid, creationFileTime = created.ToString(), api = inventoryApi,
+                                exceptionType = error.GetType().Name, error = error.Message,
+                                waitState = exitedWait, win32Error = exitedWaitError,
+                                checkedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                                status = "exited-process-thread-inventory-not-proof" };
+                            Require(exitedWait == 0, "Remote thread inventory failed without a confirmed process exit: " +
+                                JsonSerializer.Serialize(sample));
+                            observation.firstUnobserved = sample;
+                        }
+                        if (threads != null) foreach (ProcessThread thread in threads) {
                         uint tid = (uint)thread.Id;
                         var sample = ReadThreadDesktop(pid, tid, observation.observedAt);
                         observation.threadObservations.Add(sample);
@@ -711,8 +741,8 @@ public static class ViCiDesktop
                 report["defaultHeartbeatCheck"] = finalHeartbeat;
                 defaultHeartbeatSamples.Add(finalHeartbeat);
                 Require((string)finalHeartbeat["heartbeatStatus"] == "read" &&
-                    (uint)finalHeartbeat["heartbeatPid"] == background.pid &&
-                    (long)finalHeartbeat["ageMilliseconds"] < 3000 &&
+                    IsDefaultHeartbeatFresh(background.pid, (uint)finalHeartbeat["heartbeatPid"],
+                        (long)finalHeartbeat["heartbeatAt"], (long)finalHeartbeat["sampleAt"]) &&
                     (uint)finalHeartbeat["liveCheckWaitState"] == WaitTimeout &&
                     (int)finalHeartbeat["visibleWindowCount"] > 0,
                     "Default desktop owned fixture heartbeat is stale: " + JsonSerializer.Serialize(finalHeartbeat));

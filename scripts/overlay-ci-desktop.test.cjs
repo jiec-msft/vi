@@ -104,6 +104,9 @@ for (const [label, change] of [
   ['missing specific Job proof', (r, d) => { d.descendantDesktopObservations.pop(); }],
   ['self-name without specific Job membership', (r, d) => { d.descendantDesktopObservations[5].specificJobMember = false; }],
   ['process exited before snapshot completion', (r, d) => { d.descendantDesktopObservations[5].liveAtCompletion = false; }],
+  ['exited remote thread inventory is not completed role proof', (r, d) => {
+    d.descendantDesktopObservations[5].status = 'exited-before-completed-job-proof';
+  }],
   ['missing post-completion live check', (r, d) => { delete d.descendantDesktopObservations[5].liveCheckedAt; }],
   ['live check before completion', (r, d) => { d.descendantDesktopObservations[5].liveCheckedAt = 1089; }],
   ['missing live wait state', (r, d) => { delete d.descendantDesktopObservations[5].liveCheckWaitState; }],

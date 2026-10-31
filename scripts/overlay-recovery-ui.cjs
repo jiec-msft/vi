@@ -388,14 +388,6 @@ async function run() {
   mainWindow.focus();
   await until(() => BrowserWindow.getFocusedWindow() === mainWindow, 'owned focus baseline');
   assert.equal(overlay.isFocusable(), false);
-  if (expectedDesktop) {
-    assert.ok(desktopReceipt);
-    report.rootReadyAt = Date.now();
-    await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
-      mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
-    await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
-    report.desktopScope = 'ordinary owned CI desktop; not default user desktop acceptance';
-  }
   const windowEvent = (event) => report.windowEvents.push({ event, stage, at: Date.now(), visible: overlay.isVisible() });
   overlay.on('show', () => { shows++; windowEvent('show'); });
   overlay.on('hide', () => { hides++; windowEvent('hide'); });
@@ -411,16 +403,26 @@ async function run() {
       marker.style.cssText = 'position:fixed;left:4px;top:4px;width:14px;height:14px;background:#00ffff;pointer-events:none;z-index:2147483647';
       document.body.append(marker);
     })()`);
-    const mainCapture = (await mainWindow.webContents.capturePage()).toPNG();
-    const overlayCapture = (await overlay.webContents.capturePage()).toPNG();
-    report.renderEvidence = { coverage: 'compositor-output-not-all-process-threads',
-      roleSource: 'Electron-app-metrics-self-reported', mainCaptureBytes: mainCapture.length,
-      overlayCaptureBytes: overlayCapture.length, desktopMarkerSamples: 0,
-      mainMarkerVisible: markerVisible(mainCapture, true), overlayMarkerVisible: markerVisible(overlayCapture) };
+    let mainCapture, overlayCapture;
+    await until(async () => {
+      mainCapture = (await mainWindow.webContents.capturePage()).toPNG();
+      overlayCapture = (await overlay.webContents.capturePage()).toPNG();
+      report.renderEvidence = { coverage: 'compositor-output-not-all-process-threads',
+        roleSource: 'Electron-app-metrics-self-reported', mainCaptureBytes: mainCapture.length,
+        overlayCaptureBytes: overlayCapture.length, desktopMarkerSamples: 0,
+        mainMarkerVisible: markerVisible(mainCapture, true), overlayMarkerVisible: markerVisible(overlayCapture) };
+      return report.renderEvidence.mainMarkerVisible && report.renderEvidence.overlayMarkerVisible;
+    }, 'both owned root window markers painted before readiness', 5000);
     assert.equal(report.renderEvidence.mainMarkerVisible, true);
     assert.equal(report.renderEvidence.overlayMarkerVisible, true);
     await fs.writeFile(path.join(directory, 'main-render.png'), mainCapture);
     await fs.writeFile(path.join(directory, 'overlay-render.png'), overlayCapture);
+    assert.ok(desktopReceipt);
+    report.rootReadyAt = Date.now();
+    await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
+      mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
+    await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
+    report.desktopScope = 'ordinary owned CI desktop; not default user desktop acceptance';
   }
   stopVideo = await recordDesktop(directory, (png) => {
     const visible = markerVisible(png);
