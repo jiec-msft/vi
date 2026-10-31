@@ -1,6 +1,11 @@
 import copy
+import hashlib
 import io
+import json
 import os
+from pathlib import Path
+import tempfile
+import urllib.error
 from unittest import TestCase, mock
 import zipfile
 
@@ -143,3 +148,101 @@ class PublishingGuards(TestCase):
         self.assertEqual(body.count("![CI preview]("), 6)
         for url in urls.values():
             self.assertIn(url, body)
+
+    def prepared_output(self, directory):
+        output = Path(directory)
+        files = []
+        for platform in evidence.PLATFORMS:
+            for suite in evidence.SUITES:
+                for extension in ("webm", "png", "gif"):
+                    name = f"{platform}-{suite}.{extension}"
+                    data = b"processed-public-fixture"
+                    (output / name).write_bytes(data)
+                    files.append({"name": name, "bytes": len(data),
+                                  "sha256": hashlib.sha256(data).hexdigest()})
+        manifest = {"repository": evidence.REPOSITORY, "pr": 6, "run": 42,
+                    "head": self.pr["head"]["sha"], "attempt": 1,
+                    "jobs": self.validate(), "files": files}
+        (output / "report.json").write_text(json.dumps(manifest), encoding="utf-8")
+        self.pr["body"] = "Closes #123\nOriginal text."
+        self.run["run_attempt"] = 1
+        return manifest
+
+    def test_publisher_rejects_bad_manifest_before_writes(self):
+        for mutation in ("unexpected-report-field", "wrong-head", "missing-file", "corrupt-file",
+                         "extra-executable", "missing-manifest-entry", "unsafe-name"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                manifest = self.prepared_output(directory)
+                if mutation == "unexpected-report-field":
+                    manifest["rawLog"] = "not-public"
+                elif mutation == "wrong-head":
+                    manifest["head"] = "b" * 40
+                elif mutation == "missing-file":
+                    (Path(directory) / manifest["files"][0]["name"]).unlink()
+                elif mutation == "corrupt-file":
+                    (Path(directory) / manifest["files"][0]["name"]).write_bytes(b"corrupted")
+                elif mutation == "extra-executable":
+                    (Path(directory) / "helper.py").write_text("must not execute", encoding="utf-8")
+                elif mutation == "missing-manifest-entry":
+                    manifest["files"].pop()
+                else:
+                    manifest["files"][0]["name"] = "../escape"
+                (Path(directory) / "report.json").write_text(json.dumps(manifest), encoding="utf-8")
+                api = mock.Mock()
+                with mock.patch.object(evidence, "OUTPUT", Path(directory)), \
+                        mock.patch.object(evidence, "source",
+                                          return_value=(self.pr, self.run, self.validate())), \
+                        self.assertRaises(ValueError):
+                    evidence.publish(api, 6, 42)
+                api.request.assert_not_called()
+                api.upload.assert_not_called()
+
+    def test_publication_preserves_latest_body_and_verifies_every_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.prepared_output(directory)
+            latest = copy.deepcopy(self.pr)
+            latest["body"] += "\nIntervening reviewer edit."
+            tag = "evidence-pr-6-run-42-attempt-1"
+            base = f"https://github.com/{evidence.REPOSITORY}/releases"
+            api = mock.Mock()
+            api.pages.return_value = []
+
+            def request(route, method="GET", data=None):
+                if route.endswith(f"/releases/tags/{tag}"):
+                    raise urllib.error.HTTPError("", 404, "Not found", {}, None)
+                if route.endswith("/releases"):
+                    self.assertEqual(method, "POST")
+                    self.assertTrue(data["prerelease"])
+                    self.assertEqual(data["make_latest"], "false")
+                    return {"id": 99, "html_url": base + "/tag/" + tag}
+                self.assertEqual(method, "PATCH")
+                self.assertTrue(data["body"].startswith(latest["body"]))
+                return {"body": data["body"], "head": latest["head"]}
+
+            api.request.side_effect = request
+            api.upload.side_effect = lambda release_id, name, data, content_type: {
+                "state": "uploaded", "size": len(data),
+                "browser_download_url": f"{base}/download/{tag}/{name}"}
+            with mock.patch.object(evidence, "OUTPUT", Path(directory)), \
+                    mock.patch.object(evidence, "source", side_effect=[
+                        (self.pr, self.run, self.validate()), (latest, self.run, self.validate())]):
+                evidence.publish(api, 6, 42)
+            self.assertEqual(api.upload.call_count, 19)
+            self.assertEqual(api.request.call_args.args[1], "PATCH")
+
+    def test_changed_head_stops_pr_update_after_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.prepared_output(directory)
+            api = mock.Mock()
+            api.request.return_value = {"id": 99, "html_url": "public-release"}
+            api.pages.return_value = []
+            api.upload.side_effect = lambda release_id, name, data, content_type: {
+                "state": "uploaded", "size": len(data),
+                "browser_download_url": f"https://github.com/{evidence.REPOSITORY}/releases/"
+                                        f"download/evidence-pr-6-run-42-attempt-1/{name}"}
+            with mock.patch.object(evidence, "OUTPUT", Path(directory)), \
+                    mock.patch.object(evidence, "source", side_effect=[
+                        (self.pr, self.run, self.validate()), ValueError("BLOCKED: changed head")]), \
+                    self.assertRaises(ValueError):
+                evidence.publish(api, 6, 42)
+            self.assertEqual(api.request.call_count, 1)

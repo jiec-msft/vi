@@ -169,7 +169,11 @@ def unpack_media(data):
 
 
 def tool(*arguments):
-    completed = subprocess.run(arguments, check=True, capture_output=True, timeout=45)
+    try:
+        completed = subprocess.run(arguments, check=True, capture_output=True, timeout=45)
+    except subprocess.CalledProcessError as error:
+        sys.stderr.write(error.stderr.decode("utf-8", errors="replace"))
+        raise
     return completed.stdout
 
 
@@ -201,7 +205,8 @@ def prepare(api, pr_number, run_id):
                 require(len(videos) == 1 and 0 < videos[0]["width"] <= 4096 and
                         0 < videos[0]["height"] <= 4096, "Video dimensions are invalid.")
                 tool("ffmpeg", "-v", "error", "-i", str(raw), "-map", "0:v:0", "-an",
-                     "-t", "181", "-map_metadata", "-1", "-c:v", "libvpx-vp9", "-deadline", "realtime",
+                     "-t", "181", "-map_metadata", "-1", "-fflags", "+bitexact",
+                     "-flags:v", "+bitexact", "-c:v", "libvpx-vp9", "-deadline", "realtime",
                      "-cpu-used", "8", "-crf", "36", "-b:v", "0",
                      str(OUTPUT / f"{prefix}.webm"))
                 finalized = json.loads(tool("ffprobe", "-v", "error", "-show_format",
@@ -325,6 +330,10 @@ def publish(api, pr_number, run_id):
 
 if __name__ == "__main__":
     require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "publish"), "Use prepare or publish.")
+    if sys.argv[1] == "publish":
+        require(os.environ.get("GITHUB_ACTIONS") == "true" and
+                os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
+                "Publication requires a trusted CI dispatch.")
     pr_number = positive_id(os.environ.get("VI_EVIDENCE_PR", ""))
     run_id = positive_id(os.environ.get("VI_EVIDENCE_RUN", ""))
     api = GitHub()
