@@ -18,6 +18,8 @@ const desktopArgument = process.argv.find((arg) => arg.startsWith('--ci-owned-de
 const expectedDesktop = desktopArgument?.slice('--ci-owned-desktop='.length);
 const receiptArgument = process.argv.find((arg) => arg.startsWith('--ci-desktop-receipt='));
 const desktopReceipt = receiptArgument?.slice('--ci-desktop-receipt='.length);
+const earlyRecovery = process.argv.includes('--ci-startup-recovery-probe');
+let startupRecoveryCompleted = !earlyRecovery;
 app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -287,6 +289,15 @@ async function run() {
         const type = line.match(/"type":"(ready|cancel|suspended)"/)?.[1];
         if (type || line.includes('"ready":true')) helper.events.push({ type: type || 'ready', at: Date.now(), stage });
         if (line.includes('"ok":false')) helper.events.push({ type: 'request-failed', at: Date.now(), stage });
+        if (pointer && type === 'ready' && earlyRecovery) {
+          if (helpers.length === 1 && !helper.startupFailureScheduled) {
+            helper.startupFailureScheduled = true;
+            setTimeout(() => {
+              helper.startupFailureRequestedAt = Date.now();
+              helper.ownedStartupFailureInjected = child.kill();
+            }, 300);
+          } else if (helpers.length === 2) startupRecoveryCompleted = true;
+        }
       });
       child.stderr.on('data', (bytes) => { helper.stderrBytes += bytes.length; });
       child.once('error', () => { helper.errorAt = Date.now(); });
@@ -307,10 +318,23 @@ async function run() {
   await until(async () => {
     mainWindow = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/index.html'));
     overlay = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/overlay.html'));
-    return mainWindow && overlay && (!expectedDesktop || mainWindow.isVisible()) && overlay.isVisible() && (await status()).shortcutReady &&
+    return startupRecoveryCompleted && mainWindow && overlay && (!expectedDesktop || mainWindow.isVisible()) && overlay.isVisible() && (await status()).shortcutReady &&
       (process.platform !== 'win32' || (await status()).nativePointer);
   }, 'full application and native pointer startup', 35000);
   report.initialPointerRestarts = (await status()).nativePointerRestarts;
+  if (earlyRecovery) {
+    assert.equal(report.initialPointerRestarts, 1);
+    assert.equal(helpers.length, 2);
+    const failed = report.helpers.find((helper) => helper.pid === helpers[0].pid);
+    const recovered = report.helpers.find((helper) => helper.pid === helpers[1].pid);
+    assert.equal(failed.ownedStartupFailureInjected, true);
+    assert.ok(failed.exit && failed.closedAt);
+    assert.ok(recovered.events.some((event) => event.type === 'ready'));
+    report.startupRecovery = { failedPid: helpers[0].pid, recoveredPid: helpers[1].pid,
+      injectedAt: failed.startupFailureRequestedAt, failedExitAt: failed.exit.at,
+      recoveredReadyAt: recovered.events.find((event) => event.type === 'ready').at };
+    report.checks.push('early-owned-helper-exit-recovery-before-root-readiness');
+  }
   if (process.platform === 'win32') {
     report.windowIds = { owner: process.pid,
       main: mainWindow.getNativeWindowHandle().readBigUInt64LE().toString(),
@@ -321,6 +345,7 @@ async function run() {
   assert.equal(overlay.isFocusable(), false);
   if (expectedDesktop) {
     assert.ok(desktopReceipt);
+    report.rootReadyAt = Date.now();
     await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
       mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
     await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));

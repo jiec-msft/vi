@@ -23,7 +23,7 @@ const child = isolated
   ? spawn(process.env.VI_DESKTOP_PWSH || 'pwsh', ['-NoProfile', '-NonInteractive', '-File',
     path.resolve('scripts', 'windows-ci-desktop.ps1'), '-Entry', 'overlay', '-Executable', require('electron'),
     '-Output', metadata, '-WorkingDirectory', process.cwd(), '-TimeoutSeconds', timeoutProbe ? '35' : '150',
-    ...(timeoutProbe ? ['-HarnessTimeoutProbe'] : [])],
+    ...(timeoutProbe ? ['-HarnessTimeoutProbe'] : ['-HarnessEarlyRecovery'])],
   { stdio: 'inherit', env: { ...process.env, VI_OUTPUT: output } })
   : spawn(require('electron'), [path.resolve('scripts', 'overlay-recovery-ui.cjs'), '--ci-mode=overlay-recovery'],
     { stdio: 'inherit', env: { ...process.env, VI_OUTPUT: output } });
@@ -39,6 +39,7 @@ child.once('exit', async (code) => {
       report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
       assert.equal(desktop.controllerPid, child.pid);
       assertDesktopChain(report, desktop);
+      if (!timeoutProbe) assert.ok(report.startupRecovery, 'The normal owned-desktop run requires early-generation recovery proof.');
       if (timeoutProbe) {
         assert.equal(code, 1);
         assert.equal(desktop.childOutcome, 'timeout');

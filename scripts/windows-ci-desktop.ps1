@@ -26,7 +26,8 @@ param(
     [int] $X,
     [int] $Y,
     [string] $WorkingDirectory = (Get-Location).Path,
-    [switch] $HarnessTimeoutProbe
+    [switch] $HarnessTimeoutProbe,
+    [switch] $HarnessEarlyRecovery
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,10 +75,10 @@ if ($Entry -ne 'probe') {
     $result = [ViCiDesktop]::RunHarness([IO.Path]::GetFullPath($Executable),
         [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'windows-ci-desktop-probe.cjs')),
         [IO.Path]::GetFullPath($harness), [IO.Path]::GetFullPath($Output), $Entry,
-        [IO.Path]::GetFullPath($WorkingDirectory), $TimeoutSeconds, [bool] $HarnessTimeoutProbe)
+        [IO.Path]::GetFullPath($WorkingDirectory), $TimeoutSeconds, [bool] $HarnessTimeoutProbe, [bool] $HarnessEarlyRecovery)
     exit $result
 }
-if ($HarnessTimeoutProbe) { throw 'Harness timeout witness is not an original probe case.' }
+if ($HarnessTimeoutProbe -or $HarnessEarlyRecovery) { throw 'Harness witnesses are not original probe cases.' }
 $result = [ViCiDesktop]::Run(
     [IO.Path]::GetFullPath($Executable), [IO.Path]::GetFullPath($ChildScript),
     [IO.Path]::GetFullPath($Output), $Case, $TimeoutSeconds

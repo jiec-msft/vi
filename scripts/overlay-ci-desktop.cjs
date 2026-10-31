@@ -4,6 +4,7 @@ function assertDesktopChain(report, desktop) {
   assert.equal(report.windowIds.owner, desktop.ownedPid);
   assert.equal(desktop.initialControllerThreadDesktop, 'Default');
   assert.equal(desktop.controllerThreadDesktop, 'Default');
+  assert.equal(desktop.harnessObserverThreadDesktop, desktop.ownedDesktop);
   assert.equal(desktop.windowSeparation, true);
   assert.equal(desktop.defaultFixtureStayedAlive, true);
   assert.equal(desktop.defaultFixtureHeartbeatFresh, true);
@@ -19,6 +20,22 @@ function assertDesktopChain(report, desktop) {
     const observation = desktop.descendantDesktopObservations.find((value) => value.pid === pid);
     assert.equal(observation?.status, 'verified-owned-job-member', `Desktop/Job inheritance not observed for PID ${pid}.`);
     assert.deepEqual(observation.threadDesktops, [desktop.ownedDesktop]);
+  }
+  if (report.startupRecovery) {
+    const recovery = report.startupRecovery;
+    const failed = report.helpers.find(({ pid }) => pid === recovery.failedPid);
+    const recovered = report.helpers.find(({ pid }) => pid === recovery.recoveredPid);
+    assert.ok(failed && recovered && failed !== recovered, 'Both startup helper generations must be retained.');
+    assert.equal(failed.ownedStartupFailureInjected, true);
+    assert.equal(failed.exit.at, recovery.failedExitAt);
+    assert.ok(failed.closedAt <= recovered.startedAt);
+    assert.equal(report.initialPointerRestarts, 1);
+    assert.ok([recovery.injectedAt, recovery.failedExitAt, recovery.recoveredReadyAt, report.rootReadyAt]
+      .every(Number.isFinite));
+    assert.ok(recovery.injectedAt <= recovery.failedExitAt && recovery.failedExitAt <= recovery.recoveredReadyAt &&
+      recovery.recoveredReadyAt <= report.rootReadyAt, 'Startup exit/recovery must precede actual root readiness.');
+    assert.ok(desktop.descendantDesktopObservations.find(({ pid }) => pid === failed.pid).observedAt <= recovery.failedExitAt,
+      'The exited startup generation needs durable pre-exit Job/desktop proof.');
   }
   for (const receipt of [...(report.nativeDesktopReceipts || []), ...report.osInputs,
     ...(report.cleanupRelease ? [report.cleanupRelease] : [])]) {

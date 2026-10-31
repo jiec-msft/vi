@@ -208,7 +208,7 @@ public static class ViCiDesktop
         }
     }
     static ProcessInfo Start(IntPtr job, string executable, string script, string directory, string desktop, string role, string testCase,
-        string entry = "probe", string workingDirectory = null, bool timeoutProbe = false)
+        string entry = "probe", string workingDirectory = null, bool timeoutProbe = false, bool earlyRecovery = false)
     {
         var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = "WinSta0\\" + desktop };
         string arguments = entry == "probe"
@@ -216,7 +216,8 @@ public static class ViCiDesktop
                 " " + Quote("--desktop-probe-output=" + directory) + " --desktop-probe-name=" + desktop
             : " --ci-mode=" + (entry == "overlay" ? "overlay-recovery" : "release-negative") +
                 " --ci-owned-desktop=" + desktop + " " + Quote("--ci-desktop-receipt=" + directory) +
-                (timeoutProbe ? " --ci-desktop-timeout-probe" : "");
+                (timeoutProbe ? " --ci-desktop-timeout-probe" : "") +
+                (earlyRecovery ? " --ci-startup-recovery-probe" : "");
         var command = new StringBuilder(Quote(executable) + " " + Quote(script) + arguments);
         ProcessInfo child;
         Win32(CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false,
@@ -239,15 +240,17 @@ public static class ViCiDesktop
             throw;
         }
     }
-    static void WaitReady(ProcessInfo child, string receipt, double seconds)
+    static void WaitReady(ProcessInfo child, string receipt, double seconds, Action observe = null)
     {
         var clock = Stopwatch.StartNew();
         while (!File.Exists(receipt)) {
+            if (observe != null) observe();
             uint state = WaitForSingleObject(child.process, 0);
             Require(state == WaitTimeout, "Owned fixture exited before readiness.");
             Require(clock.Elapsed.TotalSeconds < seconds, "Owned fixture readiness timed out.");
             Thread.Sleep(100);
         }
+        if (observe != null) observe();
         using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
@@ -335,16 +338,17 @@ public static class ViCiDesktop
         return result;
     }
     public static int RunHarness(string executable, string sentinel, string script, string directory,
-        string entry, string workingDirectory, int timeout, bool timeoutProbe)
+        string entry, string workingDirectory, int timeout, bool timeoutProbe, bool earlyRecovery)
     {
         Guard();
         Require(entry == "overlay" || entry == "release-negative", "Unsupported integration entry.");
         Require(timeout >= 1 && timeout <= (entry == "overlay" ? 150 : 60), "Integration wall deadline exceeds the existing harness limit.");
         Require(!timeoutProbe || (entry == "overlay" && timeout == 35), "Timeout witness requires the finite overlay entry/deadline.");
+        Require(!earlyRecovery || (entry == "overlay" && !timeoutProbe), "Early recovery witness requires the normal overlay entry.");
         int result = 1;
         Exception unhandled = null;
         var thread = new Thread(() => {
-            try { result = RunCore(executable, sentinel, directory, "normal", timeout, entry, script, workingDirectory, timeoutProbe); }
+            try { result = RunCore(executable, sentinel, directory, "normal", timeout, entry, script, workingDirectory, timeoutProbe, earlyRecovery); }
             catch (Exception error) { unhandled = error; }
         });
         thread.Start(); thread.Join();
@@ -352,7 +356,7 @@ public static class ViCiDesktop
         return result;
     }
     static int RunCore(string executable, string script, string directory, string testCase, int timeout,
-        string entry = "probe", string harness = null, string workingDirectory = null, bool timeoutProbe = false)
+        string entry = "probe", string harness = null, string workingDirectory = null, bool timeoutProbe = false, bool earlyRecovery = false)
     {
         var clock = Stopwatch.StartNew();
         var errors = new List<string>();
@@ -415,7 +419,7 @@ public static class ViCiDesktop
             Require(entry == "probe" || !File.Exists(Path.Combine(directory, "ready.json")), "Stale harness readiness receipt refused.");
             rootClock = Stopwatch.StartNew();
             child = Start(ownedJob, executable, entry == "probe" ? script : harness, directory, ownedName, "owned", testCase,
-                entry, workingDirectory, timeoutProbe);
+                entry, workingDirectory, timeoutProbe, earlyRecovery);
             report["entry"] = entry;
             report["workingDirectory"] = workingDirectory ?? Environment.CurrentDirectory;
             report["ownedPid"] = child.pid;
@@ -423,9 +427,18 @@ public static class ViCiDesktop
             Require(Equal(InputName(), originalName), "External input desktop changed before switch; refusing.");
             Win32(SwitchDesktop(owned), "Switch to ordinary owned desktop");
             Require(Equal(InputName(), ownedName), "Owned input desktop switch readback failed.");
+            if (entry != "probe") {
+                Win32(SetThreadDesktop(owned), "Connect the fresh harness observer thread to its ordinary desktop");
+                report["harnessObserverThreadDesktop"] = Name(GetThreadDesktop(GetCurrentThreadId()));
+                Require(Equal((string)report["harnessObserverThreadDesktop"], ownedName), "Harness observer thread desktop readback failed.");
+            }
             double readyBudget = entry == "probe" ? 20 : Math.Min(entry == "overlay" ? 35 : 15, timeout - rootClock.Elapsed.TotalSeconds);
             Require(readyBudget > 0, "Root inclusive wall deadline expired before readiness.");
-            WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget);
+            Action observe = entry == "probe" ? null : (Action)(() => {
+                Require(Equal(InputName(), ownedName), "Input desktop changed during root readiness.");
+                ObserveJobDesktops(ownedJob, ownedName, descendantDesktops);
+            });
+            WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget, observe);
             if (entry != "probe") {
                 Require(rootClock.Elapsed.TotalSeconds < timeout, "Root inclusive wall deadline expired during readiness.");
                 var windows = new List<object>();
