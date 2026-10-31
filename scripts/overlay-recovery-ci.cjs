@@ -1,4 +1,4 @@
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -16,20 +16,30 @@ const child = spawn(require('electron'), [path.resolve('scripts', 'overlay-recov
   { stdio: 'inherit', env: { ...process.env, VI_OUTPUT: output } });
 const timer = setTimeout(() => { child.kill(); console.error('Overlay UI deadline exceeded.'); }, 150000);
 child.once('error', (error) => { clearTimeout(timer); console.error(error.message); process.exitCode = 1; });
-child.once('exit', (code) => {
+child.once('exit', async (code) => {
   clearTimeout(timer);
+  let report;
   try {
-    const report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
-    for (const pid of report.helperPids || []) {
-      if (process.platform === 'win32') {
-        const owned = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-          `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Write-Output ${pid} }; exit 0`],
-        { encoding: 'utf8' }).trim();
-        if (owned) throw new Error('Owned pointer helper survived application exit.');
-      }
+    report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
+    for (const helper of report.helpers) {
+      if (!Number.isInteger(helper.pid)) continue;
+      const exists = () => {
+        try { process.kill(helper.pid, 0); return true; }
+        catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+      };
+      const deadline = Date.now() + 2000;
+      while (exists() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+      if (exists()) throw new Error(`Owned ${helper.role} helper survived application exit.`);
+      helper.observedAbsentAt = Date.now();
     }
     report.resourcesReleased = true;
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
     process.exitCode = code === 0 && report.status === 'passed' ? 0 : 1;
-  } catch (error) { console.error(error.message); process.exitCode = 1; }
+  } catch (error) {
+    console.error(error.message); process.exitCode = 1;
+    if (report) {
+      report.status = 'failed'; report.resourcesReleased = false; report.resourceError = error.message;
+      fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
+    }
+  }
 });

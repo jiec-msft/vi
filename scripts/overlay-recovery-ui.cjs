@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
+const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
 
@@ -29,6 +30,8 @@ const report = { platform: process.platform, arch: process.arch, checks: [], hel
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const execFile = promisify(childProcess.execFile);
 const helpers = [];
+report.helpers = [];
+report.pointerStates = [];
 let mainWindow, overlay, service, stopVideo, held = false;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
@@ -42,7 +45,15 @@ async function until(action, label, limit = 15000) {
   throw new Error(`Overlay evidence deadline: ${label}`);
 }
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
-const status = () => evaluate('window.voice.status()');
+const status = async () => {
+  const value = await evaluate('window.voice.status()');
+  const previous = report.pointerStates.at(-1);
+  if (previous?.state !== value.nativePointerState || previous?.restarts !== value.nativePointerRestarts) {
+    report.pointerStates.push({ at: Date.now(), stage, state: value.nativePointerState,
+      restarts: value.nativePointerRestarts, ready: value.nativePointer });
+  }
+  return value;
+};
 async function mouse(mode, point) {
   const location = process.platform === 'win32' ? screen.dipToScreenPoint(point) : point;
   let result;
@@ -139,6 +150,7 @@ async function run() {
     consent: true, sounds: false, openAtLogin: false, autoCopy: false,
     shortcut: 'CommandOrControl+Alt+Shift+F9', cancelShortcut: 'CommandOrControl+Alt+Shift+F10',
   }));
+  let helperFile;
   if (process.platform === 'win32') {
     const original = await fs.readFile(path.resolve('native', 'windows-overlay.ps1'), 'utf8');
     const seam = `
@@ -150,20 +162,37 @@ async function run() {
     assert.ok(original.includes('if (!GetCursorPos(out point))'));
     const injected = original.replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
-    const helperFile = path.join(directory, 'windows-overlay-ci.ps1');
+    helperFile = path.join(directory, 'windows-overlay-ci.ps1');
     await fs.writeFile(helperFile, injected);
-    const spawn = childProcess.spawn;
-    childProcess.spawn = (file, args, options) => {
-      const pointer = args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-overlay.ps1'));
-      const actual = pointer ? args.map((arg) => arg.endsWith('windows-overlay.ps1') ? helperFile : arg) : args;
-      const child = spawn(file, actual, options);
-      if (pointer) {
-        helpers.push(child);
-        report.helperPids.push(child.pid);
-      }
-      return child;
-    };
   }
+  const spawn = childProcess.spawn;
+  childProcess.spawn = (file, args, options) => {
+    const pointer = args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-overlay.ps1'));
+    const delivery = file.endsWith('macos-delivery') ||
+      args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-delivery.ps1'));
+    const actual = pointer ? args.map((arg) => arg.endsWith('windows-overlay.ps1') ? helperFile : arg) : args;
+    const child = spawn(file, actual, options);
+    if (pointer) {
+      helpers.push(child);
+      report.helperPids.push(child.pid);
+    }
+    if (pointer || delivery) {
+      const helper = { role: pointer ? 'overlay-pointer' : 'desktop-delivery', pid: child.pid,
+        startedAt: Date.now(), stage, events: [], stderrBytes: 0 };
+      report.helpers.push(helper);
+      const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+      lines.on('line', (line) => {
+        const type = line.match(/"type":"(ready|cancel|suspended)"/)?.[1];
+        if (type || line.includes('"ready":true')) helper.events.push({ type: type || 'ready', at: Date.now(), stage });
+        if (line.includes('"ok":false')) helper.events.push({ type: 'request-failed', at: Date.now(), stage });
+      });
+      child.stderr.on('data', (bytes) => { helper.stderrBytes += bytes.length; });
+      child.once('error', () => { helper.errorAt = Date.now(); });
+      child.once('exit', (code, signal) => { helper.exit = { at: Date.now(), code, signal, stage }; });
+      child.once('close', () => { helper.closedAt = Date.now(); lines.close(); });
+    }
+    return child;
+  };
   require('../app/main.cjs');
   await app.whenReady();
   await until(async () => {
