@@ -17,6 +17,7 @@ public static class OverlayCiMouse {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     static void Button(uint flags) {
@@ -30,6 +31,7 @@ public static class OverlayCiMouse {
         uint pid;
         GetWindowThreadProcessId(window, out pid);
         if (!IsWindow(window) || pid != owner) throw new InvalidOperationException("Owned window unavailable.");
+        IntPtr foreground = GetForegroundWindow();
         if (mode != "up" && !SetCursorPos(x, y)) throw new InvalidOperationException("OS cursor unavailable.");
         Thread.Sleep(100);
         POINT point;
@@ -40,7 +42,9 @@ public static class OverlayCiMouse {
         else if (mode == "up") Button(4);
         else if (mode == "click") { Button(2); Thread.Sleep(100); Button(4); }
         else if (mode != "move" && mode != "hover") throw new InvalidOperationException("Invalid OS mouse action.");
-        Console.WriteLine("{\"input\":\"win32-SendInput/SetCursorPos\",\"ownerVerified\":true}");
+        Thread.Sleep(100);
+        if (GetForegroundWindow() != foreground) throw new InvalidOperationException("Overlay changed the OS foreground window.");
+        Console.WriteLine("{\"input\":\"win32-SendInput/SetCursorPos\",\"ownerVerified\":true,\"foregroundUnchanged\":true}");
     }
 }
 '@

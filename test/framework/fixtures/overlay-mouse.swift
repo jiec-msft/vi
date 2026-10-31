@@ -11,6 +11,7 @@ func run() throws {
         throw NSError(domain: "Owned CI application unavailable.", code: 1)
     }
     let mode = CommandLine.arguments[2], point = CGPoint(x: x, y: y)
+    let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
     if mode == "down" || mode == "click" {
         let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
         guard windows.contains(where: { window in
@@ -36,7 +37,10 @@ func run() throws {
     case "click": try post(.mouseMoved); try post(.leftMouseDown); try post(.leftMouseUp)
     default: throw NSError(domain: "Invalid OS mouse action.", code: 4)
     }
-    print("{\"input\":\"CGEvent\",\"ownerVerified\":true}")
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground else {
+        throw NSError(domain: "Overlay changed the OS foreground application.", code: 5)
+    }
+    print("{\"input\":\"CGEvent\",\"ownerVerified\":true,\"foregroundUnchanged\":true}")
 }
 do { try run() }
 catch { fputs("Owned overlay OS mouse input failed: \(error)\n", stderr); exit(1) }

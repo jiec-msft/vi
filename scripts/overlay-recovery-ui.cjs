@@ -45,17 +45,22 @@ const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expres
 const status = () => evaluate('window.voice.status()');
 async function mouse(mode, point) {
   const location = process.platform === 'win32' ? screen.dipToScreenPoint(point) : point;
+  let result;
   if (process.platform === 'win32') {
     const handle = overlay.getNativeWindowHandle();
     const id = handle.readBigUInt64LE().toString();
-    await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
       '-Window', id, '-Owner', String(process.pid), '-Mode', mode, '-X', String(location.x), '-Y', String(location.y)],
     { timeout: 15000, windowsHide: true });
   } else {
-    await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
+    result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
       [String(process.pid), mode, String(location.x), String(location.y)], { timeout: 10000 });
   }
+  const input = JSON.parse(result.stdout.trim());
+  assert.equal(input.ownerVerified, true);
+  assert.equal(input.foregroundUnchanged, true);
+  report.osForegroundScope = 'native foreground HWND/application unchanged before and after each OS mouse action';
   if (mode === 'down') held = true;
   if (mode === 'up') held = false;
   assert.equal(BrowserWindow.getFocusedWindow(), mainWindow, 'Floating overlay stole application focus.');
