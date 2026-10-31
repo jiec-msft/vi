@@ -118,6 +118,7 @@ jobs:
             artifacts-ci/overlay-recovery/desktop-isolation/default/*.json
             artifacts-ci/overlay-recovery/release-desktop-isolation/*.json
             artifacts-ci/overlay-recovery/release-desktop-isolation/default/*.json
+            artifacts-ci/overlay-recovery/release-render/*
             artifacts-ci/overlay-recovery/desktop-timeout/report.json
             artifacts-ci/overlay-recovery/desktop-timeout/desktop.webm
             artifacts-ci/overlay-recovery/desktop-timeout/*.png

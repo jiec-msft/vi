@@ -95,7 +95,7 @@ public static class ViCiDesktop
     static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")]
     static extern bool IsWindow(IntPtr window);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
@@ -117,6 +117,12 @@ public static class ViCiDesktop
     static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool member);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool TerminateProcess(IntPtr process, uint code);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -255,22 +261,93 @@ public static class ViCiDesktop
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
     }
-    static void ValidateHarnessReady(ProcessInfo child, string receipt, string desktop, List<object> observations)
+    sealed class ThreadDesktopQuery
+    {
+        public uint pid { get; set; }
+        public uint tid { get; set; }
+        public string api { get; set; }
+        public string rawHandle { get; set; }
+        public int win32Error { get; set; }
+        public string threadDesktop { get; set; }
+        public long observedAt { get; set; }
+        public string status { get; set; }
+    }
+    static ThreadDesktopQuery ReadThreadDesktop(uint pid, uint tid, long observedAt)
+    {
+        IntPtr handle = GetThreadDesktop(tid);
+        int error = handle == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+        string api = "GetThreadDesktop", actual = null;
+        if (handle != IntPtr.Zero) {
+            api = "GetUserObjectInformationW";
+            var name = new StringBuilder(512);
+            uint needed;
+            bool read = GetUserObjectInformationW(handle, 2, name, 1024, out needed);
+            error = read ? 0 : Marshal.GetLastWin32Error();
+            if (read) actual = name.ToString();
+        }
+        return new ThreadDesktopQuery { pid = pid, tid = tid, api = api, rawHandle = handle.ToInt64().ToString(),
+            win32Error = error, threadDesktop = actual, observedAt = observedAt,
+            status = actual == null ? "unobserved-not-desktop-proof" : "observed" };
+    }
+    static void ValidateHarnessReady(ProcessInfo child, string receipt, string desktop, IntPtr owned,
+        List<object> observations, Dictionary<string, object> report)
     {
         using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
             var root = json.RootElement;
             Require(root.GetProperty("pid").GetUInt32() == child.pid &&
                 Equal(root.GetProperty("desktop").GetString(), desktop), "Harness readiness root/desktop mismatch.");
+            long at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            uint callerTid = GetCurrentThreadId();
+            var current = ReadThreadDesktop((uint)Environment.ProcessId, callerTid, at);
+            bool processTimesRead = GetProcessTimes(child.process, out long created, out long exited, out long kernel, out long user);
+            int processTimesError = processTimesRead ? 0 : Marshal.GetLastWin32Error();
+            uint waitState = WaitForSingleObject(child.process, 0);
+            int waitError = waitState == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
+            bool exitCodeRead = GetExitCodeProcess(child.process, out uint exitCode);
+            int exitCodeError = exitCodeRead ? 0 : Marshal.GetLastWin32Error();
+            var visibleOwnedWindows = new HashSet<long>();
+            bool enumerated = EnumDesktopWindows(owned, (window, unused) => {
+                uint owner;
+                GetWindowThreadProcessId(window, out owner);
+                if (owner == child.pid && IsWindowVisible(window)) visibleOwnedWindows.Add(window.ToInt64());
+                return true;
+            }, IntPtr.Zero);
+            int enumerationError = enumerated ? 0 : Marshal.GetLastWin32Error();
+            var context = new {
+                scope = "window-desktop-association-not-all-root-threads",
+                callerPid = Environment.ProcessId, callerTid, station = Name(GetProcessWindowStation()),
+                currentThreadQuery = current, inputDesktop = InputName(),
+                ownedDesktopHandle = owned.ToInt64().ToString(), ownedDesktopHandleName = Name(owned),
+                rootPid = child.pid, rootPrimaryTid = child.tid,
+                processTimesRead, processTimesError,
+                rootCreationFileTime = processTimesRead ? created.ToString() : null,
+                waitState, waitError, exitCodeRead, exitCodeError, rawExitCode = exitCode,
+                enumerationApi = "EnumDesktopWindows", enumerated, enumerationError, observedAt = at
+            };
+            report["rootWindowQueryContext"] = context;
+            bool verified = current.threadDesktop != null && Equal(current.threadDesktop, desktop) &&
+                processTimesRead && waitState == WaitTimeout && exitCodeRead && enumerated;
             foreach (string key in new[] { "mainWindow", "overlayWindow" }) {
                 IntPtr window = new IntPtr(Int64.Parse(root.GetProperty(key).GetString()));
                 uint owner;
                 uint tid = GetWindowThreadProcessId(window, out owner);
+                int identityError = tid == 0 ? Marshal.GetLastWin32Error() : 0;
                 bool exists = IsWindow(window), visible = IsWindowVisible(window);
-                string actual = tid == 0 ? null : Name(GetThreadDesktop(tid));
-                observations.Add(new { role = key, window = window.ToInt64().ToString(), exists, visible, pid = owner, tid, threadDesktop = actual });
-                Require(exists && visible && owner == child.pid && Equal(actual, desktop),
-                    "Harness window is not visible on its owned root desktop.");
+                var query = tid == 0 ? null : ReadThreadDesktop(owner, tid, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                bool enumeratedOnOwnedDesktop = visibleOwnedWindows.Contains(window.ToInt64());
+                observations.Add(new { role = key, window = window.ToInt64().ToString(), exists, visible, pid = owner, tid,
+                    identityApi = "GetWindowThreadProcessId", identityError, enumeratedOnOwnedDesktop,
+                    coverage = "window-desktop-association", rootCreationFileTime = created.ToString(),
+                    threadQuery = query, snapshotCompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+                verified = verified && exists && visible && owner == child.pid && enumeratedOnOwnedDesktop &&
+                    tid != 0;
+                if (query?.threadDesktop != null)
+                    Require(Equal(query.threadDesktop, desktop), "Connected root window thread is on the wrong desktop.");
             }
+            report["rootWindowSnapshotCompletedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            Require(WaitForSingleObject(child.process, 0) == WaitTimeout, "Root exited during window observation.");
+            Require(verified, "Owned root window desktop association not verified: " +
+                JsonSerializer.Serialize(new { context, windows = observations }));
         }
     }
     sealed class DesktopObservation
@@ -281,11 +358,19 @@ public static class ViCiDesktop
         public int attempts { get; set; }
         public long firstJobObservedAt { get; set; }
         public long observedAt { get; set; }
+        public long snapshotCompletedAt { get; set; }
+        public long processCreatedAt { get; set; }
+        public string creationFileTime { get; set; }
+        public bool specificJobMember { get; set; }
+        public bool liveAtCompletion { get; set; }
+        public string coverage { get; set; } = "specific-job-process-identity-not-thread-desktop";
+        public string membershipApi { get; set; } = "IsProcessInJob";
         public object firstUnobserved { get; set; }
         public List<string> threadDesktops { get; set; } = new List<string>();
         public List<object> threadObservations { get; set; } = new List<object>();
     }
-    static void ObserveJobDesktops(IntPtr job, string desktop, Dictionary<uint, DesktopObservation> observations)
+    static void ObserveJobDesktops(IntPtr job, string desktop, string directory,
+        Dictionary<string, DesktopObservation> observations)
     {
         const int capacity = 256;
         IntPtr buffer = Marshal.AllocHGlobal(8 + capacity * IntPtr.Size);
@@ -295,63 +380,66 @@ public static class ViCiDesktop
             Require(count >= 0 && count <= capacity, "Owned process inventory exceeded its bound.");
             for (int index = 0; index < count; index++) {
                 uint pid = (uint)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
-                if (!observations.TryGetValue(pid, out var observation)) {
-                    observation = new DesktopObservation { pid = pid, firstJobObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-                    observations.Add(pid, observation);
-                }
-                if (observation.status == "verified-owned-job-member") continue;
-                observation.attempts++;
-                observation.observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                observation.threadDesktops = new List<string>();
-                observation.threadObservations = new List<object>();
                 Process process = null;
+                IntPtr processHandle = IntPtr.Zero;
                 try {
                     process = Process.GetProcessById((int)pid);
+                    processHandle = OpenProcess(0x00101000, false, pid); // SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+                    Win32(processHandle != IntPtr.Zero, "Open owned process identity PID " + pid);
+                    Win32(GetProcessTimes(processHandle, out long created, out long exited, out long kernel, out long user),
+                        "Read owned process creation identity PID " + pid);
+                    string identity = pid + "-" + created;
+                    if (!observations.TryGetValue(identity, out var observation)) {
+                        observation = new DesktopObservation { pid = pid, creationFileTime = created.ToString(),
+                            processCreatedAt = new DateTimeOffset(DateTime.FromFileTimeUtc(created)).ToUnixTimeMilliseconds(),
+                            firstJobObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+                        observations.Add(identity, observation);
+                    }
+                    if (observation.status == "verified-specific-job-process-identity") continue;
+                    observation.attempts++;
+                    observation.observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     observation.executable = process.ProcessName;
-                    bool complete = true;
-                    foreach (ProcessThread thread in process.Threads) {
+                    Win32(IsProcessInJob(processHandle, job, out bool member), "Query specific owned job PID " + pid);
+                    Require(member, "Enumerated process is not in the specific owned job PID " + pid);
+                    observation.specificJobMember = member;
+                    try { foreach (ProcessThread thread in process.Threads) {
                         uint tid = (uint)thread.Id;
-                        IntPtr handle = GetThreadDesktop(tid);
-                        int error = Marshal.GetLastWin32Error();
-                        string api = "GetThreadDesktop", actual = null;
-                        if (handle != IntPtr.Zero) {
-                            api = "GetUserObjectInformationW";
-                            var name = new StringBuilder(512);
-                            uint needed;
-                            bool read = GetUserObjectInformationW(handle, 2, name, 1024, out needed);
-                            error = read ? 0 : Marshal.GetLastWin32Error();
-                            if (read) actual = name.ToString();
-                        }
-                        var sample = new { pid, tid, api, rawHandle = handle.ToInt64().ToString(),
-                            win32Error = error, threadDesktop = actual, observedAt = observation.observedAt,
-                            status = actual == null ? "unobserved-not-desktop-proof" : "observed" };
+                        var sample = ReadThreadDesktop(pid, tid, observation.observedAt);
                         observation.threadObservations.Add(sample);
-                        if (actual == null) {
-                            complete = false;
+                        if (sample.threadDesktop == null) {
                             if (observation.firstUnobserved == null) observation.firstUnobserved = sample;
                             continue;
                         }
-                        Require(Equal(actual, desktop), "Owned job descendant thread escaped its ordinary desktop: " +
+                        Require(Equal(sample.threadDesktop, desktop), "Owned job descendant thread escaped its ordinary desktop: " +
                             JsonSerializer.Serialize(sample));
-                        if (!observation.threadDesktops.Contains(actual)) observation.threadDesktops.Add(actual);
+                        if (!observation.threadDesktops.Contains(sample.threadDesktop)) observation.threadDesktops.Add(sample.threadDesktop);
+                    } } catch (Win32Exception error) {
+                        observation.firstUnobserved = new { pid, api = "Process.Threads",
+                            win32Error = error.NativeErrorCode, status = "remote-thread-diagnostic-not-proof" };
                     }
-                    // A failed USER query is not desktop proof; retry the entire snapshot inside the existing wall deadline.
-                    observation.status = complete && observation.threadDesktops.Count > 0
-                        ? "verified-owned-job-member" : "unobserved-not-desktop-proof";
+                    observation.liveAtCompletion = WaitForSingleObject(processHandle, 0) == WaitTimeout;
+                    observation.snapshotCompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    observation.status = observation.liveAtCompletion
+                        ? "verified-specific-job-process-identity" : "exited-before-completed-job-proof";
+                    if (observation.liveAtCompletion) {
+                        string receipt = "job-" + identity;
+                        Write(directory, receipt + ".tmp", observation);
+                        File.Move(Path.Combine(directory, receipt + ".tmp"), Path.Combine(directory, receipt + ".json"));
+                    }
                 } catch (ArgumentException) {
-                    observation.status = "exited-before-observation-not-desktop-proof";
-                    if (observation.firstUnobserved == null) observation.firstUnobserved = new {
-                        pid, api = "Process.GetProcessById/Threads", observedAt = observation.observedAt,
-                        status = observation.status
-                    };
+                    observations[pid + "-unknown"] = new DesktopObservation { pid = pid,
+                        status = "exited-before-process-identity-observation" };
                 } catch (Win32Exception error) {
-                    observation.status = "process-inventory-error-not-desktop-proof";
                     var sample = new { pid, api = "Process.ProcessName/Threads", win32Error = error.NativeErrorCode,
-                        observedAt = observation.observedAt, status = observation.status };
-                    if (observation.firstUnobserved == null) observation.firstUnobserved = sample;
+                        observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), status = "process-inventory-error-not-proof" };
+                    observations[pid + "-unknown"] = new DesktopObservation { pid = pid,
+                        status = "process-inventory-error-not-proof", firstUnobserved = sample };
                     if (error.NativeErrorCode != 6 && error.NativeErrorCode != 87 && error.NativeErrorCode != 1168)
                         throw new InvalidOperationException("Owned process inventory failed: " + JsonSerializer.Serialize(sample), error);
-                } finally { if (process != null) process.Dispose(); }
+                } finally {
+                    if (process != null) process.Dispose();
+                    if (processHandle != IntPtr.Zero) Win32(CloseHandle(processHandle), "Close observed process identity handle");
+                }
             }
         } finally { Marshal.FreeHGlobal(buffer); }
     }
@@ -433,7 +521,7 @@ public static class ViCiDesktop
             Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT") + "-" + Guid.NewGuid().ToString("N");
         bool restored = false;
         Stopwatch rootClock = null;
-        var descendantDesktops = new Dictionary<uint, DesktopObservation>();
+        var descendantDesktops = new Dictionary<string, DesktopObservation>();
         try {
             Require(Equal(Name(GetProcessWindowStation()), "WinSta0"), "Only WinSta0 is supported.");
             initialThread = GetThreadDesktop(GetCurrentThreadId());
@@ -461,6 +549,8 @@ public static class ViCiDesktop
             report["actualDesktopFlags"] = actualFlags.flags;
             report["actualHandleInheritable"] = actualFlags.inherit != 0;
             report["controllerThreadDesktop"] = Name(GetThreadDesktop(GetCurrentThreadId()));
+            report["controllerThreadQuery"] = ReadThreadDesktop((uint)Environment.ProcessId, GetCurrentThreadId(),
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             defaultJob = NewJob();
             string defaultDirectory = Path.Combine(directory, "default");
             Directory.CreateDirectory(defaultDirectory);
@@ -489,14 +579,14 @@ public static class ViCiDesktop
             Require(readyBudget > 0, "Root inclusive wall deadline expired before readiness.");
             Action observe = entry == "probe" ? null : (Action)(() => {
                 Require(Equal(InputName(), ownedName), "Input desktop changed during root readiness.");
-                ObserveJobDesktops(ownedJob, ownedName, descendantDesktops);
+                ObserveJobDesktops(ownedJob, ownedName, directory, descendantDesktops);
             });
             WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget, observe);
             if (entry != "probe") {
                 Require(rootClock.Elapsed.TotalSeconds < timeout, "Root inclusive wall deadline expired during readiness.");
                 var windows = new List<object>();
                 report["rootWindowObservations"] = windows;
-                ValidateHarnessReady(child, Path.Combine(directory, "ready.json"), ownedName, windows);
+                ValidateHarnessReady(child, Path.Combine(directory, "ready.json"), ownedName, owned, windows, report);
                 report["rootWindowsVerified"] = true;
             }
             Require(VisibleWindows(owned, child.pid) > 0 && VisibleWindows(owned, background.pid) == 0,
@@ -506,7 +596,7 @@ public static class ViCiDesktop
             var childClock = entry == "probe" ? Stopwatch.StartNew() : rootClock;
             do {
                 Require(Equal(InputName(), ownedName), "External input desktop changed during probe; refusing.");
-                if (entry != "probe") ObserveJobDesktops(ownedJob, ownedName, descendantDesktops);
+                if (entry != "probe") ObserveJobDesktops(ownedJob, ownedName, directory, descendantDesktops);
                 state = WaitForSingleObject(child.process, 100);
                 Require(state == 0 || state == WaitTimeout, "Child wait failed.");
             } while (state == WaitTimeout && childClock.Elapsed.TotalSeconds < timeout);
@@ -561,6 +651,13 @@ public static class ViCiDesktop
             // GetThreadDesktop is borrowed; detach the fresh controller thread before closing created handles.
             if (initialThread != IntPtr.Zero && !SetThreadDesktop(initialThread))
                 errors.Add("Restore controller thread desktop failed: " + Marshal.GetLastWin32Error());
+            if (entry != "probe") {
+                var query = ReadThreadDesktop((uint)Environment.ProcessId, GetCurrentThreadId(),
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                report["restoredControllerThreadQuery"] = query;
+                if (query.status != "observed" || !Equal(query.threadDesktop, originalName))
+                    errors.Add("Restored controller executing-thread desktop readback failed.");
+            }
             bool handlesClosed = true;
             foreach (IntPtr desktop in new[] { owned, original }) {
                 if (desktop != IntPtr.Zero && !CloseDesktop(desktop)) {

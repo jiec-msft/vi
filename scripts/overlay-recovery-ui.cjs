@@ -60,7 +60,7 @@ async function collectNativeDesktopReceipts() {
     const receipt = JSON.parse(await fs.readFile(path.join(directory, `desktop-${helper.role}-${helper.pid}.json`), 'utf8'));
     assert.equal(receipt.pid, helper.pid);
     assert.equal(receipt.role, helper.role);
-    assert.equal(receipt.actualInheritanceVerified, true);
+    assert.equal(receipt.selfQueryComplete, true);
     assert.equal(receipt.station, 'WinSta0');
     assert.equal(receipt.threadDesktop, expectedDesktop);
     assert.equal(receipt.inputDesktop, expectedDesktop);
@@ -83,7 +83,7 @@ async function mouse(mode, point) {
   if (process.platform === 'darwin' && mode === 'down') held = true;
   const recordInput = (stdout) => {
     const input = JSON.parse(stdout.trim());
-    report.osInputs.push({ at: Date.now(), stage, mode, ...input });
+    report.osInputs.push({ at: Date.now(), processExitObservedAt: Date.now(), stage, mode, ...input });
     if (input.ownedDownInjected && input.ownerVerified && input.leftHeldAfter) {
       held = true;
       ownedDownReceipt = input;
@@ -99,7 +99,7 @@ async function mouse(mode, point) {
         '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
         '-Window', id, '-Foreground', report.windowIds.main, '-Owner', String(process.pid),
         '-Mode', mode, '-X', String(location.x), '-Y', String(location.y),
-        ...(expectedDesktop ? ['-DesktopName', expectedDesktop] : [])],
+        ...(expectedDesktop ? ['-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt] : [])],
       { timeout: 15000, windowsHide: true });
     } else {
       result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
@@ -216,11 +216,12 @@ async function interruptedButton(name) {
   await fs.unlink(unavailable);
   await until(async () => (await status()).nativePointer, `native pointer resumed after interrupted ${name}`);
 }
-function markerVisible(png) {
+function markerVisible(png, cyan = false) {
   const image = nativeImage.createFromBuffer(png), pixels = image.toBitmap();
   let count = 0;
   for (let offset = 0; offset < pixels.length; offset += 4) {
-    if (pixels[offset] > 180 && pixels[offset + 1] < 80 && pixels[offset + 2] > 180) count++;
+    if (pixels[offset] > 180 && (cyan ? pixels[offset + 1] > 180 && pixels[offset + 2] < 80
+      : pixels[offset + 1] < 80 && pixels[offset + 2] > 180)) count++;
   }
   return count >= 8;
 }
@@ -257,13 +258,22 @@ async function run() {
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
       const quote = (value) => `'${value.replace(/'/g, "''")}'`;
-      const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -Role ${role}`;
+      const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role}`;
       injected = injected.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'\n${attest('overlay-pointer')}`);
+      injected = injected.replace('return !System.IO.File.Exists(', `bool confirmed = false;
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()) {
+            var attestor = assembly.GetType("OverlayDesktopAttestor");
+            if (attestor != null) { attestor.GetMethod("ConfirmExecution").Invoke(null, null); confirmed = true; break; }
+        }
+        if (!confirmed) throw new InvalidOperationException("Native execution attestor unavailable.");
+        return !System.IO.File.Exists(`);
       const delivery = await fs.readFile(path.resolve('native', 'windows-delivery.ps1'), 'utf8');
       deliveryFile = path.join(directory, 'windows-delivery-ci.ps1');
       await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
-        .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1'))));
+        .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
+        .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
+          '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))'));
     }
     helperFile = path.join(directory, 'windows-overlay-ci.ps1');
     await fs.writeFile(helperFile, injected);
@@ -281,7 +291,8 @@ async function run() {
       report.helperPids.push(child.pid);
     }
     if (pointer || delivery) {
-      const helper = { role: pointer ? 'overlay-pointer' : 'desktop-delivery', pid: child.pid,
+      const role = pointer ? 'overlay-pointer' : 'desktop-delivery';
+      const helper = { role, pid: child.pid, generation: report.helpers.filter((value) => value.role === role).length + 1,
         startedAt: Date.now(), stage, events: [], stderrBytes: 0 };
       report.helpers.push(helper);
       const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -360,10 +371,31 @@ async function run() {
     marker.style.cssText = 'position:fixed;right:4px;bottom:4px;width:14px;height:14px;background:#ff00ff;pointer-events:none;z-index:2147483647';
     document.body.append(marker);
   })()`);
+  if (expectedDesktop) {
+    await mainWindow.webContents.executeJavaScript(`(() => {
+      const marker = document.createElement('div');
+      marker.style.cssText = 'position:fixed;left:4px;top:4px;width:14px;height:14px;background:#00ffff;pointer-events:none;z-index:2147483647';
+      document.body.append(marker);
+    })()`);
+    const mainCapture = (await mainWindow.webContents.capturePage()).toPNG();
+    const overlayCapture = (await overlay.webContents.capturePage()).toPNG();
+    report.renderEvidence = { coverage: 'compositor-output-not-all-process-threads',
+      roleSource: 'Electron-app-metrics-self-reported', mainCaptureBytes: mainCapture.length,
+      overlayCaptureBytes: overlayCapture.length, desktopMarkerSamples: 0,
+      mainMarkerVisible: markerVisible(mainCapture, true), overlayMarkerVisible: markerVisible(overlayCapture) };
+    assert.equal(report.renderEvidence.mainMarkerVisible, true);
+    assert.equal(report.renderEvidence.overlayMarkerVisible, true);
+    await fs.writeFile(path.join(directory, 'main-render.png'), mainCapture);
+    await fs.writeFile(path.join(directory, 'overlay-render.png'), overlayCapture);
+  }
   stopVideo = await recordDesktop(directory, (png) => {
     const visible = markerVisible(png);
     if (!visible) writeFileSync(path.join(directory, 'obscured-desktop.png'), png);
     assert.ok(visible, 'Overlay obscured in desktop evidence.');
+    if (expectedDesktop) {
+      assert.ok(markerVisible(png, true), 'Main render marker missing from whole-desktop evidence.');
+      report.renderEvidence.desktopMarkerSamples++;
+    }
   });
   await pause(500);
   report.startupVisibilityEvents = { shows, hides, focusChanges };
@@ -375,14 +407,14 @@ async function run() {
     const witness = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
       '-Window', report.windowIds.overlay, '-Owner', String(process.pid), '-Mode', 'status',
-      '-DesktopName', expectedDesktop], { timeout: 15000, windowsHide: true });
+      '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt], { timeout: 15000, windowsHide: true });
     report.timeoutWitness = JSON.parse(witness.stdout.trim());
-    report.osInputs.push({ mode: 'status', ...report.timeoutWitness });
+    report.osInputs.push({ mode: 'status', ...report.timeoutWitness, processExitObservedAt: Date.now() });
     assert.equal(report.timeoutWitness.leftHeldBefore, false);
     assert.equal(report.timeoutWitness.leftHeldAfter, false);
     assert.equal(report.timeoutWitness.releaseSent, false);
     await collectNativeDesktopReceipts();
-    report.electronProcesses = app.getAppMetrics().map(({ pid, type }) => ({ pid, type }));
+    report.electronProcesses = app.getAppMetrics().map(({ pid, type, creationTime }) => ({ pid, type, creationTime }));
     Object.assign(report, await stopVideo());
     stopVideo = undefined;
     report.status = 'timeout-witness-ready';
@@ -464,7 +496,7 @@ async function run() {
   report.finalPointerState = (await status()).nativePointerState;
   if (expectedDesktop) {
     await collectNativeDesktopReceipts();
-    report.electronProcesses = app.getAppMetrics().map(({ pid, type }) => ({ pid, type }));
+    report.electronProcesses = app.getAppMetrics().map(({ pid, type, creationTime }) => ({ pid, type, creationTime }));
   }
   report.status = 'passed';
 }
@@ -487,13 +519,14 @@ run().catch((error) => {
             '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
             '-Window', ownedDownReceipt.ownedWindow, '-Owner', String(process.pid), '-Mode', 'up',
             '-CleanupOwnedDown', '-OwnedDownReceipt', JSON.stringify(ownedDownReceipt),
-            ...(expectedDesktop ? ['-DesktopName', expectedDesktop] : [])], { timeout: 15000, windowsHide: true });
+            ...(expectedDesktop ? ['-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt] : [])], { timeout: 15000, windowsHide: true });
         } catch (error) {
           if (error.stdout?.trim()) report.cleanupRelease = JSON.parse(error.stdout.trim());
           report.cleanupBlocked = { reason: error.message, remainingHeld: report.cleanupRelease?.leftHeldAfter ?? 'unknown' };
           throw error;
         }
         report.cleanupRelease = JSON.parse(result.stdout.trim());
+        report.cleanupRelease.processExitObservedAt = Date.now();
         assert.equal(report.cleanupRelease.cleanupUpOnly, true);
         assert.equal(report.cleanupRelease.leftHeldAfter, false);
         held = false;

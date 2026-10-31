@@ -1,5 +1,5 @@
 param([long] $Window, [long] $Foreground, [int] $Owner, [string] $Mode, [int] $X, [int] $Y,
-    [switch] $CleanupOwnedDown, [string] $OwnedDownReceipt, [string] $DesktopName)
+    [switch] $CleanupOwnedDown, [string] $OwnedDownReceipt, [string] $DesktopName, [string] $JobOutput)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'OS input is restricted to an isolated GitHub-hosted Windows runner.' }
@@ -18,11 +18,25 @@ if ($CleanupOwnedDown) {
     }
 }
 if ($DesktopName -and $DesktopName -notmatch '^vi-ci-[0-9]+-[0-9]+-[a-f0-9]{32}$') { throw 'Invalid owned desktop name.' }
+if ($DesktopName) {
+    if (!$JobOutput) { throw 'OS driver requires independent Job observation output.' }
+    $birth = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
+    $jobPath = Join-Path $JobOutput "job-$PID-$birth.json"
+    $deadline = [DateTime]::UtcNow.AddSeconds(2)
+    while (!(Test-Path -LiteralPath $jobPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 25 }
+    if (!(Test-Path -LiteralPath $jobPath)) { throw "External specific Job proof missing for OS driver PID $PID." }
+    $job = [IO.File]::ReadAllText($jobPath) | ConvertFrom-Json
+    if ($job.pid -ne $PID -or $job.creationFileTime -ne $birth -or !$job.specificJobMember -or
+        !$job.liveAtCompletion -or $job.status -ne 'verified-specific-job-process-identity') {
+        throw "External OS driver process generation/Job proof mismatch for PID $PID."
+    }
+}
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Diagnostics;
 public static class OverlayCiMouse {
     [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT {
@@ -46,6 +60,11 @@ public static class OverlayCiMouse {
     [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll")] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
+    delegate bool EnumWindow(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll", SetLastError=true)]
+    static extern bool EnumDesktopWindows(IntPtr desktop, EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern IntPtr OpenDesktopW(string name, uint flags, bool inherit, uint access);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder value, uint bytes, out uint needed);
     static string Name(IntPtr handle) {
@@ -57,6 +76,8 @@ public static class OverlayCiMouse {
     }
     static string Desktop(string expected, IntPtr window) {
         if (String.IsNullOrEmpty(expected)) return "";
+        long started = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        uint executionThread = GetCurrentThreadId();
         IntPtr input = OpenInputDesktop(0, false, 0x0141);
         string station, thread, active;
         try {
@@ -66,11 +87,28 @@ public static class OverlayCiMouse {
         } finally {
             if (input != IntPtr.Zero && !CloseDesktop(input)) throw new InvalidOperationException("OS driver input handle cleanup failed.");
         }
+        if (station != "WinSta0" || thread != expected || active != expected)
+            throw new InvalidOperationException("OS driver or owned window escaped the active ordinary desktop.");
+        bool found = false;
+        IntPtr owned = OpenDesktopW(expected, 0, false, 0x0041);
+        if (owned == IntPtr.Zero) throw new InvalidOperationException("OS driver cannot open the owned desktop.");
+        try {
+            if (Name(owned) != expected || !EnumDesktopWindows(owned, (candidate, unused) => {
+                if (candidate == window) found = true;
+                return true;
+            }, IntPtr.Zero)) throw new InvalidOperationException("OS driver owned desktop enumeration failed.");
+        } finally { if (!CloseDesktop(owned)) throw new InvalidOperationException("OS driver owned desktop handle cleanup failed."); }
         uint owner;
         uint windowThread = GetWindowThreadProcessId(window, out owner);
-        if (station != "WinSta0" || thread != expected || active != expected || Name(GetThreadDesktop(windowThread)) != expected)
-            throw new InvalidOperationException("OS driver or owned window escaped the active ordinary desktop.");
+        if (!found || windowThread == 0 || !IsWindow(window)) throw new InvalidOperationException("Target HWND not associated with owned desktop.");
+        string birth;
+        using (var process = Process.GetCurrentProcess()) birth = process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString();
         return ",\"driverPid\":" + GetCurrentProcessId() + ",\"driverThread\":" + GetCurrentThreadId() +
+            ",\"executionThread\":" + executionThread + ",\"role\":\"os-mouse-driver\",\"creationFileTime\":\"" + birth +
+            "\",\"selfQueryComplete\":true,\"coverage\":\"self-execution-thread-not-all-process-threads\",\"queryStartedAt\":" + started +
+            ",\"queryCompletedAt\":" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
+            ",\"targetWindow\":\"" + window.ToInt64() + "\",\"targetPid\":" + owner + ",\"targetThread\":" + windowThread +
+            ",\"targetEnumerationApi\":\"EnumDesktopWindows\",\"targetEnumeratedOnOwnedDesktop\":true" +
             ",\"station\":\"" + station + "\",\"threadDesktop\":\"" + thread + "\",\"inputDesktop\":\"" + active + "\"";
     }
     static void Button(uint flags) {

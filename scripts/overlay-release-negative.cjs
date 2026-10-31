@@ -1,9 +1,10 @@
-const { app, BrowserWindow, screen } = require('electron');
+const { app, BrowserWindow, screen, nativeImage } = require('electron');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const { recordDesktop } = require('./desktop-evidence.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'win32' ||
     process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.VI_OUTPUT) {
@@ -22,7 +23,7 @@ async function input(mode, cleanup = false, receipt = undefined) {
     '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
     '-Window', handle(overlay), '-Foreground', handle(main), '-Owner', String(process.pid),
     '-Mode', mode, '-X', String(point.x), '-Y', String(point.y),
-    ...(expectedDesktop ? ['-DesktopName', expectedDesktop] : [])];
+    ...(expectedDesktop ? ['-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt] : [])];
   if (cleanup) {
     args.push('-CleanupOwnedDown');
     if (receipt) args.push('-OwnedDownReceipt', JSON.stringify(receipt));
@@ -30,7 +31,7 @@ async function input(mode, cleanup = false, receipt = undefined) {
   try {
     const result = await execute('powershell.exe', args, { timeout: 15000, windowsHide: true });
     const value = JSON.parse(result.stdout.trim());
-    report.osInputs.push({ mode, ...value });
+    report.osInputs.push({ mode, ...value, processExitObservedAt: Date.now() });
     if (expectedDesktop) {
       assert.equal(value.station, 'WinSta0');
       assert.equal(value.threadDesktop, expectedDesktop);
@@ -42,7 +43,7 @@ async function input(mode, cleanup = false, receipt = undefined) {
   } catch (error) {
     if (error.stdout?.trim()) {
       const value = JSON.parse(error.stdout.trim());
-      report.osInputs.push({ mode, ...value });
+      report.osInputs.push({ mode, ...value, processExitObservedAt: Date.now() });
       if (value.ownedDownInjected && value.ownerVerified && value.leftHeldAfter) ownedDown = value;
     }
     throw error;
@@ -72,7 +73,41 @@ async function run() {
     await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
       mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
     await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
-    report.electronProcesses = app.getAppMetrics().map(({ pid, type }) => ({ pid, type }));
+    report.electronProcesses = app.getAppMetrics().map(({ pid, type, creationTime }) => ({ pid, type, creationTime }));
+    for (const [window, color] of [[main, '#00ffff'], [overlay, '#ff00ff']]) {
+      await window.webContents.executeJavaScript(`(() => {
+        const marker = document.createElement('div');
+        marker.style.cssText = 'position:fixed;left:4px;top:4px;width:14px;height:14px;background:${color};z-index:2147483647;pointer-events:none';
+        document.body.append(marker);
+      })()`);
+    }
+    const visible = (png, cyan) => {
+      const pixels = nativeImage.createFromBuffer(png).toBitmap();
+      let count = 0;
+      for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index] > 180 && (cyan ? pixels[index + 1] > 180 && pixels[index + 2] < 80
+          : pixels[index + 1] < 80 && pixels[index + 2] > 180)) count++;
+      }
+      return count >= 8;
+    };
+    const mainCapture = (await main.webContents.capturePage()).toPNG();
+    const overlayCapture = (await overlay.webContents.capturePage()).toPNG();
+    report.renderEvidence = { coverage: 'compositor-output-not-all-process-threads',
+      roleSource: 'Electron-app-metrics-self-reported', mainCaptureBytes: mainCapture.length,
+      overlayCaptureBytes: overlayCapture.length, mainMarkerVisible: visible(mainCapture, true),
+      overlayMarkerVisible: visible(overlayCapture, false), desktopMarkerSamples: 0 };
+    assert.equal(report.renderEvidence.mainMarkerVisible, true);
+    assert.equal(report.renderEvidence.overlayMarkerVisible, true);
+    const renderDirectory = path.join(directory, 'release-render');
+    await fs.mkdir(renderDirectory);
+    await fs.writeFile(path.join(renderDirectory, 'main-render.png'), mainCapture);
+    await fs.writeFile(path.join(renderDirectory, 'overlay-render.png'), overlayCapture);
+    const stop = await recordDesktop(renderDirectory, (png) => {
+      assert.ok(visible(png, true) && visible(png, false), 'Release fixture render markers missing from whole desktop.');
+      report.renderEvidence.desktopMarkerSamples++;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    Object.assign(report.renderEvidence, await stop());
   }
   await rejectedCleanup('noOwnedDown');
   const first = await input('down');
