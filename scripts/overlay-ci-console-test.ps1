@@ -6,7 +6,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     throw 'Terminal rollback fault checks require an isolated GitHub-hosted Windows runner.'
 }
 $helper = Join-Path $PSScriptRoot 'overlay-ci-console.ps1'
-$pwsh = (Get-Process -Id $PID).Path
+. (Join-Path $PSScriptRoot 'overlay-ci-child.ps1')
 $reportName = if ($FailParent -eq 'none') { 'restore-fault.json' } else { "parent-$FailParent.json" }
 $file = Join-Path $env:GITHUB_WORKSPACE "artifacts-ci\overlay-recovery\$reportName"
 $parentFailure = $null
@@ -14,11 +14,14 @@ $failureStage = 'prepare'
 try {
     $prepareArgs = @('-NoProfile', '-NonInteractive', '-File', $helper, 'prepare', '-ReportName', $reportName)
     if ($FailParent -eq 'prepare') { $prepareArgs += '-FailPrepare' }
-    & $pwsh @prepareArgs
-    if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture preparation failed.' }
+    $prepared = Invoke-OverlayChild -Arguments $prepareArgs -Role fixture-prepare
+    Write-Output $prepared.output
+    if ($prepared.exitCode -ne 0) { throw 'Rollback fault fixture preparation failed.' }
     $failureStage = 'restore'
-    & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName -FailRestoreSnapshot
-    $exitCode = $LASTEXITCODE
+    $restored = Invoke-OverlayChild -Arguments @('-NoProfile', '-NonInteractive', '-File', $helper,
+        'restore', '-ReportName', $reportName, '-FailRestoreSnapshot') -Role fixture-restore
+    Write-Output $restored.output
+    $exitCode = $restored.exitCode
     if ($exitCode -eq 0) { throw 'Injected restore diagnostic failure returned success.' }
     $failureStage = 'readback'
     $report = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
@@ -65,8 +68,10 @@ try {
         if (Test-Path -LiteralPath $file) {
             $state = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json -AsHashtable
             if (!$state.restoreVerified) {
-                & $pwsh -NoProfile -NonInteractive -File $helper restore -ReportName $reportName
-                if ($LASTEXITCODE -ne 0) { throw 'Rollback fault fixture cleanup failed.' }
+                $cleanup = Invoke-OverlayChild -Arguments @('-NoProfile', '-NonInteractive', '-File', $helper,
+                    'restore', '-ReportName', $reportName) -Role fixture-restore
+                Write-Output $cleanup.output
+                if ($cleanup.exitCode -ne 0) { throw 'Rollback fault fixture cleanup failed.' }
             }
         }
     } catch {

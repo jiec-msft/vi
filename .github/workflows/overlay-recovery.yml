@@ -11,6 +11,7 @@ on:
       - test/framework/fixtures/overlay-mouse.*
       - scripts/overlay-recovery-*.cjs
       - scripts/overlay-ci-console*.ps1
+      - scripts/overlay-ci-child.ps1
       - .github/workflows/overlay-recovery.yml
 permissions:
   contents: read
@@ -79,6 +80,7 @@ jobs:
             artifacts-ci/overlay-recovery/restore-*-fault.json
             artifacts-ci/overlay-recovery/parent-*.json
             artifacts-ci/overlay-recovery/negative-parent.json
+            artifacts-ci/overlay-recovery/process-launches.jsonl
             artifacts-ci/overlay-recovery/desktop.webm
             artifacts-ci/overlay-recovery/*.png
           retention-days: 3

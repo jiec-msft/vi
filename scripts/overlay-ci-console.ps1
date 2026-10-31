@@ -206,7 +206,7 @@ public static class OwnedConsoleProbe {
         -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand',
             [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))) -WindowStyle Normal -PassThru
     $report.probeProcess = @{ pid = $probe.Id; role = 'owned-console-probe'; startedAt = $probeStarted;
-        scope = 'new console before app or OS mouse input' }
+        scope = 'new console before app or OS mouse input'; windowStyle = 'Normal'; launchAPI = 'Start-Process' }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     while (!(Test-Path -LiteralPath $probeFile) -and !$probe.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
@@ -223,6 +223,8 @@ public static class OwnedConsoleProbe {
     $report.probe.consolePid = $hosts[0].rootPid
     $report.probe.consoleHost = $hosts[0].exe
     $report.probe.hostVerification = 'live Win32_Process host/client parent identity'
+    $report.probeProcess.parentPid = $hosts[0].chain[1].parentPid
+    $report.probeProcess.createdAt = $hosts[0].chain[1].createdAt
     if (!$probe.WaitForExit(5000) -or $probe.ExitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
     $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
