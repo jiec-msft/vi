@@ -48,7 +48,14 @@ async function main() {
       socket.send(JSON.stringify({ id: current, method: 'Runtime.evaluate',
         params: { expression, returnByValue: true, awaitPromise: true } }));
     });
-    const status = await evaluate('window.voice.status()');
+    let status;
+    const readyBy = Date.now() + 15000;
+    do {
+      status = await evaluate('window.voice.status()');
+      if (status.phase === 'error') throw new Error(`Framework startup error: ${status.message}`);
+      if (status.phase === 'idle' && status.shortcutReady) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } while (Date.now() < readyBy);
     if (status.phase !== 'idle' || !status.shortcutReady) throw new Error('Framework did not reach idle/shortcut readiness.');
     const options = await evaluate('window.voice.providerOptions()');
     if (options.available) throw new Error('Startup-only fixture should not silently select a service.');
