@@ -12,6 +12,10 @@ app.setPath('userData', path.join(output, 'profile'));
 if (mode === 'ui') {
   app.commandLine.appendSwitch('use-fake-device-for-media-stream');
   app.commandLine.appendSwitch('use-file-for-fake-audio-capture', path.join(output, 'input.wav'));
+  if (process.platform === 'darwin') {
+    // The isolated CI fixture file is outside the audio service sandbox.
+    app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
+  }
 }
 const report = { platform: process.platform, arch: process.arch, checks: [], videoScope: 'desktop' };
 let main, editor, floating, recorder, provider, service, frames, grabbing = false;
