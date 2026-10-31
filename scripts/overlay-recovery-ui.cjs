@@ -31,6 +31,8 @@ const execFile = promisify(childProcess.execFile);
 const helpers = [];
 let mainWindow, overlay, service, stopVideo, held = false;
 let shows = 0, hides = 0, focusChanges = 0;
+let stage = 'startup';
+report.windowEvents = [];
 async function until(action, label, limit = 15000) {
   const deadline = Date.now() + limit;
   do {
@@ -68,6 +70,7 @@ async function pointFor(selector) {
   return { x: bounds.x + point.x, y: bounds.y + point.y };
 }
 async function physicalDrag(label) {
+  stage = label;
   const before = overlay.getBounds(), point = await pointFor('#drag-handle');
   await mouse('hover', point);
   await pause(200);
@@ -87,6 +90,7 @@ async function physicalDrag(label) {
   await fs.writeFile(path.join(directory, `${label}.png`), (await overlay.webContents.capturePage()).toPNG());
 }
 async function physicalControls(label) {
+  stage = label;
   const changes = { shows, hides, focusChanges };
   const bytes = service.bytes();
   await evaluate('window.voice.toggle()');
@@ -166,18 +170,24 @@ async function run() {
   mainWindow.focus();
   await until(() => BrowserWindow.getFocusedWindow() === mainWindow, 'owned focus baseline');
   assert.equal(overlay.isFocusable(), false);
-  overlay.on('show', () => shows++);
-  overlay.on('hide', () => hides++);
-  overlay.on('focus', () => focusChanges++);
+  const windowEvent = (event) => report.windowEvents.push({ event, stage, at: Date.now(), visible: overlay.isVisible() });
+  overlay.on('show', () => { shows++; windowEvent('show'); });
+  overlay.on('hide', () => { hides++; windowEvent('hide'); });
+  overlay.on('focus', () => { focusChanges++; windowEvent('focus'); });
   await overlay.webContents.executeJavaScript(`(() => {
     const marker = document.createElement('div');
     marker.style.cssText = 'position:fixed;right:4px;bottom:4px;width:14px;height:14px;background:#ff00ff;pointer-events:none;z-index:2147483647';
     document.body.append(marker);
   })()`);
   stopVideo = await recordDesktop(directory, (png) => assert.ok(markerVisible(png), 'Overlay obscured in desktop evidence.'));
+  await pause(500);
+  report.startupVisibilityEvents = { shows, hides, focusChanges };
+  assert.equal(hides, 0, 'Overlay disappeared while establishing the startup baseline.');
+  shows = hides = focusChanges = 0;
   await physicalDrag('physical-drag');
   await physicalControls('physical-stop-cancel');
   if (process.platform === 'win32') {
+    stage = 'native-cursor-suspension';
     let point = await pointFor('#drag-handle');
     await mouse('hover', point);
     await mouse('down', point);
@@ -193,6 +203,7 @@ async function run() {
     assert.equal(helpers.length, helperCount, 'Temporary cursor failure restarted the helper.');
     report.checks.push('native-cursor-suspend-cancels-held-drag', 'native-cursor-resume-without-restart');
     await physicalDrag('physical-drag-after-cursor-resume');
+    stage = 'owned-helper-death';
     point = await pointFor('#drag-handle');
     await mouse('hover', point);
     await mouse('down', point);
@@ -205,6 +216,7 @@ async function run() {
     await mouse('up', { x: point.x - 30, y: point.y - 20 });
     await physicalDrag('physical-drag-after-helper-recovery');
     report.checks.push('owned-helper-death-recovery-cancels-gesture');
+    stage = 'native-retry-budget';
     for (let count = 2; count <= 4; count++) {
       helpers.at(-1).kill();
       if (count < 4) await until(async () => (await status()).nativePointer && helpers.length === count + 1, 'bounded retry');
@@ -223,10 +235,10 @@ async function run() {
     report.checks.push('macOS-DOM-fallback-physical-input');
     report.cursorFailureScope = 'not applicable; Windows native helper only';
   }
+  report.visibilityEvents = { shows, hides, focusChanges };
   assert.equal(shows, 0);
   assert.equal(hides, 0);
   assert.equal(focusChanges, 0);
-  report.visibilityEvents = { shows, hides, focusChanges };
   report.finalPointerState = (await status()).nativePointerState;
   report.status = 'passed';
 }
