@@ -2,10 +2,10 @@ const path = require('node:path');
 const { NativeDelivery } = require('./native-delivery.cjs');
 
 class DesktopInput {
-  constructor({ platform = process.platform, resources = path.join(__dirname, '..', 'native'), createDriver } = {}) {
+  constructor({ platform = process.platform, resources = path.join(__dirname, '..', 'native'), createDriver, diagnostics } = {}) {
     this.platform = platform;
     this.resources = resources.replace('app.asar', 'app.asar.unpacked');
-    this.createDriver = createDriver || (() => new NativeDelivery(this.platform, this.resources));
+    this.createDriver = createDriver || (() => new NativeDelivery(this.platform, this.resources, diagnostics));
   }
 
   async warmup() {

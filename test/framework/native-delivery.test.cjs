@@ -14,8 +14,9 @@ function fixture() {
   child.stdin.on('data', (data) => commands.push(JSON.parse(data.toString())));
   child.kill = () => { child.killed = true; };
   const context = vm.createContext({ module: { exports: {} },
-    require: (name) => name === 'node:child_process' ? { spawn: () => child } : require(name),
-    setTimeout, clearTimeout });
+    require: (name) => name === 'node:child_process' ? { spawn: () => child }
+      : name === './native-diagnostics.cjs' ? require('../../app/native-diagnostics.cjs') : require(name),
+    setTimeout, clearTimeout, process });
   vm.runInContext(readFileSync(require.resolve('../../app/native-delivery.cjs'), 'utf8'), context);
   const driver = new context.module.exports.NativeDelivery('win32', 'owned-resources');
   return { driver, child, commands, reply: (value) => child.stdout.write(`${JSON.stringify(value)}\n`) };

@@ -287,7 +287,8 @@ async function run() {
     }
 `;
     assert.ok(original.includes('if (!GetCursorPos(out point))'));
-    let injected = original.replace('    POINT last;', `    POINT last;${seam}`)
+    let injected = original.replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+      .replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
       const quote = (value) => `'${value.replace(/'/g, "''")}'`;
@@ -322,6 +323,7 @@ async function run() {
       await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
         .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
+        .replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
         .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
           '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))')
         .replace('@{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5',

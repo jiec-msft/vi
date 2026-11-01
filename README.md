@@ -129,12 +129,38 @@ record the desktop. The framework suite uses synthetic microphone permission;
 TCC/hardware permissions, physical shortcut/PTT dispatch, dragging and
 cross-application accessibility remain separate acceptance gates.
 
-Local diagnostics retain the package's stable or preview version, fixed startup
-stage timings and native pointer recovery codes. These fields distinguish
-renderer loading, native helper initialization and window show/focus/order waits;
-they do not record transcripts, endpoints, window titles or raw helper errors.
-Startup logs begin after Electron is ready, so an OS download/security prompt
-before process startup is not included in those timings.
+Diagnostics are enabled by default in `<userData>/logs`: on Windows,
+`%APPDATA%\VI\logs`; on macOS, `~/Library/Application Support/VI/logs`.
+After an incident, quit VI if it responds and compress **the entire logs folder**
+into one ZIP. Include the approximate incident time; no extra tool or repeated
+test is required. Do not include the surrounding profile, provider or cache files.
+
+`events.jsonl` and its three backups retain launch UUID/PID/sequence, stable or
+preview version, available assembly/framework revisions, runtime/OS architecture,
+monotonic spans, renderer/process faults, native request categories and recovery
+state. Missing build metadata is explicitly `unavailable`. Main-process timings
+use `main-performance`; Windows native files use their own `helper-stopwatch`
+clock. Wall UTC timestamps correlate clocks but are not used as span durations.
+No transcript, audio, endpoint, credential, raw error/stack, user path or private
+window title is logged.
+
+The main log has a bounded off-main writer (512 KiB per file, four files). Critical
+markers are sent before synchronous operations, with at most a 25 ms acknowledgement
+wait; queued ordinary records are batched. Pending memory is limited to 128 records
+/ 32 KiB and exit flushing to 200 ms. Drops and write failures are explicit.
+An OS/filesystem stall can still prevent a marker from reaching disk; logging
+cannot guarantee evidence through a power loss or a system-wide freeze.
+`window-shown` is the completed native-order receipt, not the first rendered pixel.
+Separate visible/show/focus/order events identify that distinction.
+
+On Windows, the existing pointer helper also records bounded native sidecars
+(128 KiB per file, three files per role), process birth/generation, safe Win32
+codes and desktop/session classes. A missing main-process pulse for five seconds
+is recorded independently once, then at most every 30 seconds; recovery is
+recorded separately. This observer exists only after the pointer helper starts
+and can itself be delayed by an OS stall. Main event-loop delay is a threshold
+summary observable only after the loop resumes. Neither is an OS watchdog.
+SmartScreen and other pre-process security gates are outside app observation.
 On Windows, unavailable cursor access suspends native floating controls and
 cancels the current gesture. A live suspended helper reports liveness while
 waiting for desktop access to return; it does not consume the helper restart

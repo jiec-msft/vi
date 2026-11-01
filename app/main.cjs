@@ -11,7 +11,8 @@ const { ShortcutBindings, ShortcutPress, shortcutKeys } = require('./shortcuts.c
 const { OverlayDrag } = require('./overlay-drag.js');
 const { AudioTurn } = require('./audio-turn.cjs');
 const { OverlayPointer } = require('./overlay-pointer.cjs');
-const { Diagnostics } = require('./diagnostics.cjs');
+const { Diagnostics, safeError } = require('./diagnostics.cjs');
+const os = require('node:os');
 const { Registry } = require('./plugins/registry.cjs');
 const { PluginRuntime } = require('./plugins/pipeline.cjs');
 const { pluginPreferences, failure } = require('./plugins/manifest.cjs');
@@ -48,13 +49,51 @@ let retainedOutput;
 let pluginWarnings = [];
 let pluginChanging = false;
 let pluginLoading;
-let startupStartedAt;
-let startupComplete = false;
 
 function startupStage(stage, state) {
-  if (!startupComplete && startupStartedAt !== undefined) {
-    diagnostics.record('startup-stage', { stage, state, elapsedMs: Date.now() - startupStartedAt });
-  }
+  diagnostics.stage?.(stage, state);
+}
+
+function syncStage(stage, action) {
+  startupStage(stage, 'begin');
+  try { const result = action(); startupStage(stage, 'end'); return result; }
+  catch (error) { diagnostics.stage(stage, 'failure', error); throw error; }
+}
+
+function initializeDiagnostics() {
+  diagnostics = new Diagnostics(path.join(app.getPath('userData'), 'logs'), (error) => {
+    diagnosticsError = error.message;
+    console.error(error.message);
+    publish(status.phase, status.message);
+  });
+  diagnostics.metadata({ version: app.getVersion(), electronVersion: process.versions.electron,
+    chromeVersion: process.versions.chrome, nodeVersion: process.versions.node,
+    platform: process.platform, arch: process.arch, osVersion: os.release() });
+  diagnostics.watchProcess();
+  diagnostics.checkpoint('lifecycle', { component: 'main', state: 'boot' });
+  startupStage('build-info', 'begin');
+  void readFile(path.join(__dirname, 'build-info.json'), 'utf8').then((text) => {
+    if (Buffer.byteLength(text) > 4096) throw new Error('Invalid build metadata.');
+    const info = JSON.parse(text);
+    if (!info || Object.keys(info).sort().join(',') !== 'assemblyRevision,frameworkRevision' ||
+        !/^[a-f0-9]{40}$/.test(info.frameworkRevision) || !/^[a-f0-9]{40}$/.test(info.assemblyRevision)) {
+      throw new Error('Invalid build metadata.');
+    }
+    diagnostics.metadata({ frameworkRevision: info.frameworkRevision, assemblyRevision: info.assemblyRevision });
+    startupStage('build-info', 'end');
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'metadata' });
+  }).catch((error) => {
+    diagnostics.stage('build-info', error.code === 'ENOENT' ? 'end' : 'failure', error);
+  });
+  app.on('child-process-gone', (_event, details) => {
+    const component = details.type === 'GPU' ? 'gpu' : details.type === 'Utility' ? 'utility' : 'network';
+    diagnostics.checkpoint('lifecycle', { component, state: 'process-gone',
+      fault: details.reason, exitCode: details.exitCode });
+  });
+  app.on('quit', (_event, exitCode) => {
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'quit-complete', exitCode });
+    diagnostics.close();
+  });
 }
 
 function snapshot() {
@@ -95,21 +134,19 @@ function logEvent(event, run, extra = {}) {
 
 function showSettings() {
   if (!window || window.isDestroyed()) return;
-  startupStage('window-show', 'begin');
-  window.setSkipTaskbar(false);
-  if (window.isMinimized()) window.restore();
-  window.show();
-  startupStage('window-show', 'end');
-  startupStage('window-focus', 'begin');
-  window.focus();
-  startupStage('window-focus', 'end');
+  syncStage('window-show', () => {
+    window.setSkipTaskbar(false);
+    if (window.isMinimized()) window.restore();
+    window.show();
+  });
+  syncStage('window-focus', () => window.focus());
   if (process.platform === 'win32' && desktop) {
     startupStage('window-order', 'begin');
     return desktop.settleWindow(window.getNativeWindowHandle()).then((placedBehind) => {
       startupStage('window-order', 'end');
       logEvent('window-shown', undefined, { placedBehind });
     }).catch((error) => {
-      startupStage('window-order', 'end');
+      diagnostics.stage('window-order', 'failure', error);
       preferenceError = error.message;
       console.error('Settings window ordering failed.');
       logEvent('error', undefined, { reason: 'window-order' });
@@ -883,32 +920,35 @@ function keepWindowInTray(target) {
 
 async function launch() {
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Windows and macOS only.');
-  desktop = new DesktopInput({});
-  diagnostics = new Diagnostics(path.join(app.getPath('userData'), 'logs'), (error) => {
-    diagnosticsError = error.message;
-    console.error(error.message);
-    publish(status.phase, status.message);
-  });
-  startupStartedAt = Date.now();
-  diagnostics.record('app-start', { version: app.getVersion() });
+  desktop = new DesktopInput({ diagnostics });
+  diagnostics.checkpoint('app-start', { version: app.getVersion() });
   if (process.platform === 'darwin') app.dock?.hide();
-  powerMonitor.on('lock-screen', () => { if (active || pluginLoading) void abort('Recording stopped because the screen was locked.'); });
-  powerMonitor.on('suspend', () => { if (active || pluginLoading) void abort('Recording stopped because the computer is suspending.'); });
+  powerMonitor.on('lock-screen', () => {
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'lock' });
+    if (active || pluginLoading) void abort('Recording stopped because the screen was locked.');
+  });
+  powerMonitor.on('suspend', () => {
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'suspend' });
+    if (active || pluginLoading) void abort('Recording stopped because the computer is suspending.');
+  });
+  powerMonitor.on('unlock-screen', () => diagnostics.checkpoint('lifecycle', { component: 'main', state: 'unlock' }));
+  powerMonitor.on('resume', () => diagnostics.checkpoint('lifecycle', { component: 'main', state: 'resume' }));
   startupStage('preferences', 'begin');
   try {
     const saved = JSON.parse(await readFile(path.join(app.getPath('userData'), 'settings.json'), 'utf8'));
     settings = preferences(saved);
   } catch (error) {
     if (error.code !== 'ENOENT') {
+      diagnostics.checkpoint('lifecycle', { component: 'main', state: 'failure',
+        fault: 'invalid-settings', ...safeError(error) });
       preferenceError = 'Settings could not be read. Review preferences and the cloud notice again.';
       status.message = preferenceError;
     }
   }
   startupStage('preferences', 'end');
   startupStage('login', 'begin');
-  try { configureLogin(); }
-  catch (error) { preferenceError = error.message; }
-  startupStage('login', 'end');
+  try { configureLogin(); startupStage('login', 'end'); }
+  catch (error) { diagnostics.stage('login', 'failure', error); preferenceError = error.message; }
   startupStage('plugins', 'begin');
   await initializePlugins();
   startupStage('plugins', 'end');
@@ -962,6 +1002,19 @@ async function launch() {
     contents === window.webContents && contents.getURL() === uiUrl &&
     permission === 'media' && (Boolean(testingMic) || settings.consent && Boolean(active)));
   for (const target of [window, overlay]) {
+    const component = target === window ? 'settings' : 'overlay';
+    target.on('show', () => diagnostics.checkpoint('lifecycle', {
+      component, state: 'visible', mainWindowVisible: target.isVisible(),
+    }));
+    target.on('ready-to-show', () => diagnostics.checkpoint('lifecycle', { component, state: 'ready' }));
+    target.on('unresponsive', () => diagnostics.checkpoint('lifecycle', { component, state: 'unresponsive' }));
+    target.on('responsive', () => diagnostics.checkpoint('lifecycle', { component, state: 'responding' }));
+    target.webContents.on('did-fail-load', (_event, errorNumber, _description, _url, isMainFrame) =>
+      diagnostics.checkpoint('lifecycle', { component, state: 'load-failed', errorNumber,
+        mainFrame: Boolean(isMainFrame) }));
+    target.webContents.on('render-process-gone', (_event, details) => diagnostics.checkpoint('lifecycle', {
+      component, state: 'process-gone', fault: details.reason, exitCode: details.exitCode,
+    }));
     target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     target.webContents.on('will-navigate', (event) => event.preventDefault());
   }
@@ -975,14 +1028,20 @@ async function launch() {
   installIpc();
   startupStage('windows', 'end');
   startupStage('renderers', 'begin');
-  await Promise.all([window.loadURL(uiUrl), overlay.loadFile(path.join(__dirname, 'overlay.html'))]);
+  const load = async (stage, action) => {
+    startupStage(stage, 'begin');
+    try { await action(); startupStage(stage, 'end'); }
+    catch (error) { diagnostics.stage(stage, 'failure', error); throw error; }
+  };
+  await Promise.all([load('settings-renderer', () => window.loadURL(uiUrl)),
+    load('overlay-renderer', () => overlay.loadFile(path.join(__dirname, 'overlay.html')))]);
   startupStage('renderers', 'end');
   startupStage('desktop', 'begin');
-  try { await desktop.warmup(); }
-  catch (error) { preferenceError = error.message; }
-  startupStage('desktop', 'end');
+  try { await desktop.warmup(); startupStage('desktop', 'end'); }
+  catch (error) { diagnostics.stage('desktop', 'failure', error); preferenceError = error.message; }
   startupStage('controls', 'begin');
   if (process.platform === 'win32') {
+    startupStage('pointer', 'begin');
     overlayPointer = new OverlayPointer(overlay, observeOverlayPointer, (error) => {
       overlayControlError = error.message;
       cancelOverlayInteraction();
@@ -991,8 +1050,10 @@ async function launch() {
         pointerState: overlayPointer?.state, pointerPressed: overlayPointer?.pressed,
         pointerRestarts: overlayPointer?.restarts });
       publishOverlayPointer();
-    });
+    }, undefined, diagnostics);
+    startupStage('pointer', 'end');
   }
+  startupStage('tray', 'begin');
   tray = new Tray(trayIcon());
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open VI', click: showSettings },
@@ -1002,18 +1063,25 @@ async function launch() {
     { label: 'Quit', click: () => app.quit() },
   ]));
   tray.on('double-click', showSettings);
+  startupStage('tray', 'end');
   installShortcutPress();
   bindings = new ShortcutBindings(globalShortcut, () => {
     try { shortcutPress.down(shortcutKeys(settings.shortcut)); }
     catch (error) { publish('error', error.message); }
   }, () => { void abort(); });
+  startupStage('shortcuts', 'begin');
   try {
     bindings.install([settings.shortcut, settings.cancelShortcut]);
     publish('idle', settings.consent ? 'Ready. Focus a text field and use the global shortcut.' : status.message);
-  } catch (error) { publish('error', error.message); }
+    startupStage('shortcuts', 'end');
+  } catch (error) {
+    diagnostics.stage('shortcuts', 'failure', error);
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'failure', fault: 'shortcut-conflict' });
+    publish('error', error.message);
+  }
   startupStage('controls', 'end');
   if (!app.commandLine.hasSwitch('background') || bindings.current.length !== 2) await showSettings();
-  startupComplete = true;
+  diagnostics.checkpoint('lifecycle', { component: 'main', state: 'ready' });
 }
 
 function installShortcutPress() {
@@ -1061,6 +1129,7 @@ function installShortcutPress() {
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
+  initializeDiagnostics();
   app.on('second-instance', (_event, args) => {
     if (!args.includes('--background')) showSettings();
   });
@@ -1068,7 +1137,8 @@ else {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
-    diagnostics.record('quit-start');
+    diagnostics.checkpoint('quit-start');
+    startupStage('quit', 'begin');
     const pendingMove = overlayMoveTimer !== undefined;
     clearTimeout(overlayMoveTimer);
     clearTimeout(micTestTimer);
@@ -1087,14 +1157,19 @@ else {
       if (results.some((result) => result.status === 'rejected')) {
         console.error('Some settings, plugin processes or diagnostic logs could not be closed cleanly.');
       }
+      startupStage('quit', results.some((result) => result.status === 'rejected') ? 'failure' : 'end');
       app.quit();
     });
   });
   app.on('window-all-closed', () => {});
   app.on('activate', showSettings);
-  app.whenReady().then(launch).catch(() => {
+  app.whenReady().then(() => {
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'app-ready' });
+    return launch();
+  }).catch((error) => {
     // Do not dump Electron/network objects that might hold an authenticated URL.
     console.error('VI could not start.');
+    diagnostics.checkpoint('lifecycle', { component: 'main', state: 'startup-failed', ...safeError(error) });
     app.exit(1);
   });
 }

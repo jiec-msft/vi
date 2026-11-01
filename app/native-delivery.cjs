@@ -1,28 +1,42 @@
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
+const { NativeTrace } = require('./native-diagnostics.cjs');
+let generation = 0;
 
 class NativeDelivery {
-  constructor(platform, resources) {
+  constructor(platform, resources, diagnostics) {
+    this.trace = new NativeTrace(diagnostics, 'delivery', ++generation);
     const executable = platform === 'win32' ? 'powershell.exe' : path.join(resources, 'macos-delivery');
     const args = platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
-      '-File', path.join(resources, 'windows-delivery.ps1')] : [];
-    this.process = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      '-File', path.join(resources, 'windows-delivery.ps1'), ...this.trace.arguments(process.pid)] : [];
+    this.trace.emit('spawn', {}, true);
+    try { this.process = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (error) { this.trace.emit('failure', { fault: 'spawn' }, true); throw error; }
+    this.trace.attach(this.process);
+    this.trace.emit('spawned');
     this.sequence = 0;
     this.queue = Promise.resolve();
-    this.process.stderr.resume();
     this.process.once('error', () => this.fail('Desktop input helper could not start.'));
     this.process.once('exit', () => this.fail('Desktop input helper stopped. The transcript remains available for Copy.'));
     this.process.stdin.on('error', () => this.fail('Desktop input helper pipe closed.'));
     this.lines = readline.createInterface({ input: this.process.stdout, crlfDelay: Infinity });
     this.lines.on('line', (line) => {
+      let fault = 'invalid-shape';
       try {
-        if (line.length > 4096) throw new Error();
+        if (line.length > 4096) { fault = 'oversize'; throw new Error(); }
+        fault = 'invalid-json';
         const reply = JSON.parse(line);
+        fault = !this.pending ? 'late-reply' : reply.id !== this.pending.id ? 'wrong-id' : 'invalid-shape';
         if (!this.pending || reply.id !== this.pending.id || typeof reply.ok !== 'boolean') throw new Error();
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
+        if (pending.action !== 'held' || !reply.ok || performance.now() - pending.started > 250) {
+          this.trace.emit('reply', { action: pending.action, requestId: pending.id,
+            spanMs: Math.round(performance.now() - pending.started), ...(reply.ok ? {} : { fault: 'native-error' }) });
+        }
         if (reply.ok) pending.resolve(reply.value);
         else pending.reject(Object.assign(new Error({
           'target-changed': 'The original window is no longer focused. Use Copy result.',
@@ -41,23 +55,34 @@ class NativeDelivery {
           check: ['foreground-window', 'foreground-process', 'accessible-focus', 'native-focus'].includes(reply.check)
             ? reply.check : undefined }));
       } catch {
+        this.trace.emit('failure', { fault }, true);
         this.fail('Desktop input helper returned an invalid response.');
       }
     });
   }
 
   request(action, data = {}) {
+    const queued = performance.now();
     const work = () => {
       if (this.closed) throw new Error('Desktop input helper is closed.');
       const id = ++this.sequence;
+      const started = performance.now();
+      if (action !== 'held') this.trace.emit('request', { action, requestId: id,
+        spanMs: Math.round(started - queued) }, true);
       return new Promise((resolve, reject) => {
         const initialization = action === 'ready';
-        const timer = setTimeout(() => this.fail(initialization
-          ? 'Desktop input helper initialization timed out.'
-          : 'Desktop input timed out. The clipboard may contain the transcript; review the target before using Copy result.'),
+        const timer = setTimeout(() => {
+          this.trace.emit('timeout', { action, requestId: id, fault: 'timeout',
+            spanMs: Math.round(performance.now() - started) }, true);
+          this.fail(initialization ? 'Desktop input helper initialization timed out.'
+            : 'Desktop input timed out. The clipboard may contain the transcript; review the target before using Copy result.');
+        },
         initialization ? 20000 : 8000);
-        this.pending = { id, resolve, reject, timer };
-        this.process.stdin.write(`${JSON.stringify({ id, action, ...data })}\n`);
+        this.pending = { id, action, started, resolve, reject, timer };
+        this.process.stdin.write(`${JSON.stringify({ id, action, ...data })}\n`, (error) => {
+          if (action !== 'held' || error) this.trace.emit(error ? 'failure' : 'write', { action, requestId: id,
+            ...(error ? { fault: 'pipe' } : {}) });
+        });
       });
     };
     const result = this.queue.then(work, work);
@@ -77,6 +102,8 @@ class NativeDelivery {
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.trace.closing = true;
+    this.trace.emit('close', {}, true);
     if (this.pending) {
       clearTimeout(this.pending.timer);
       this.pending.reject(new Error('Desktop input helper was closed.'));
