@@ -379,7 +379,7 @@ async function run() {
       let receiveOrder = 0, readySequence = 0;
       lines.on('line', (line) => {
         receiveOrder++;
-        const type = line.match(/"type":"(ready|cancel|suspended)"/)?.[1];
+        const type = line.match(/"type":"(ready|cancel|suspended|heartbeat)"/)?.[1];
         if (type || line.includes('"ready":true')) {
           const eventType = type || 'ready';
           const causal = nodeEvent(report, 'helper-line', { requestId, type: eventType, receiveOrder });
@@ -574,9 +574,14 @@ async function run() {
     const suspended = overlay.getBounds(), helperCount = helpers.length;
     await mouse('move', { x: point.x - 35, y: point.y - 18 });
     await mouse('move', { x: point.x - 45, y: point.y - 25 });
+    await pause(10000);
     assert.equal((await status()).nativePointerState, 'suspended');
+    assert.equal(helpers.length, helperCount, 'Live suspension consumed the helper restart budget.');
+    assert.ok(report.helpers.at(-1).events.filter(({ type }) => type === 'heartbeat').length >= 8,
+      'Long cursor suspension did not produce native liveness receipts.');
     assert.deepEqual(overlay.getBounds(), suspended, 'Fallback restarted the cancelled held gesture during suspension.');
-    report.checks.push('uncaptured-hover-cleared-on-native-readiness', 'suspended-fallback-cannot-restart-held-drag');
+    report.checks.push('uncaptured-hover-cleared-on-native-readiness', 'suspended-fallback-cannot-restart-held-drag',
+      'live-cursor-suspension-survives-eight-second-timeout');
     await fs.unlink(unavailable);
     await until(async () => (await status()).nativePointer, 'same helper resumed');
     await mouse('move', { x: point.x - 45, y: point.y - 25 });

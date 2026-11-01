@@ -26,6 +26,15 @@ if ($mouse.Sample($true, $true, 140, 240) -ne '{"type":"ready"}') { throw 'Recov
 if ($null -ne $mouse.Sample($true, $true, 160, 260)) { throw 'Held gesture resumed.' }
 if ($null -ne $mouse.Sample($false, $true, 160, 260)) { throw 'Cancelled gesture released twice.' }
 if ($mouse.Sample($true, $true, 160, 260) -notmatch '"type":"down"') { throw 'Fresh press missing.' }
+if ($mouse.SampleUnavailable(0) -ne "{\`"type\`":\`"cancel\`"}\`n{\`"type\`":\`"suspended\`"}") { throw 'Unavailable transition missing.' }
+if ($null -ne $mouse.SampleUnavailable(999)) { throw 'Heartbeat emitted before one second.' }
+if ($mouse.SampleUnavailable(1000) -ne '{"type":"heartbeat"}') { throw 'Suspended heartbeat missing.' }
+if ($null -ne $mouse.SampleUnavailable(1999)) { throw 'Repeated heartbeat emitted too early.' }
+for ($time = 2000; $time -le 120000; $time += 1000) {
+    if ($mouse.SampleUnavailable($time) -ne '{"type":"heartbeat"}') { throw 'Long suspension lost liveness.' }
+}
+if ($mouse.Sample($true, $true, 160, 260) -ne '{"type":"ready"}') { throw 'Long-suspension readiness missing.' }
+if ($null -ne $mouse.Sample($true, $true, 180, 280)) { throw 'Long-suspension gesture resumed.' }
 `;
     execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from(script, 'utf16le').toString('base64')], { timeout: 20000, stdio: 'pipe' });

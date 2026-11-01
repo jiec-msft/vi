@@ -20,6 +20,7 @@ public sealed class OverlayMouse {
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     bool initialized, previous, tracking, suspended;
     POINT last;
+    long lastHeartbeat;
 
     public string Suspend() {
         bool cancel = tracking;
@@ -27,6 +28,17 @@ public sealed class OverlayMouse {
         if (suspended) return null;
         suspended = true;
         return (cancel ? "{\"type\":\"cancel\"}\n" : "") + "{\"type\":\"suspended\"}";
+    }
+
+    public string SampleUnavailable(long elapsedMilliseconds) {
+        string transition = Suspend();
+        if (transition != null) {
+            lastHeartbeat = elapsedMilliseconds;
+            return transition;
+        }
+        if (elapsedMilliseconds - lastHeartbeat < 1000) return null;
+        lastHeartbeat = elapsedMilliseconds;
+        return "{\"type\":\"heartbeat\"}";
     }
 
     public string Sample(bool held, bool inside, int x, int y) {
@@ -50,10 +62,11 @@ public sealed class OverlayMouse {
         SetThreadDpiAwarenessContext(new IntPtr(-4));
         var owner = Process.GetProcessById(parent);
         var mouse = new OverlayMouse();
+        var clock = Stopwatch.StartNew();
         while (!owner.HasExited && IsWindow(window)) {
             POINT point;
             string value;
-            if (!GetCursorPos(out point)) value = mouse.Suspend();
+            if (!GetCursorPos(out point)) value = mouse.SampleUnavailable(clock.ElapsedMilliseconds);
             else {
                 bool inside = IsWindowVisible(window) && GetAncestor(WindowFromPoint(point), 2) == window;
                 value = mouse.Sample((GetAsyncKeyState(1) & 0x8000) != 0, inside, point.X, point.Y);

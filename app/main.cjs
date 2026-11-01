@@ -48,6 +48,14 @@ let retainedOutput;
 let pluginWarnings = [];
 let pluginChanging = false;
 let pluginLoading;
+let startupStartedAt;
+let startupComplete = false;
+
+function startupStage(stage, state) {
+  if (!startupComplete && startupStartedAt !== undefined) {
+    diagnostics.record('startup-stage', { stage, state, elapsedMs: Date.now() - startupStartedAt });
+  }
+}
 
 function snapshot() {
   const { plugins, ...publicSettings } = settings;
@@ -87,14 +95,21 @@ function logEvent(event, run, extra = {}) {
 
 function showSettings() {
   if (!window || window.isDestroyed()) return;
+  startupStage('window-show', 'begin');
   window.setSkipTaskbar(false);
   if (window.isMinimized()) window.restore();
   window.show();
+  startupStage('window-show', 'end');
+  startupStage('window-focus', 'begin');
   window.focus();
+  startupStage('window-focus', 'end');
   if (process.platform === 'win32' && desktop) {
+    startupStage('window-order', 'begin');
     return desktop.settleWindow(window.getNativeWindowHandle()).then((placedBehind) => {
+      startupStage('window-order', 'end');
       logEvent('window-shown', undefined, { placedBehind });
     }).catch((error) => {
+      startupStage('window-order', 'end');
       preferenceError = error.message;
       console.error('Settings window ordering failed.');
       logEvent('error', undefined, { reason: 'window-order' });
@@ -874,10 +889,12 @@ async function launch() {
     console.error(error.message);
     publish(status.phase, status.message);
   });
+  startupStartedAt = Date.now();
   diagnostics.record('app-start', { version: app.getVersion() });
   if (process.platform === 'darwin') app.dock?.hide();
   powerMonitor.on('lock-screen', () => { if (active || pluginLoading) void abort('Recording stopped because the screen was locked.'); });
   powerMonitor.on('suspend', () => { if (active || pluginLoading) void abort('Recording stopped because the computer is suspending.'); });
+  startupStage('preferences', 'begin');
   try {
     const saved = JSON.parse(await readFile(path.join(app.getPath('userData'), 'settings.json'), 'utf8'));
     settings = preferences(saved);
@@ -887,9 +904,15 @@ async function launch() {
       status.message = preferenceError;
     }
   }
+  startupStage('preferences', 'end');
+  startupStage('login', 'begin');
   try { configureLogin(); }
   catch (error) { preferenceError = error.message; }
+  startupStage('login', 'end');
+  startupStage('plugins', 'begin');
   await initializePlugins();
+  startupStage('plugins', 'end');
+  startupStage('windows', 'begin');
   window = new BrowserWindow({
     width: 720, height: 800, minWidth: 580, minHeight: 640, show: false, skipTaskbar: false,
     backgroundColor: '#111827', autoHideMenuBar: true,
@@ -950,15 +973,23 @@ async function launch() {
   keepWindowInTray(window);
   window.on('hide', () => { if (testingMic) window.webContents.send('microphone-test-stop', testingMic); });
   installIpc();
+  startupStage('windows', 'end');
+  startupStage('renderers', 'begin');
   await Promise.all([window.loadURL(uiUrl), overlay.loadFile(path.join(__dirname, 'overlay.html'))]);
+  startupStage('renderers', 'end');
+  startupStage('desktop', 'begin');
   try { await desktop.warmup(); }
   catch (error) { preferenceError = error.message; }
+  startupStage('desktop', 'end');
+  startupStage('controls', 'begin');
   if (process.platform === 'win32') {
     overlayPointer = new OverlayPointer(overlay, observeOverlayPointer, (error) => {
       overlayControlError = error.message;
       cancelOverlayInteraction();
       console.error(`Native floating pointer interrupted (${error.code}).`);
-      logEvent('error', active, { reason: `overlay-pointer-${error.code}` });
+      logEvent('error', active, { reason: `overlay-pointer-${error.code}`,
+        pointerState: overlayPointer?.state, pointerPressed: overlayPointer?.pressed,
+        pointerRestarts: overlayPointer?.restarts });
       publishOverlayPointer();
     });
   }
@@ -980,7 +1011,9 @@ async function launch() {
     bindings.install([settings.shortcut, settings.cancelShortcut]);
     publish('idle', settings.consent ? 'Ready. Focus a text field and use the global shortcut.' : status.message);
   } catch (error) { publish('error', error.message); }
+  startupStage('controls', 'end');
   if (!app.commandLine.hasSwitch('background') || bindings.current.length !== 2) await showSettings();
+  startupComplete = true;
 }
 
 function installShortcutPress() {

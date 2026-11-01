@@ -67,6 +67,10 @@ class OverlayPointer {
           this.state = 'suspended';
           clearTimeout(this.timer);
           this.timer = setTimeout(() => this.fail('timeout'), 8000);
+        } else if (event.type === 'heartbeat' && this.state === 'suspended' && !this.pressed) {
+          clearTimeout(this.timer);
+          this.timer = setTimeout(() => this.fail('timeout'), 8000);
+          return;
         } else if (event.type === 'cancel' && this.pressed) {
           this.pressed = false;
         } else {

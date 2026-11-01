@@ -129,6 +129,18 @@ record the desktop. The framework suite uses synthetic microphone permission;
 TCC/hardware permissions, physical shortcut/PTT dispatch, dragging and
 cross-application accessibility remain separate acceptance gates.
 
+Local diagnostics retain the package's stable or preview version, fixed startup
+stage timings and native pointer recovery codes. These fields distinguish
+renderer loading, native helper initialization and window show/focus/order waits;
+they do not record transcripts, endpoints, window titles or raw helper errors.
+Startup logs begin after Electron is ready, so an OS download/security prompt
+before process startup is not included in those timings.
+On Windows, unavailable cursor access suspends native floating controls and
+cancels the current gesture. A live suspended helper reports liveness while
+waiting for desktop access to return; it does not consume the helper restart
+budget. A silent or failed helper still follows the bounded recovery path, and
+reconnection requires a fresh mouse press rather than replaying a held gesture.
+
 The framework recording must contain a test-only visual marker in every test
 frame. Windows CI suppresses first-login onboarding only inside the hosted VM,
 so a system setup screen cannot conceal successful renderer-only operations.
