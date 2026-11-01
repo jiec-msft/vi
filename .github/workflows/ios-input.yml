@@ -22,18 +22,22 @@ jobs:
     timeout-minutes: 3
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      IOS_INPUT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Record actual environment
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$IOS_INPUT_HEAD"
           mkdir -p "$RUNNER_TEMP/ios-input-evidence"
           {
-            printf 'head=%s\nrun=%s\nattempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'head=%s\nevent_sha=%s\nrun=%s\nattempt=%s\n' \
+              "$IOS_INPUT_HEAD" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
             printf 'image=%s\nimage_version=%s\n' "$ImageOS" "$ImageVersion"
             sw_vers
             uname -m
