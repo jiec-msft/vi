@@ -35,10 +35,25 @@ public sealed class ViCaretFixture : IDisposable {
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, Input[] input, int size);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateWindowEx(uint extended, string className, string text, uint style,
+        int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr handle, StringBuilder name, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr handle, StringBuilder text, int count);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr handle, uint message, IntPtr first, IntPtr second);
+    [DllImport("user32.dll")] static extern IntPtr GetFocus();
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr handle);
+    sealed class EditorEvents : NativeWindow {
+        public int Clicks;
+        public EditorEvents(IntPtr handle) { AssignHandle(handle); }
+        protected override void WndProc(ref Message message) {
+            if (message.Msg == 0x201) Clicks++;
+            base.WndProc(ref message);
+        }
+    }
     readonly Form window;
-    readonly TextBox editor, other, password;
-    readonly IntPtr oldDpi;
-    int clicks;
+    readonly IntPtr editor, other, password, oldDpi, font;
+    readonly EditorEvents editorEvents;
     readonly uint pid = (uint)Process.GetCurrentProcess().Id;
     static object JsonRect(Rect r) { return new { x = r.Left, y = r.Top, width = r.Right - r.Left, height = r.Bottom - r.Top }; }
     void Desktop() {
@@ -62,13 +77,11 @@ public sealed class ViCaretFixture : IDisposable {
             AutoScaleMode = AutoScaleMode.None };
         window.Controls.Add(new Label { Text = "SYNTHETIC CI EDITOR - no account or user audio",
             ForeColor = Color.White, Location = new System.Drawing.Point(30, 20), Size = new Size(780, 45) });
-        editor = new TextBox { Multiline = true, Text = "Synthetic caret fixture", Font = new Font("Segoe UI", 22),
-            Location = new System.Drawing.Point(40, 95), Size = new Size(650, 180) };
-        other = new TextBox { Text = "Second synthetic field", Location = new System.Drawing.Point(40, 320), Size = new Size(650, 50) };
-        password = new TextBox { UseSystemPasswordChar = true, Location = new System.Drawing.Point(40, 420), Size = new Size(650, 50) };
-        window.Controls.Add(editor); window.Controls.Add(other); window.Controls.Add(password);
-        window.MouseDown += (sender, args) => clicks++;
-        editor.MouseDown += (sender, args) => clicks++;
+        font = window.Font.ToHfont();
+        editor = Edit("Synthetic caret fixture", 95, 180, 0x1044);
+        other = Edit("Second synthetic field", 320, 50, 0);
+        password = Edit("", 420, 50, 0x20);
+        editorEvents = new EditorEvents(editor);
         foreach (var point in new[] { new System.Drawing.Point(8, 8), new System.Drawing.Point(work.Width - 32, 8),
             new System.Drawing.Point(8, work.Height - 32), new System.Drawing.Point(work.Width - 32, work.Height - 32),
             new System.Drawing.Point(work.Width / 2, work.Height / 2) }) {
@@ -79,8 +92,19 @@ public sealed class ViCaretFixture : IDisposable {
     }
     public object Ready() {
         Desktop();
-        return new { window = window.Handle.ToInt64().ToString(), focus = editor.Handle.ToInt64().ToString(),
-            pid, desktop = "Default", dpi = "per-monitor-v2", owned = true };
+        var name = new StringBuilder(64);
+        if (GetClassName(editor, name, 64) == 0 || name.ToString() != "Edit")
+            throw new InvalidOperationException("Fixture is not a native Edit control.");
+        return new { window = window.Handle.ToInt64().ToString(), focus = editor.ToInt64().ToString(),
+            pid, desktop = "Default", dpi = "per-monitor-v2", owned = true, fieldClass = name.ToString(),
+            screen = new { x = window.Left, y = window.Top, width = window.Width, height = window.Height } };
+    }
+    IntPtr Edit(string text, int y, int height, uint style) {
+        IntPtr handle = CreateWindowEx(0x200, "Edit", text, 0x50010000 | style, 40, y, 650, height,
+            window.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (handle == IntPtr.Zero) throw new InvalidOperationException("Owned native Edit creation failed.");
+        SendMessage(handle, 0x0030, font, new IntPtr(1));
+        return handle;
     }
     void Send(Input[] events) {
         if (SendInput((uint)events.Length, events, Marshal.SizeOf(typeof(Input))) != events.Length)
@@ -98,10 +122,11 @@ public sealed class ViCaretFixture : IDisposable {
     }
     static void Pump() { for (int i = 0; i < 12; i++) { Application.DoEvents(); Thread.Sleep(10); } }
     public object Click(int field) {
-        TextBox target = field == 0 ? editor : field == 1 ? other : password;
-        var point = target.PointToScreen(new System.Drawing.Point(80, 20));
-        MouseClick(point.X, point.Y);
-        if (!target.Focused) throw new InvalidOperationException("Owned field did not receive focus.");
+        IntPtr target = field == 0 ? editor : field == 1 ? other : password;
+        Rect rect;
+        if (!GetWindowRect(target, out rect)) throw new InvalidOperationException("Owned field geometry unavailable.");
+        MouseClick(rect.Left + 80, rect.Top + 20);
+        if (GetFocus() != target) throw new InvalidOperationException("Owned field did not receive focus.");
         return Inspect(0);
     }
     static Input KeyEvent(ushort key, bool up) {
@@ -142,21 +167,25 @@ public sealed class ViCaretFixture : IDisposable {
         var point = new Point { X = gui.Bounds.Left, Y = gui.Bounds.Top };
         if (gui.Caret != IntPtr.Zero && !ClientToScreen(gui.Caret, ref point))
             throw new InvalidOperationException("Fixture physical caret unavailable.");
+        var text = new StringBuilder(4096);
+        GetWindowText(editor, text, text.Capacity);
+        long selection = SendMessage(editor, 0x00B0, IntPtr.Zero, IntPtr.Zero).ToInt64();
+        int start = (int)(selection & 0xffff), end = (int)((selection >> 16) & 0xffff);
         return new { pid, window = window.Handle.ToInt64().ToString(), foregroundPid,
             focus = gui.Focus.ToInt64().ToString(), caret = new { x = point.X, y = point.Y,
                 width = gui.Bounds.Right - gui.Bounds.Left, height = gui.Bounds.Bottom - gui.Bounds.Top },
-            markers = Windows(helper), text = editor.Text, clicks,
-            selectionStart = editor.SelectionStart, selectionLength = editor.SelectionLength };
+            markers = Windows(helper), text = text.ToString(), clicks = editorEvents.Clicks,
+            selectionStart = start, selectionLength = end - start };
     }
     public object Move() {
-        if (!editor.Focused) throw new InvalidOperationException("Editor not focused.");
+        if (GetFocus() != editor) throw new InvalidOperationException("Editor not focused.");
         Send(new[] { KeyEvent(0x27, false), KeyEvent(0x27, true) });
         Pump();
         return Inspect(0);
     }
     public object Selection() {
-        if (!editor.Focused) throw new InvalidOperationException("Editor not focused.");
-        editor.Select(0, 3);
+        if (GetFocus() != editor) throw new InvalidOperationException("Editor not focused.");
+        SendMessage(editor, 0x00B1, IntPtr.Zero, new IntPtr(3));
         Pump();
         return Inspect(0);
     }
@@ -176,12 +205,17 @@ public sealed class ViCaretFixture : IDisposable {
         if (found == IntPtr.Zero || GetWindow(found, 4) != window.Handle ||
             (GetWindowLong(found, -20) & 0x080800A8) != 0x080800A8)
             throw new InvalidOperationException("Owned transparent marker unavailable.");
-        int before = clicks;
+        int before = editorEvents.Clicks;
         MouseClick((badge.Left + badge.Right) / 2, (badge.Top + badge.Bottom) / 2);
         // The badge overlays the editor client, so a real mouse must reach that editor.
         uint foreground;
         GetWindowThreadProcessId(GetForegroundWindow(), out foreground);
-        return new { before, after = clicks, editorFocused = editor.Focused, foregroundPid = foreground };
+        return new { before, after = editorEvents.Clicks, editorFocused = GetFocus() == editor, foregroundPid = foreground };
     }
-    public void Dispose() { window.Dispose(); SetThreadDpiAwarenessContext(oldDpi); }
+    public void Dispose() {
+        editorEvents.ReleaseHandle();
+        window.Dispose();
+        DeleteObject(font);
+        SetThreadDpiAwarenessContext(oldDpi);
+    }
 }

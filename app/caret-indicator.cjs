@@ -1,11 +1,12 @@
 const path = require('node:path');
 const { NativeDelivery } = require('./native-delivery.cjs');
-const { markerPlacement } = require('../prototypes/desktop-presentation/presentation.cjs');
+const { markerPlacement } = require('./caret-placement.cjs');
 
 class CaretIndicator {
   constructor({ platform = process.platform, createDriver, validateLease = async () => false, onState = () => {} } = {}) {
     this.platform = platform;
-    this.createDriver = createDriver || (() => new NativeDelivery('win32', path.join(__dirname, '..', 'native'),
+    this.createDriver = createDriver || (() => new NativeDelivery('win32',
+      path.join(__dirname, '..', 'native').replace('app.asar', 'app.asar.unpacked'),
       'windows-caret.ps1'));
     this.onState = onState;
     this.validateLease = validateLease;
@@ -73,7 +74,7 @@ class CaretIndicator {
 
   block(reason) {
     const allowed = ['target-changed', 'secure-field', 'no-input', 'desktop-unavailable',
-      'integrity-unavailable', 'caret-unavailable', 'stale-query', 'helper-unavailable', 'no-adjacent-space'];
+      'integrity-unavailable', 'caret-unavailable', 'stale-query', 'helper-unavailable', 'no-adjacent-space', 'composition-active'];
     const state = allowed.includes(reason) ? reason : 'helper-unavailable';
     // Do not authorize a later focus return or a late helper completion to revive this turn.
     if (this.run) this.run.target.caretInvalidated = true;

@@ -131,7 +131,7 @@ public sealed class ViCaret : IDisposable {
     readonly System.Windows.Forms.Timer timer;
     readonly WinEvent callback;
     readonly IntPtr previousDpi;
-    IntPtr window, focus, focusHook, foregroundHook;
+    IntPtr window, focus, focusHook, foregroundHook, destroyHook;
     uint pid;
     long generation, sequence, queryStarted;
     volatile Observation completed;
@@ -187,9 +187,11 @@ public sealed class ViCaret : IDisposable {
     void RemoveHooks() {
         if (focusHook != IntPtr.Zero) { UnhookWinEvent(focusHook); focusHook = IntPtr.Zero; }
         if (foregroundHook != IntPtr.Zero) { UnhookWinEvent(foregroundHook); foregroundHook = IntPtr.Zero; }
+        if (destroyHook != IntPtr.Zero) { UnhookWinEvent(destroyHook); destroyHook = IntPtr.Zero; }
     }
     void OnFocus(IntPtr hook, uint evt, IntPtr changed, int obj, int child, uint thread, uint time) {
-        if (bound && (evt == 3 && changed != window || evt == 0x8005 && changed != focus))
+        if (bound && (evt == 3 && changed != window || evt == 0x8005 && changed != focus ||
+            evt == 0x8001 && (changed == window || changed == focus)))
             Invalidate("target-changed");
     }
     public void Bind(long targetWindow, long targetFocus, uint targetPid) {
@@ -202,7 +204,10 @@ public sealed class ViCaret : IDisposable {
         // Out-of-context accessibility events only during a bound turn; no low-level input hook.
         foregroundHook = SetWinEventHook(3, 3, IntPtr.Zero, callback, 0, 0, 0);
         focusHook = SetWinEventHook(0x8005, 0x8005, IntPtr.Zero, callback, pid, 0, 0);
-        if (foregroundHook == IntPtr.Zero || focusHook == IntPtr.Zero) { Invalidate("caret-unavailable"); return; }
+        destroyHook = SetWinEventHook(0x8001, 0x8001, IntPtr.Zero, callback, pid, 0, 0);
+        if (foregroundHook == IntPtr.Zero || focusHook == IntPtr.Zero || destroyHook == IntPtr.Zero) {
+            Invalidate("caret-unavailable"); return;
+        }
         StartQuery();
     }
     static int Integrity(uint owner) {
@@ -331,6 +336,7 @@ public sealed class ViCaret : IDisposable {
         StartQuery();
         return json;
     }
+    public void CompositionActive() { Invalidate("composition-active"); }
     static string JsonRect(Rect r) {
         return "{\"x\":" + r.Left + ",\"y\":" + r.Top + ",\"width\":" + (r.Right - r.Left) + ",\"height\":" + (r.Bottom - r.Top) + "}";
     }

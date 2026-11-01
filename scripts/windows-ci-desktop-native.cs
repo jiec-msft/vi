@@ -940,7 +940,7 @@ public static class ViCiDesktop
         Require(needed > 0 && needed <= 4096, "Owned token metadata unavailable.");
         IntPtr data = Marshal.AllocHGlobal(needed);
         try {
-            Win32(GetTokenInformation(token, kind, data, needed, out needed), "Read owned token metadata");
+            Win32(GetTokenInformation(token, kind, data, needed, out needed), "Read owned token metadata class " + kind);
             return data;
         } catch { Marshal.FreeHGlobal(data); throw; }
     }
@@ -1046,7 +1046,11 @@ public static class ViCiDesktop
             report["rawExitCode"] = exitCode;
             Require(exitCode == 0, "Caret App fixture exited " + exitCode + ".");
             result = 0;
-        } catch (Exception error) { errors.Add(error.Message); }
+        } catch (Exception error) {
+            errors.Add(error.Message);
+            report["failure"] = new { type = error.GetType().Name,
+                win32Error = error is Win32Exception native ? native.NativeErrorCode : 0 };
+        }
         finally {
             if (child.process != IntPtr.Zero && !attached) {
                 bool terminated = TerminateProcess(child.process, 92) && WaitForSingleObject(child.process, 5000) == 0;

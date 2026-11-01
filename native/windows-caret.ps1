@@ -16,9 +16,15 @@ try {
                 'ready' { @{ ready = $true } }
                 'bind' {
                     $marker.Bind([long]$request.target.window, [long]$request.target.focus, [uint32]$request.target.pid)
+                    $script:caretTarget = $request.target
                     @{ bound = $true }
                 }
-                'sample' { $marker.Sample() | ConvertFrom-Json }
+                'sample' {
+                    if ($null -ne $script:caretTarget -and [VoiceInput]::CompositionActive([long]$script:caretTarget.focus)) {
+                        $marker.CompositionActive()
+                    }
+                    $marker.Sample() | ConvertFrom-Json
+                }
                 'show' {
                     @{ visible = $marker.Place([long]$request.token, [double]$request.rect.x,
                         [double]$request.rect.y, [double]$request.rect.width, [double]$request.rect.height) }

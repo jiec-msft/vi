@@ -153,7 +153,14 @@ async function run() {
   assert.ok(sources[0] && !sources[0].thumbnail.isEmpty());
   await fs.writeFile(path.join(directory, 'caret-visible.png'), sources[0].thumbnail.toPNG());
   const image = nativeImage.createFromBuffer(sources[0].thumbnail.toPNG());
-  assert.ok(image.getSize().width > 0);
+  const size = image.getSize(), pixels = image.toBitmap(), bounds = report.editor.screen;
+  const line = moved.markers.find(({ rect }) => rect.width < 20).rect;
+  const x = Math.round((line.x + line.width / 2 - bounds.x) * size.width / bounds.width);
+  const y = Math.round((line.y + line.height / 2 - bounds.y) * size.height / bounds.height);
+  const offset = (y * size.width + x) * 4;
+  assert.ok(Math.abs(pixels[offset] - 255) < 20 && Math.abs(pixels[offset + 1] - 104) < 20 &&
+    Math.abs(pixels[offset + 2] - 25) < 20, 'Native blue caret-side line was not painted in the actual desktop PNG.');
+  report.checks.push('actual-desktop-blue-marker-pixels');
   const passed = await editor.request('pass-through', { helper: report.helpers.at(-1).pid });
   assert.equal(passed.after, passed.before + 1);
   assert.equal(passed.editorFocused, true);
@@ -177,6 +184,15 @@ async function run() {
   assert.equal((await status()).insertionResult, 'preview');
   assert.equal((await inspect('invalid-lease')).text, final.text);
   report.checks.push('focus-change-invalidates-final-lease', 'focus-return-cannot-resurrect');
+  const beforeAba = report.helpers.length;
+  await begin();
+  await until(() => report.helpers.length > beforeAba, 'captured lease before new native helper initialization');
+  await editor.request('click', { field: 1 });
+  await editor.request('click', { field: 0 });
+  await until(async () => (await status()).caretIndicatorState === 'target-changed', 'capture-time A-B-A invalidation');
+  assert.equal((await inspect('capture-aba')).markers.length, 0);
+  await cancel();
+  report.checks.push('capture-time-focus-aba-cannot-authorize-a-late-query');
   await begin();
   await visible();
   await editor.request('selection');
