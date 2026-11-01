@@ -7,6 +7,63 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+test('production driver error retains callback stderr, exit code and committed native failure', async (t) => {
+  const childProcess = require('node:child_process');
+  const { EventEmitter } = require('node:events');
+  const modulePath = require.resolve('./overlay-ci-desktop.cjs');
+  const cached = require.cache[modulePath];
+  const { report: witness } = fixture();
+  const ack = witness.osInputs[0].committedAck;
+  const value = { ...ack.value, mode: 'up', responseOutcome: 'error',
+    error: 'Owned foreground or no-activate baseline changed before input.',
+    guardOutcome: 'rejected', inputAttempted: false, inputPerformed: false, leftHeldAfter: true };
+  const stdout = JSON.stringify(value), stderr = `${value.error}\r\n`;
+  const commit = { ...ack.commit, sha256: createHash('sha256').update(stdout).digest('hex') };
+  const directory = path.resolve('controlled-driver-output');
+  const files = new Map([
+    [path.join(directory, commit.fileName), stdout],
+    [path.join(directory, commit.fileName.replace(/\.json$/, '.commit.json')), JSON.stringify(commit)],
+    [path.join(directory, value.jobReceipt.fileName), Buffer.from(ack.jobBytesBase64, 'base64')],
+  ]);
+  t.mock.method(fs, 'readFile', async (file) => {
+    assert.ok(files.has(file), 'Production driver requested an unexpected receipt.');
+    return Buffer.from(files.get(file));
+  });
+  let failure;
+  t.mock.method(childProcess, 'execFile', (executable, args, options, callback) => {
+    assert.equal(executable, 'powershell.exe');
+    const child = new EventEmitter();
+    child.pid = value.pid;
+    setImmediate(() => {
+      child.emit('spawn');
+      child.emit('exit', failure.code, null);
+      callback(failure, stdout, stderr);
+      child.emit('close', failure.code, null);
+    });
+    return child;
+  });
+  let execute;
+  try {
+    delete require.cache[modulePath];
+    execute = require(modulePath).executeOwnedDriver;
+  } finally { require.cache[modulePath] = cached; }
+  for (const code of [1, 2]) {
+    failure = Object.assign(new Error('controlled execFile failure'), { code });
+    const report = { causalContext: { ...context }, causalRequests: [], nodeEvents: [] };
+    const request = { ...witness.osInputs[0].causalRequest, jobDirectory: directory };
+    report.causalRequests.push(request);
+    await assert.rejects(execute(report, request, [], directory), (error) => {
+      assert.equal(error, failure);
+      assert.equal(error.code, code);
+      assert.equal(error.stdout, stdout);
+      assert.equal(error.stderr, stderr);
+      assert.equal(error.nativeReceipt.error, value.error);
+      assert.equal(error.nativeReceipt.committedAck.sha256, commit.sha256);
+      assert.equal(error.code === 1 && error.stderr.includes('baseline changed before input'), code === 1);
+      return true;
+    });
+  }
+});
 test('controlled helper-death readiness cannot overtake the committed receipt ACK', async () => {
   let commit, released = false;
   const helper = { events: [{ type: 'ready' }], readyAcks: [] };

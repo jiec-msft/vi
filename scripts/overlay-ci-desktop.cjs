@@ -78,6 +78,7 @@ async function executeOwnedDriver(report, request, args, outputDirectory) {
     const child = execFile('powershell.exe', args, { timeout: 15000, windowsHide: true, env: requestEnvironment(request) },
       (error, stdout, stderr) => {
         request.callback = nodeEvent(report, 'driver-callback', { requestId: request.requestId });
+        if (error) { error.stdout = stdout; error.stderr = stderr; }
         resolve({ error, stdout, stderr });
       });
     request.returnedPid = child.pid;
