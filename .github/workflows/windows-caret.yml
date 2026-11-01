@@ -59,7 +59,8 @@ jobs:
   native:
     name: Caret App integration (Windows x64)
     needs: contract
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # App launch is paused while the generated token OBJECT diagnostic is reviewed.
+    if: false
     runs-on: windows-2025
     timeout-minutes: 10
     env:

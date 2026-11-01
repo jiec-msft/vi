@@ -253,6 +253,12 @@ public static partial class ViCiDesktop {
                             if (row.TryGetProperty("clock", out var clock) && clock.ValueKind == System.Text.Json.JsonValueKind.String &&
                                 new[] { "main-performance", "helper-stopwatch" }.Contains(clock.GetString()))
                                 safe["clock"] = clock.GetString();
+                            if (row.TryGetProperty("component", out var component) && component.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                new[] { "main", "settings", "overlay", "delivery", "caret", "pointer", "gpu", "utility", "network" }.Contains(component.GetString()))
+                                safe["component"] = component.GetString();
+                            if (row.TryGetProperty("fault", out var fault) && fault.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                new[] { "launch-failed", "crashed", "killed", "oom", "clean-exit", "abnormal-exit", "integrity-failure", "memory-eviction", "unknown" }.Contains(fault.GetString()))
+                                safe["fault"] = fault.GetString();
                             if (row.TryGetProperty("time", out var time) && time.ValueKind == System.Text.Json.JsonValueKind.String &&
                                 DateTimeOffset.TryParse(time.GetString(), out var parsed))
                                 safe["time"] = parsed.ToUniversalTime().ToString("o");

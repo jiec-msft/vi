@@ -1,0 +1,33 @@
+name: Caret token OBJECT access
+on:
+  pull_request:
+    paths:
+      - scripts/caret-token-access.*
+      - .github/workflows/caret-token-access.yml
+permissions:
+  contents: read
+jobs:
+  token:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-2025
+    timeout-minutes: 3
+    env:
+      VI_EXPECTED_ARCH: x64
+      VI_CARET_TRUSTED_HEAD: 'true'
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Read generated own token OBJECT rights without launching or modifying security
+        shell: pwsh
+        run: .\scripts\caret-token-access.ps1
+      - name: Preserve role-only token OBJECT facts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caret-token-object-access
+          path: artifacts-ci/caret-token-access/token-object-report.json
+          retention-days: 3
+          if-no-files-found: error
