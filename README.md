@@ -161,6 +161,9 @@ medium token, checks its user/session and exact suspended root binary, attaches
 an owned kill-on-close Job before resuming, and preserves nonzero exits and
 cleanup receipts. It neither enables privileges nor weakens product integrity
 checks. The additional quiet-exit fixture must fail with its exact raw code.
+If a hosted service token has no linked filtered token (Win32 error 1312),
+native qualification remains blocked; the launcher does not fall back to an
+elevated target or alter UAC.
 Current-head GIF/PNG and native receipts are required before claiming
 CI qualification. CI does not establish real-device, UIA-only editor, secure
 desktop, mixed-monitor or application-package acceptance.

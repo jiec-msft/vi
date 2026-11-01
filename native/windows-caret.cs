@@ -71,6 +71,7 @@ public sealed class ViCaret : IDisposable {
             TransparencyKey = Color.Magenta;
             AccessibleRole = AccessibleRole.None;
             AutoScaleMode = AutoScaleMode.None;
+            StartPosition = FormStartPosition.Manual;
             DoubleBuffered = true;
         }
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -343,10 +344,12 @@ public sealed class ViCaret : IDisposable {
     static bool Contains(Rect outer, double x, double y, double width, double height) {
         return x >= outer.Left && y >= outer.Top && x + width <= outer.Right && y + height <= outer.Bottom;
     }
-    bool PlaceWindow(Marker marker, int x, int y, int width, int height) {
+    bool PlaceWindow(Marker marker, int x, int y, int width, int height, long observed) {
         SetWindowLongPtr(marker.Handle, -8, window);
         if (GetWindow(marker.Handle, 4) != window || (GetWindowLong(marker.Handle, -20) & 0x080800A8) != 0x080800A8)
             return false;
+        if (!SetWindowPos(marker.Handle, new IntPtr(-1), x, y, width, height, 0x0010) ||
+            !bound || !TargetCurrent() || clock.ElapsedMilliseconds - observed > 250) return false;
         marker.Show();
         bool placed = SetWindowPos(marker.Handle, new IntPtr(-1), x, y, width, height, 0x0010 | 0x0040);
         marker.Invalidate();
@@ -368,8 +371,8 @@ public sealed class ViCaret : IDisposable {
             !Contains(value.Monitor.Work, lineX, r.Top, lineWidth, r.Bottom - r.Top)) {
             Invalidate("caret-unavailable"); return false;
         }
-        bool shown = PlaceWindow(badge, (int)x, (int)y, (int)width, (int)height) &&
-            PlaceWindow(line, lineX, r.Top, lineWidth, r.Bottom - r.Top) && TargetCurrent();
+        bool shown = PlaceWindow(badge, (int)x, (int)y, (int)width, (int)height, value.Started) &&
+            PlaceWindow(line, lineX, r.Top, lineWidth, r.Bottom - r.Top, value.Started) && TargetCurrent();
         if (!shown) Invalidate("caret-unavailable");
         return shown;
     }
