@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 & (Join-Path $PSScriptRoot 'windows-input.ps1') -Action load
+Add-Type -ReferencedAssemblies System.Windows.Forms -Path (Join-Path $PSScriptRoot 'windows-caret-lease.cs')
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
@@ -197,7 +198,8 @@ function Capture-Target {
     @{ window = $target[0].ToString(); focus = $target[1].ToString(); pid = $owner }
 }
 function Assert-Target($target) {
-    if ($target.caretLease -and $target.caretInvalidated) { throw 'target-changed' }
+    if ($target.caretLease -and ($target.caretInvalidated -or
+        -not [ViCaretLease]::Valid([long]$target.caretLeaseId))) { throw 'target-changed' }
     $current = Capture-Target
     if ($current.window -ne $target.window) { $script:failureCheck = 'foreground-window'; throw 'target-changed' }
     if ($current.pid -ne $target.pid) { $script:failureCheck = 'foreground-process'; throw 'target-changed' }
@@ -230,7 +232,16 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         $request = $line | ConvertFrom-Json
         $value = switch ($request.action) {
             'ready' { @{ ready = $true } }
-            'capture' { Capture-Target }
+            'capture' {
+                $target = Capture-Target
+                if ($request.caretLease) {
+                    $target.caretLease = $true
+                    $target.caretLeaseId = [ViCaretLease]::Begin([long]$target.window, [long]$target.focus, [uint32]$target.pid)
+                }
+                $target
+            }
+            'caret-lease' { @{ valid = [ViCaretLease]::Valid([long]$request.target.caretLeaseId) } }
+            'caret-release' { [ViCaretLease]::Release([long]$request.target.caretLeaseId); @{ released = $true } }
             'settle-window' {
                 try {
                     @{ placedBehind = [VoiceInput]::SettleWindowOrder([long]$request.window,[int]$request.owner) }

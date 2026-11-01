@@ -33,7 +33,7 @@ test('actual recording shows the shared adjacent placement and completion closes
   const native = driver({ status: 'available', token: 1,
     caret: { x: 100, y: 100, width: 1, height: 20 },
     monitor: { scale: 1, workArea: { x: 0, y: 0, width: 800, height: 600 } } });
-  const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native });
+  const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native, validateLease: async () => true });
   const active = run();
   indicator.update(active, 'recording', true);
   await pause();
@@ -47,7 +47,7 @@ test('actual recording shows the shared adjacent placement and completion closes
 test('focus/security/stale failure invalidates lease and cannot revive the same turn', async () => {
   for (const reason of ['target-changed', 'secure-field', 'stale-query', 'desktop-unavailable']) {
     const native = driver({ status: 'blocked', reason });
-    const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native });
+    const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native, validateLease: async () => true });
     const active = run();
     indicator.update(active, 'recording', true);
     await pause();
@@ -66,7 +66,7 @@ test('late ready/sample completion after cancel cannot show or mutate a new turn
     if (action === 'sample') return new Promise((resolve) => { resolveSample = resolve; });
     return { ready: true };
   };
-  const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native });
+  const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native, validateLease: async () => true });
   const active = run();
   indicator.update(active, 'recording', true);
   await pause();
@@ -84,4 +84,14 @@ test('invalid caret lease skips final delivery without starting or changing nati
   assert.equal(await desktop.paste('Synthetic final', target, undefined, (value) => { reason = value; }), false);
   assert.equal(reason, 'target-changed');
   assert.equal(created, false);
+});
+test('capture-time lease invalidation prevents a marker even when the native sample looks current', async () => {
+  const native = driver({ status: 'available' });
+  const indicator = new CaretIndicator({ platform: 'win32', createDriver: () => native, validateLease: async () => false });
+  const active = run();
+  indicator.update(active, 'recording', true);
+  await pause();
+  assert.equal(active.target.caretInvalidated, true);
+  assert.equal(native.actions.includes('sample'), false);
+  assert.equal(native.closed, true);
 });

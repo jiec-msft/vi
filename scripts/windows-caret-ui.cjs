@@ -5,8 +5,8 @@ const childProcess = require('node:child_process');
 const { hostedGuard } = require('./windows-ci-desktop-probe.cjs');
 hostedGuard();
 const { app, BrowserWindow, nativeImage, desktopCapturer } = require('electron');
-const { NativeDelivery } = require('../app/native-delivery.cjs');
 const { recordDesktop } = require('./desktop-evidence.cjs');
+const { fiveMarkersVisible } = require('./visible-markers.cjs');
 const directory = path.resolve('artifacts-ci', 'caret');
 const profile = path.join(directory, 'profile');
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -27,6 +27,7 @@ childProcess.spawn = (...args) => {
   }
   return child;
 };
+const { NativeDelivery } = require('../app/native-delivery.cjs');
 app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -49,6 +50,7 @@ async function inspect(label) {
   return value;
 }
 async function begin(field = 0) {
+  report.stage = `begin-field-${field}`;
   await editor.request('click', { field });
   await editor.request('shortcut', { cancel: false });
   await until(async () => {
@@ -118,10 +120,27 @@ async function run() {
   report.checks.push('actual-app-settings-opt-in');
   mainWindow.hide();
   editor = new NativeDelivery('win32', __dirname, 'windows-caret-fixture.ps1');
+  editor.process.stderr.on('data', (bytes) => {
+    const value = bytes.toString();
+    report.fixtureDiagnostics = ((report.fixtureDiagnostics || '') + value).slice(-8192);
+    console.error(value);
+  });
   report.editor = await editor.request('ready');
   assert.equal(report.editor.owned, true);
   assert.equal(report.editor.desktop, 'Default');
-  stopVideo = await recordDesktop(directory, () => {});
+  const ownedFrame = (png) => {
+    const image = nativeImage.createFromBuffer(png);
+    const { width, height } = image.getSize();
+    return fiveMarkersVisible(image.toBitmap(), width, height);
+  };
+  await until(async () => {
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1280, height: 720 } });
+    return sources[0] && ownedFrame(sources[0].thumbnail.toPNG());
+  }, 'owned editor covers the actual desktop');
+  stopVideo = await recordDesktop(directory, (png) => {
+    assert.ok(ownedFrame(png), 'Owned editor was obscured in the actual desktop recording.');
+    report.frames = (report.frames || 0) + 1;
+  });
   await begin();
   const initial = await visible();
   report.checks.push('actual-app-shortcut-recording', 'physical-caret-geometry', 'native-owned-window-flags', 'foreground-unchanged');
@@ -165,10 +184,10 @@ async function run() {
   await until(async () => (await status()).caretIndicatorState === 'no-input', 'selection hides');
   await cancel();
   report.checks.push('selection-remains-unchanged', 'cancel-destroys-marker');
-  await begin(2);
-  await until(async () => (await status()).caretIndicatorState === 'secure-field', 'password hides');
+  await editor.request('click', { field: 2 });
+  await editor.request('shortcut', { cancel: false });
+  await until(async () => (await status()).phase === 'error', 'password capture is refused');
   assert.equal((await inspect('password')).markers.length, 0);
-  await cancel();
   report.checks.push('password-fail-closed');
   await pause(500);
   assert.ok(report.helpers.every((helper) => helper.exitedAt), 'Caret helpers did not exit.');
@@ -186,11 +205,11 @@ run().then(async () => {
   app.exit(1);
 });
 async function cleanup() {
-  editor?.close();
   if (stopVideo) {
     report.media = await stopVideo();
     stopVideo = undefined;
   }
+  editor?.close();
   await service?.close();
   for (const child of children) if (child.exitCode === null) child.kill();
   await fs.writeFile(path.join(directory, 'caret-report.json'), JSON.stringify(report, null, 2));

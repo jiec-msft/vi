@@ -50,6 +50,7 @@ let pluginWarnings = [];
 let pluginChanging = false;
 let pluginLoading;
 let caretIndicator;
+let caretDeliveryTarget;
 
 function snapshot() {
   const { plugins, ...publicSettings } = settings;
@@ -247,6 +248,13 @@ function publish(phase, message, text = status.text, details = {}) {
   status = { ...(changed ? {} : status), phase, message, text,
     stopReason: active?.stopReason ?? (changed ? undefined : status.stopReason), ...details };
   caretIndicator?.update(active, phase, settings.caretIndicator);
+  if (caretDeliveryTarget && ['idle', 'done', 'error', 'cancelling'].includes(phase)) {
+    const target = caretDeliveryTarget;
+    caretDeliveryTarget = undefined;
+    void desktop.releaseCaretLease(target).catch(() => {
+      console.error('Caret delivery lease cleanup failed.');
+    });
+  }
   for (const target of [window, overlay]) {
     if (target && !target.isDestroyed()) target.webContents.send('status', snapshot());
   }
@@ -345,7 +353,7 @@ async function begin(fromShortcut) {
     const loading = new AbortController();
     pluginLoading = { controller: loading, fromShortcut };
     if (fromShortcut) {
-      targetCapture = desktop.capture(loading.signal);
+      targetCapture = desktop.capture(loading.signal, settings.caretIndicator);
       void targetCapture.catch((error) => {
         if (!loading.signal.aborted) logEvent('input-error', undefined, { reason: error.code || 'native-error', check: error.check });
       });
@@ -425,14 +433,18 @@ async function startMicrophone(run) {
 
 async function prepareInput(run, fromShortcut, targetCapture) {
   if (fromShortcut) {
-    const target = await (targetCapture || desktop.capture(run.controller.signal));
-    if (active !== run || run.cancelled) return;
+    const target = await (targetCapture || desktop.capture(run.controller.signal, settings.caretIndicator));
+    if (active !== run || run.cancelled) {
+      await desktop.releaseCaretLease(target);
+      return;
+    }
     if (target.pid === process.pid) {
+      await desktop.releaseCaretLease(target);
       logEvent('input-skipped', run, { reason: 'app-focused' });
       throw new Error('Focus a text field in another app before using the dictation shortcut. Record preview does not type into other apps.');
     }
     run.target = target;
-    if (settings.caretIndicator && process.platform === 'win32') run.target.caretLease = true;
+    if (run.target.caretLease) caretDeliveryTarget = run.target;
     run.inputState = 'ready';
     logEvent('input-target', run);
     logEvent('input-ready', run);
@@ -874,7 +886,7 @@ function keepWindowInTray(target) {
 async function launch() {
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Windows and macOS only.');
   desktop = new DesktopInput({});
-  caretIndicator = new CaretIndicator({ onState: () => {
+  caretIndicator = new CaretIndicator({ validateLease: (target) => desktop.validCaretLease(target), onState: () => {
     if (window && !window.isDestroyed()) window.webContents.send('status', snapshot());
   } });
   diagnostics = new Diagnostics(path.join(app.getPath('userData'), 'logs'), (error) => {

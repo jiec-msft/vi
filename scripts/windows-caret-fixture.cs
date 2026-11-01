@@ -55,10 +55,9 @@ public sealed class ViCaretFixture : IDisposable {
         oldDpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
         if (oldDpi == IntPtr.Zero) throw new InvalidOperationException("Fixture DPI unavailable.");
         Desktop();
-        var work = Screen.PrimaryScreen.WorkingArea;
+        var work = Screen.PrimaryScreen.Bounds;
         window = new Form { Text = "Synthetic CI editor", StartPosition = FormStartPosition.Manual,
-            Location = new System.Drawing.Point(work.Left + 40, work.Top + 40),
-            Size = new Size(Math.Min(900, work.Width - 80), Math.Min(650, work.Height - 80)),
+            Bounds = work, FormBorderStyle = FormBorderStyle.None, TopMost = true,
             BackColor = Color.FromArgb(22, 34, 52), Font = new Font("Segoe UI", 20),
             AutoScaleMode = AutoScaleMode.None };
         window.Controls.Add(new Label { Text = "SYNTHETIC CI EDITOR - no account or user audio",
@@ -70,6 +69,12 @@ public sealed class ViCaretFixture : IDisposable {
         window.Controls.Add(editor); window.Controls.Add(other); window.Controls.Add(password);
         window.MouseDown += (sender, args) => clicks++;
         editor.MouseDown += (sender, args) => clicks++;
+        foreach (var point in new[] { new System.Drawing.Point(8, 8), new System.Drawing.Point(work.Width - 32, 8),
+            new System.Drawing.Point(8, work.Height - 32), new System.Drawing.Point(work.Width - 32, work.Height - 32),
+            new System.Drawing.Point(work.Width / 2, work.Height / 2) }) {
+            var marker = new Panel { BackColor = Color.Magenta, Location = point, Size = new Size(24, 24) };
+            window.Controls.Add(marker); marker.BringToFront();
+        }
         window.Show();
     }
     public object Ready() {

@@ -3,11 +3,12 @@ const { NativeDelivery } = require('./native-delivery.cjs');
 const { markerPlacement } = require('../prototypes/desktop-presentation/presentation.cjs');
 
 class CaretIndicator {
-  constructor({ platform = process.platform, createDriver, onState = () => {} } = {}) {
+  constructor({ platform = process.platform, createDriver, validateLease = async () => false, onState = () => {} } = {}) {
     this.platform = platform;
     this.createDriver = createDriver || (() => new NativeDelivery('win32', path.join(__dirname, '..', 'native'),
       'windows-caret.ps1'));
     this.onState = onState;
+    this.validateLease = validateLease;
     this.generation = 0;
     this.state = 'disabled';
   }
@@ -37,6 +38,11 @@ class CaretIndicator {
     const tick = async () => {
       if (!this.current(run, generation)) return;
       try {
+        if (!await this.validateLease(run.target)) {
+          if (this.current(run, generation)) this.block('target-changed');
+          return;
+        }
+        if (!this.current(run, generation)) return;
         const sample = await driver.request('sample');
         if (!this.current(run, generation)) return;
         if (sample?.status === 'blocked') { this.block(sample.reason); return; }
