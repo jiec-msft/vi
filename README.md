@@ -155,7 +155,10 @@ Separate visible/show/focus/order events identify that distinction.
 
 On Windows, the existing pointer helper also records bounded native sidecars
 (128 KiB per file, three files per role), process birth/generation, safe Win32
-codes and desktop/session classes. A missing main-process pulse for five seconds
+codes and desktop/session classes. Its sampler/API thread only captures and
+enqueues bounded metadata; a helper-local background writer handles sidecar and
+stderr I/O. A slow or failed native log sink does not block READY/heartbeat/API
+work or disable the independent main log. A missing main-process pulse for five seconds
 is recorded independently once, then at most every 30 seconds; recovery is
 recorded separately. This observer exists only after the pointer helper starts
 and can itself be delayed by an OS stall. Main event-loop delay is a threshold

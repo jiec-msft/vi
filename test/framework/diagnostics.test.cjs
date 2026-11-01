@@ -129,8 +129,43 @@ test('a stalled writer bounds checkpoint, queue and exit flush without exposing 
   assert.ok(performance.now() - flushAt < 350);
   assert.equal(failures.length, 1);
   writer.emit('error', new Error('PRIVATE_PATH'));
-  assert.equal(failures.length, 1);
+  assert.equal(failures.length, 2);
   assert.doesNotMatch(failures[0].message, /PRIVATE/);
+});
+
+test('saturated ordinary queues reserve critical/drop capacity without becoming an I/O failure', () => {
+  const messages = [];
+  let control;
+  const d = new Diagnostics('unused', assert.fail, 524288, {
+    createWriter: (data) => {
+      control = new Int32Array(data.control);
+      const writer = new EventEmitter();
+      writer.unref = () => {};
+      writer.postMessage = (message) => messages.push(message);
+      return writer;
+    },
+  });
+  for (let index = 0; index < 1000; index++) d.record('error');
+  d.drain();
+  d.checkpoint('startup-stage', { stage: 'window-show', state: 'begin' });
+  assert.ok(d.inflight.size + d.pending.length <= 128);
+  assert.ok(d.inflightBytes + d.pendingBytes <= 32768);
+  assert.equal(d.failed, undefined);
+  const entries = messages.flatMap((message) => (message.lines || []).map(JSON.parse));
+  assert.ok(entries.some((entry) => entry.event === 'diagnostic-drop' && entry.dropped > 0));
+  assert.ok(entries.some((entry) => entry.stage === 'window-show' && entry.state === 'begin'));
+  Atomics.store(control, 0, d.sentSequence);
+  d.reap();
+  d.close();
+});
+
+test('signed and unsigned Windows exit codes preserve complete NTSTATUS values', async (t) => {
+  const f = await fixture(t);
+  for (const exitCode of [0xc0000005, 0xc0000409, -2147483648, 4294967295, 4294967296]) {
+    f.diagnostics.record('lifecycle', { state: 'process-gone', exitCode });
+  }
+  assert.deepEqual((await f.entries()).map((entry) => entry.exitCode),
+    [0xc0000005, 0xc0000409, -2147483648, 4294967295, undefined]);
 });
 
 test('rotation retains valid correlated records within four bounded files', async (t) => {

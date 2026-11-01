@@ -279,6 +279,7 @@ async function run() {
   let helperFile;
   let deliveryFile;
   if (process.platform === 'win32') {
+    const quote = (value) => `'${value.replace(/'/g, "''")}'`;
     const original = await fs.readFile(path.resolve('native', 'windows-overlay.ps1'), 'utf8');
     const seam = `
     static bool ReadCursor(out POINT point) {
@@ -291,7 +292,6 @@ async function run() {
       .replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
-      const quote = (value) => `'${value.replace(/'/g, "''")}'`;
       const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role} -Generation $env:VI_CI_NATIVE_GENERATION`;
       injected = injected.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'\n${attest('overlay-pointer')}`);
       injected = injected.replace('return !System.IO.File.Exists(', `bool confirmed = false;

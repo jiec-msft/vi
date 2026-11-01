@@ -276,3 +276,5 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         @{ id = $request.id; ok = $false; code = $code; check = $script:failureCheck } | ConvertTo-Json -Compress
     }
 }
+[ViNativeDiagnostics]::Record('native-exit', 'exit', 0)
+[ViNativeDiagnostics]::Close()

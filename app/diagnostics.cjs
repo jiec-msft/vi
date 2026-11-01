@@ -56,6 +56,7 @@ class Diagnostics {
     this.wall = options.wall || (() => new Date());
     this.started = this.clock();
     this.sequence = 0;
+    this.sentSequence = 0;
     this.pending = [];
     this.pendingBytes = 0;
     this.dropped = 0;
@@ -127,9 +128,8 @@ class Diagnostics {
     if (['WinSta0', 'other', 'unavailable'].includes(data.station)) entry.station = data.station;
     if (/^\d{15,20}$/.test(data.birthFileTime || '')) entry.birthFileTime = data.birthFileTime;
     if (typeof data.nativeTime === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,7}Z$/.test(data.nativeTime)) entry.nativeTime = data.nativeTime;
-    for (const key of ['exitCode', 'errorNumber']) {
-      if (Number.isInteger(data[key]) && Math.abs(data[key]) <= 2147483647) entry[key] = data[key];
-    }
+    if (Number.isInteger(data.exitCode) && data.exitCode >= -2147483648 && data.exitCode <= 4294967295) entry.exitCode = data.exitCode;
+    if (Number.isInteger(data.errorNumber) && data.errorNumber >= -2147483648 && data.errorNumber <= 2147483647) entry.errorNumber = data.errorNumber;
     if (['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV', 'SIGILL', 'SIGBUS', 'SIGTRAP'].includes(data.signal)) entry.signal = data.signal;
     if (['starting', 'ready', 'suspended', 'recovering', 'unavailable', 'closed'].includes(data.pointerState)) {
       entry.pointerState = data.pointerState;
@@ -173,8 +173,8 @@ class Diagnostics {
     if (this.failed || this.closed) return;
     this.reap();
     const line = `${JSON.stringify(this.entry(event, data))}\n`;
-    if (Buffer.byteLength(line) > 4096 || this.pending.length + this.inflight.size >= 128 ||
-        this.pendingBytes + this.inflightBytes + Buffer.byteLength(line) > 32768) {
+    if (Buffer.byteLength(line) > 4096 || this.pending.length + this.inflight.size >= 120 ||
+        this.pendingBytes + this.inflightBytes + Buffer.byteLength(line) > 24576) {
       this.dropped++;
       return;
     }
@@ -190,13 +190,15 @@ class Diagnostics {
     if (this.failed || this.closed) return;
     this.drain();
     this.reap();
-    if (this.inflight.size >= 128 || this.inflightBytes >= 32768) { this.fail(); return; }
     const line = `${JSON.stringify(this.entry(event, data))}\n`;
     if (Buffer.byteLength(line) > 4096) { this.fail(); return; }
+    if (this.inflight.size + this.pending.length >= 128 ||
+        this.inflightBytes + this.pendingBytes + Buffer.byteLength(line) > 32768) { this.dropped++; return; }
     this.pending.push(line);
+    this.pendingBytes += Buffer.byteLength(line);
     this.drain();
     const ack = Atomics.load(this.control, 0);
-    if (ack < this.sequence) Atomics.wait(this.control, 0, ack, 25);
+    if (ack < this.sentSequence) Atomics.wait(this.control, 0, ack, 25);
     if (Atomics.load(this.control, 2)) this.fail();
   }
 
@@ -221,8 +223,14 @@ class Diagnostics {
     clearTimeout(this.timer);
     this.timer = undefined;
     if (this.dropped) {
-      this.pending.push(`${JSON.stringify(this.entry('diagnostic-drop', { dropped: this.dropped }))}\n`);
-      this.dropped = 0;
+      this.reap();
+      const line = `${JSON.stringify(this.entry('diagnostic-drop', { dropped: this.dropped }))}\n`;
+      if (this.inflight.size + this.pending.length < 127 &&
+          this.inflightBytes + this.pendingBytes + Buffer.byteLength(line) <= 28672) {
+        this.pending.push(line);
+        this.pendingBytes += Buffer.byteLength(line);
+        this.dropped = 0;
+      }
     }
     const lines = this.pending;
     this.pending = [];
@@ -233,7 +241,8 @@ class Diagnostics {
         const sequence = JSON.parse(line).seq;
         this.inflight.set(sequence, Buffer.byteLength(line));
       }
-      this.writer.postMessage({ lines, seq: this.sequence });
+      this.sentSequence = JSON.parse(lines.at(-1)).seq;
+      this.writer.postMessage({ lines, seq: this.sentSequence });
     } catch { this.fail(); }
   }
 
@@ -274,10 +283,14 @@ class Diagnostics {
   async flush() {
     this.drain();
     const deadline = performance.now() + 200;
-    while (!this.failed && Atomics.load(this.control, 0) < this.sequence && performance.now() < deadline) {
+    while (!this.failed && Atomics.load(this.control, 0) < this.sentSequence && performance.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    if (Atomics.load(this.control, 0) < this.sequence) this.fail();
+    if (!this.failed && Atomics.load(this.control, 0) < this.sentSequence && !this.delayed) {
+      this.delayed = true;
+      try { this.onFailure(new Error('Diagnostic log flushing is delayed; some records may arrive late.')); }
+      catch { console.error('Diagnostic failure notification could not be delivered.'); }
+    }
   }
 
   close() {

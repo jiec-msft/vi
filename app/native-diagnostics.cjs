@@ -33,8 +33,10 @@ class NativeTrace {
       this.tail = lines.pop().slice(-4096);
       for (const line of lines) {
         if (line === 'VI_DIAGNOSTIC_FAILURE') {
-          this.emit('log-write-failed', { fault: 'log-write-failed' }, true);
-          this.diagnostics?.fail();
+          if (!this.sidecarFailed) {
+            this.sidecarFailed = true;
+            this.emit('log-write-failed', { fault: 'log-write-failed' }, true);
+          }
           continue;
         }
         if (line.startsWith('VI_DIAG ') && line.length <= 4096) {
