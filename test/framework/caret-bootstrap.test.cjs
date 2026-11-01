@@ -16,6 +16,20 @@ test('CI bootstrap records bounded roles and safe errors, never raw paths, env o
       on: (_event, listener) => listeners.push(listener), stderr: { write: assert.fail } },
     require: (name) => name === 'node:fs' ? { appendFileSync: (_file, row) => rows.push(JSON.parse(row)) } : require(name),
   });
+  test('actual App root imports production main synchronously before starting asynchronous acceptance', () => {
+    const order = [];
+    vm.runInNewContext(fs.readFileSync(path.resolve('scripts', 'caret-app-root.cjs'), 'utf8'), {
+      require: (name) => {
+        if (name === './caret-bootstrap-trace.cjs') return { stage: (value) => order.push(value) };
+        if (name === './windows-hosted-guard.cjs') return { hostedGuard: () => order.push('guard') };
+        if (name === './windows-caret-ui.cjs') return { runAcceptance: () => order.push('acceptance') };
+        if (name === '../app/main.cjs') { order.push('actual-production-main'); return {}; }
+        throw new Error('Unexpected root import.');
+      },
+    });
+    assert.ok(order.indexOf('actual-production-main') > order.indexOf('guard'));
+    assert.ok(order.indexOf('actual-production-main') < order.indexOf('acceptance'));
+  });
   vm.runInContext(fs.readFileSync(path.resolve('scripts', 'caret-bootstrap-trace.cjs'), 'utf8'), context);
   context.module.exports.stage('entry-loaded');
   listeners[0](Object.assign(new Error('PRIVATE_MODULE_URL'), { code: 'MODULE_NOT_FOUND' }));

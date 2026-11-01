@@ -92,8 +92,7 @@ jobs:
         shell: pwsh
         run: .\scripts\prepare-desktop.ps1
       - name: Actual application and owned native editor
-        shell: pwsh
-        run: .\scripts\windows-caret-ci.ps1
+        run: node scripts/caret-parent.cjs
       - name: Convert controlled desktop recording to GIF
         shell: pwsh
         run: |
@@ -115,6 +114,7 @@ jobs:
             artifacts-ci/caret/caret-report.json
             artifacts-ci/caret/caret-launch.json
             artifacts-ci/caret/bootstrap.jsonl
+            artifacts-ci/caret/parent-preparation.json
             artifacts-ci/caret/quiet-exit/caret-launch.json
             artifacts-ci/caret/caret-visible.png
             artifacts-ci/caret/caret.gif

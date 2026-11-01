@@ -7,13 +7,18 @@ Add-Type -Path @((Join-Path $PSScriptRoot 'windows-ci-desktop-native.cs'),
     (Join-Path $PSScriptRoot 'caret-access-diagnostic.cs'))
 $root = (Get-Location).Path
 $result = [ViCiDesktop]::RunQualifiedCaretAsUser((Join-Path $root 'node_modules\electron\dist\electron.exe'),
-    (Join-Path $PSScriptRoot 'windows-caret-ui.cjs'), (Join-Path $root 'artifacts-ci\caret'), $root, 180, $true)
+    (Join-Path $PSScriptRoot 'caret-app-root.cjs'), (Join-Path $root 'artifacts-ci\caret'), $root, 180)
 if ($result -ne 0) {
     Get-Content -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-launch.json')
     if (Test-Path -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-report.json')) {
         Get-Content -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-report.json')
     }
     throw 'Owned medium-integrity caret App integration failed.'
+}
+$launch = Get-Content -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-launch.json') -Raw | ConvertFrom-Json
+$appProof = Get-Content -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-report.json') -Raw | ConvertFrom-Json
+if (-not $appProof.passed -or -not $appProof.actualAppImported -or $appProof.appRootPid -ne $launch.rootPid) {
+    throw 'Native receipt is not from the actual verified App root.'
 }
 $negative = Join-Path $root 'artifacts-ci\caret\quiet-exit'
 $failed = [ViCiDesktop]::RunQualifiedCaretAsUser((Join-Path $root 'node_modules\electron\dist\electron.exe'),

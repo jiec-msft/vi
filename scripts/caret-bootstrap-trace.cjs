@@ -21,7 +21,8 @@ function stage(name, error, detail = {}) {
     runAsNodePresent: process.env.ELECTRON_RUN_AS_NODE !== undefined,
     runAsNodeEnabled: Boolean(process.env.ELECTRON_RUN_AS_NODE),
     cwdRole: path.resolve(process.cwd()) === path.resolve(__dirname, '..') ? 'checkout' : 'other',
-    entryRole: process.argv.some((arg) => arg.endsWith('windows-caret-ui.cjs')) ? 'caret-controller' : 'other',
+    entryRole: process.argv.some((arg) => arg.endsWith('caret-app-root.cjs')) ? 'actual-app-root'
+      : process.argv.some((arg) => arg.endsWith('windows-caret-ui.cjs')) ? 'caret-controller' : 'other',
     profileSwitchPresent: process.argv.some((arg) => arg.startsWith('--user-data-dir=')) };
   if (error) {
     if (['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'AssertionError'].includes(error.name)) row.errorClass = error.name;

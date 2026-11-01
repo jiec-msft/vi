@@ -31,7 +31,7 @@ const report = { head: process.env.VI_PROBE_HEAD, runId: process.env.GITHUB_RUN_
   scope: 'Actual application with an owned native synthetic editor; not user-device acceptance',
   checks: [], samples: [], helpers: [], limitations: ['UIA-only editors unsupported', 'No second hosted monitor or real secure desktop'] };
 report.versions = { electron: process.versions.electron, node: process.versions.node };
-let editor, service, mainWindow, stopVideo;
+let editor, mainWindow, stopVideo;
 const spawn = childProcess.spawn;
 childProcess.spawn = (...args) => {
   const child = spawn(...args);
@@ -50,7 +50,6 @@ childProcess.spawn = (...args) => {
   return child;
 };
 const { NativeDelivery } = require('../app/native-delivery.cjs');
-const controlledFiles = require('./caret-fixture-files.cjs').fixtureFiles({ root: directory, fs, stage: bootStage });
 app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -122,35 +121,6 @@ async function cancel() {
 }
 async function run() {
   bootStage('actor-start');
-  await fs.mkdir(profile, { recursive: true });
-  const wav = Buffer.alloc(44 + 32000);
-  wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
-  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
-  wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28);
-  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(32000, 40);
-  for (let i = 0; i < 16000; i++) wav.writeInt16LE(Math.round(Math.sin(i * Math.PI * 220 / 8000) * 3000), 44 + i * 2);
-  await fs.writeFile(path.join(directory, 'input.wav'), wav);
-  const provider = path.resolve(process.env.VI_PROVIDER_DIR);
-  bootStage('provider-before');
-  service = await require(path.join(provider, 'fixtures', 'provider-service.cjs')).createService();
-  bootStage('provider-after');
-  const fixture = path.join(directory, 'fixture-provider');
-  await controlledFiles.run('mkdir-fixture', fixture, () => fs.mkdir(fixture, { recursive: true }));
-  await controlledFiles.run('write-plugin', path.join(fixture, 'plugin.json'), () => fs.writeFile(path.join(fixture, 'plugin.json'), JSON.stringify({
-    id: 'fixture.service', kind: 'service-provider', apiVersion: 1, entry: 'index.cjs',
-  })));
-  await controlledFiles.run('write-config', path.join(fixture, 'config.json'),
-    () => fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ endpoint: service.endpoint })));
-  await controlledFiles.run('write-index', path.join(fixture, 'index.cjs'), () => fs.writeFile(path.join(fixture, 'index.cjs'),
-    `exports.createSession = options => require(${JSON.stringify(path.join(provider, 'src', 'providers', 'index.cjs'))})` +
-    `.createSession({...options, credentialSource: async () => ({token:'fixture-credential'})});\n`));
-  await controlledFiles.run('write-settings', path.join(profile, 'settings.json'), () => fs.writeFile(path.join(profile, 'settings.json'), JSON.stringify({
-    consent: true, sounds: false, openAtLogin: false, caretIndicator: true,
-    shortcut: 'Control+Alt+Shift+F9', cancelShortcut: 'Control+Alt+Shift+F10',
-  })));
-  bootStage('app-import-before');
-  require('../app/main.cjs');
-  bootStage('app-import-after');
   bootStage('app-ready-before');
   await app.whenReady();
   bootStage('app-ready-after');
@@ -249,7 +219,11 @@ async function run() {
   assert.ok(report.helpers.every((helper) => helper.exitedAt), 'Caret helpers did not exit.');
   report.checks.push('helper-cleanup');
 }
-run().then(async () => {
+function runAcceptance() {
+  report.appRootPid = process.pid;
+  report.actualAppImported = Boolean(require.cache[require.resolve('../app/main.cjs')]);
+  assert.equal(report.actualAppImported, true);
+  return run().then(async () => {
   report.passed = true;
   await cleanup();
   if (report.passed) app.quit();
@@ -261,7 +235,9 @@ run().then(async () => {
   console.error(error);
   await cleanup();
   app.exit(1);
-});
+  });
+}
+module.exports = { runAcceptance };
 async function cleanup() {
   clearInterval(diagnosticHeartbeat);
   if (stopVideo) {
@@ -284,7 +260,6 @@ async function cleanup() {
     report.mediaDiscarded = 'unverified-desktop-pixels';
   }
   editor?.close();
-  await service?.close();
   await fs.writeFile(path.join(directory, 'caret-report.json'), JSON.stringify(report, null, 2));
   bootStage('report-saved');
 }

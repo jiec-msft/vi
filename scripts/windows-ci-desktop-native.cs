@@ -1086,7 +1086,7 @@ public static partial class ViCiDesktop
         Require(Environment.GetEnvironmentVariable("VI_CARET_TRUSTED_HEAD") == "true" &&
             Environment.GetEnvironmentVariable("GITHUB_REPOSITORY") == "jiec-msft/vi", "Caret exception requires a trusted own-repository CI head.");
         string entry = Path.GetFileName(script);
-        Require((entry == "windows-caret-ui.cjs" || entry == "windows-caret-quiet.cjs") &&
+        Require((entry == "windows-caret-ui.cjs" || entry == "caret-app-root.cjs" || entry == "windows-caret-quiet.cjs") &&
             String.Equals(Path.GetFullPath(script), Path.GetFullPath(Path.Combine(workingDirectory, "scripts", entry)), StringComparison.OrdinalIgnoreCase) &&
             String.Equals(Path.GetFullPath(executable), Path.GetFullPath(Path.Combine(workingDirectory, "node_modules", "electron", "dist", "electron.exe")),
                 StringComparison.OrdinalIgnoreCase), "Only the prepared own-head caret App/quiet fixture and Electron binary are allowed.");
@@ -1159,7 +1159,8 @@ public static partial class ViCiDesktop
                 string profileDirectory = Path.Combine(workingDirectory, "artifacts-ci", "caret", "profile");
                 command.Append(" " + Quote("--user-data-dir=" + profileDirectory));
                 report["earlyProfileSwitch"] = true;
-                report["entryRole"] = entry == "windows-caret-ui.cjs" ? "caret-controller" : "quiet-exit";
+                report["entryRole"] = entry == "caret-app-root.cjs" ? "actual-app-root"
+                    : entry == "windows-caret-ui.cjs" ? "caret-controller" : "quiet-exit";
                 report["workingDirectoryRole"] = "owned-checkout";
                 report["runAsNodeEnvironmentPresent"] = Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE") != null;
                 report["runAsNodeEnvironmentEnabled"] = !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE"));

@@ -135,9 +135,42 @@ public static partial class ViCiDesktop {
         Require(directory.Equals(tree, StringComparison.OrdinalIgnoreCase) || quiet, "Only the exact controlled caret layout is allowed.");
         PlainOwnedPath(root, directory);
         if (!quiet) {
-            Require(!Directory.Exists(tree) && !File.Exists(tree), "App fixture layout must be fresh.");
-            Directory.CreateDirectory(tree);
-            Directory.CreateDirectory(Path.Combine(tree, "profile"));
+            string nonce = Environment.GetEnvironmentVariable("VI_CARET_PREPARATION_NONCE");
+            Require(Guid.TryParse(nonce, out Guid parsed), "Owned plain-parent preparation identity is missing.");
+            string receiptPath = Path.Combine(tree, "parent-preparation.json");
+            PlainOwnedPath(root, receiptPath);
+            Require(File.Exists(receiptPath) && (File.GetAttributes(receiptPath) & FileAttributes.ReparsePoint) == 0 &&
+                new FileInfo(receiptPath).Length <= 16384, "Owned parent preparation receipt unavailable.");
+            using (var receipt = System.Text.Json.JsonDocument.Parse(File.ReadAllText(receiptPath))) {
+                var value = receipt.RootElement;
+                Require(value.GetProperty("protocol").GetString() == "vi-caret-parent-preparation-v1" &&
+                    value.GetProperty("nonce").GetString() == nonce && value.GetProperty("preparedBeforeLaunch").GetBoolean() &&
+                    value.GetProperty("head").GetString() == Environment.GetEnvironmentVariable("VI_PROBE_HEAD") &&
+                    value.GetProperty("runId").GetString() == Environment.GetEnvironmentVariable("GITHUB_RUN_ID") &&
+                    value.GetProperty("attempt").GetString() == Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT"),
+                    "Parent preparation receipt does not match the trusted current source/case.");
+                var expected = new Dictionary<string, string> {
+                    ["synthetic-wave"] = "input.wav", ["provider-manifest"] = Path.Combine("fixture-provider", "plugin.json"),
+                    ["synthetic-provider-config"] = Path.Combine("fixture-provider", "config.json"),
+                    ["provider-entry"] = Path.Combine("fixture-provider", "index.cjs"), ["owned-settings"] = Path.Combine("profile", "settings.json")
+                };
+                foreach (var file in value.GetProperty("files").EnumerateArray()) {
+                    string role = file.GetProperty("role").GetString(), name = file.GetProperty("name").GetString();
+                    Require(expected.TryGetValue(role, out string expectedName) && expectedName == name, "Unexpected parent preparation role/path.");
+                    string filePath = Path.Combine(tree, name);
+                    PlainOwnedPath(root, filePath);
+                    Require(File.Exists(filePath) && (File.GetAttributes(filePath) & FileAttributes.ReparsePoint) == 0 &&
+                        new FileInfo(filePath).Length <= 65536, "Prepared fixture file unavailable.");
+                    using (var hash = System.Security.Cryptography.SHA256.Create())
+                        Require(Convert.ToHexString(hash.ComputeHash(File.ReadAllBytes(filePath))).ToLowerInvariant() == file.GetProperty("sha256").GetString(),
+                            "Prepared fixture file changed before App launch.");
+                    expected.Remove(role);
+                }
+                Require(expected.Count == 0, "Parent preparation is incomplete.");
+                using (var hash = System.Security.Cryptography.SHA256.Create())
+                    Require(Convert.ToHexString(hash.ComputeHash(File.ReadAllBytes(Path.Combine(root, "app", "main.cjs")))).ToLowerInvariant() ==
+                        value.GetProperty("appSourceSha256").GetString(), "Actual App source differs from the prepared current source.");
+            }
             GrantOwnTreeModify(root, tree, own);
         } else {
             Require(Directory.Exists(tree) && !Directory.Exists(directory) && !File.Exists(directory), "Quiet fixture requires the existing owned tree and fresh child.");
@@ -155,6 +188,7 @@ public static partial class ViCiDesktop {
             };
             Require(checks.All(check => check.accessGranted), "Qualified layout lost required access.");
             return new { canonicalNonReparse = true, currentUserModifyOnly = true, originalAceEntriesPreserved = true,
+                parentPreparedBeforeLaunch = !quiet, actualAppSourceVerified = !quiet,
                 scope = "owned-tree-DACL-only-not-launch-guarantee", paths = checks };
         } finally { if (duplicate != IntPtr.Zero) Win32(CloseHandle(duplicate), "Close qualified layout duplicate token"); }
     }
