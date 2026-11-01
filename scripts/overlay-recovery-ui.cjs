@@ -7,7 +7,8 @@ const childProcess = require('node:child_process');
 const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
-const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority } = require('./overlay-ci-desktop.cjs');
+const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority,
+  armOwnedEarlyInjection, helperCheckpointQueue } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
     !process.env.VI_PROVIDER_DIR || !process.argv.includes('--ci-mode=overlay-recovery')) {
@@ -50,16 +51,19 @@ let ownedDownReceipt;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
 report.windowEvents = [];
+const checkpointQueue = helperCheckpointQueue((file, text) => fs.writeFile(file, text), (helper, error) => {
+  helper.proofError = `CI helper checkpoint failed: ${error.message}`; console.error(error);
+}, earlyRecovery);
 function helperCheckpoint(helper, phase) {
   if (!expectedDesktop) return;
   try {
-    writeFileSync(path.join(directory, `helper-state-${helper.role}-${helper.pid}.json`), JSON.stringify({
+    checkpointQueue.enqueue(path.join(directory, `helper-state-${helper.role}-${helper.pid}.json`), JSON.stringify({
       phase, at: Date.now(), ticks: process.hrtime.bigint().toString(), clock: 'Node-process-hrtime',
       pid: helper.pid, role: helper.role, generation: helper.generation, requestId: helper.requestId,
       requestNonce: helper.requestNonce, stderrBytes: helper.stderrBytes, stderrTail: helper.stderrTail || '',
       readyCount: helper.events.filter(({ type }) => type === 'ready').length,
       completedAcks: helper.readyAcks.length, proofError: helper.proofError, exit: helper.exit, close: helper.close,
-    }, null, 2));
+    }, null, 2), helper);
   } catch (error) { helper.proofError = `CI helper checkpoint failed: ${error.message}`; console.error(error); }
 }
 async function until(action, label, limit = 15000) {
@@ -378,6 +382,13 @@ async function run() {
             receivedTicks: process.hrtime.bigint().toString(), monotonicClock: 'Node-process-hrtime-not-native-stopwatch',
             ...(eventType === 'ready' ? { readySequence: ++readySequence } : {}) };
           helper.events.push(event);
+          if (pointer && eventType === 'ready' && earlyRecovery) {
+            if (helpers.length === 1 && !helper.startupFailureScheduled) {
+              armOwnedEarlyInjection(helper, request, report, child, event, () => {
+                checkpointQueue.release(); helperCheckpoint(helper, 'owned-injection');
+              });
+            } else if (helpers.length === 2) startupRecoveryCompleted = true;
+          }
           helperCheckpoint(helper, 'native-line');
           if (eventType === 'ready' && expectedDesktop) {
             const deadlineTicks = BigInt(causal.ticks) + 300000000n;
@@ -403,22 +414,6 @@ async function run() {
           }
         }
         if (line.includes('"ok":false')) helper.events.push({ type: 'request-failed', at: Date.now(), stage });
-        if (pointer && type === 'ready' && earlyRecovery) {
-          if (helpers.length === 1 && !helper.startupFailureScheduled) {
-            helper.startupFailureScheduled = true;
-            helper.startupFailureDelayMs = 300;
-            setTimeout(() => {
-              helper.startupFailureRequestedAt = Date.now();
-              helper.injection = nodeEvent(report, 'owned-injection-requested', { requestId, pid: child.pid });
-              if (!helper.readyAcks.some((ack) => ack.readySequence === 1 &&
-                  BigInt(ack.acknowledged.ticks) < BigInt(helper.injection.ticks))) {
-                helper.proofError = 'Original 300ms injection lacked a completed matching pre-injection receipt ACK.';
-              }
-              helper.ownedStartupFailureInjected = child.kill();
-              helperCheckpoint(helper, 'owned-injection');
-            }, 300);
-          } else if (helpers.length === 2) startupRecoveryCompleted = true;
-        }
       });
       child.stderr.on('data', (bytes) => {
         helper.stderrBytes += bytes.length;
@@ -433,6 +428,7 @@ async function run() {
       child.once('close', (code, signal) => {
         helper.closedAt = Date.now(); helper.close = nodeEvent(report, 'process-close', { requestId, code, signal }); lines.close();
         helperCheckpoint(helper, 'actual-close');
+        if (pointer && helpers[0] === child && !helper.startupFailureScheduled) checkpointQueue.release();
       });
     }
     return child;
@@ -452,6 +448,7 @@ async function run() {
     return startupRecoveryCompleted && mainWindow && overlay && (!expectedDesktop || mainWindow.isVisible()) && overlay.isVisible() && (await status()).shortcutReady &&
       (process.platform !== 'win32' || (await status()).nativePointer);
   }, 'full application and native pointer startup', 35000);
+  checkpointQueue.release();
   report.initialPointerRestarts = (await status()).nativePointerRestarts;
   if (earlyRecovery) {
     assert.equal(report.initialPointerRestarts, 1);
@@ -674,6 +671,10 @@ run().catch((error) => {
   catch (error) { cleanupFailure('desktop-video', error); }
   try { await service?.close(); }
   catch (error) { cleanupFailure('service', error); }
+  try {
+    await checkpointQueue.flush();
+    for (const helper of report.helpers) if (helper.proofError) throw new Error(helper.proofError);
+  } catch (error) { cleanupFailure('helper-checkpoint', error); }
   await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
   app.quit();
 });

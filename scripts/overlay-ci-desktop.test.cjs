@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
-const { assertDesktopChain, assertWrapperOutcome } = require('./overlay-ci-desktop.cjs');
+const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent } = require('./overlay-ci-desktop.cjs');
 
 test('accepts only the exact expected raw wrapper outcome', () => {
   for (const errors of [[], ['Owned child timed out.'], ['Owned child failed with exit code 1.']]) {
@@ -27,6 +27,41 @@ test('rejects a missing wrapper outcome instead of inventing success', () => {
 
 const birth = (pid) => `13300000000000000${pid}`;
 const context = { sourceHead: 'a'.repeat(40), runId: '1', attempt: '1', caseId: 'vi-ci-test', callerPid: 1 };
+for (const acknowledged of [true, false]) {
+  test(`fixed READY injection is independent of pending diagnostic I/O (ACK ${acknowledged})`, async () => {
+    const report = { causalContext: { ...context }, nodeEvents: [] };
+    const request = { ...context, role: 'overlay-pointer', generation: 1, requestSequence: 1,
+      requestId: '1-1-overlay-pointer-1', requestNonce: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' };
+    report.causalRequests = [request];
+    const helper = { readyAcks: [] };
+    const failure = new Error('controlled diagnostic I/O failure');
+    let rejectWriter, writes = 0, completed = false, killed = 0;
+    const queue = helperCheckpointQueue(() => {
+      writes++;
+      return new Promise((resolve, reject) => { rejectWriter = reject; });
+    }, (value, error) => { value.proofError = error.message; }, true);
+    queue.enqueue('controlled-checkpoint', '{}', helper);
+    const ready = { causal: nodeEvent(report, 'helper-line', { requestId: request.requestId }) };
+    const injected = new Promise((resolve) => {
+      armOwnedEarlyInjection(helper, request, report, { pid: 5, kill: () => {
+        assert.equal(writes, 0, 'Optional diagnostic writer must not begin in the original critical window.');
+        killed++; return true;
+      } }, ready, () => { completed = true; queue.release(); resolve(); });
+    });
+    assert.equal(helper.injectionDeadlineTicks, (BigInt(ready.causal.ticks) + 300000000n).toString());
+    assert.equal(writes, 0);
+    if (acknowledged) helper.readyAcks.push({ readySequence: 1,
+      acknowledged: nodeEvent(report, 'helper-ready-ack', { requestId: request.requestId }) });
+    await injected;
+    assert.equal(killed, 1); assert.equal(completed, true);
+    assert.ok(BigInt(helper.injection.ticks) >= BigInt(helper.injectionDeadlineTicks));
+    if (!acknowledged) assert.match(helper.proofError, /Original 300ms injection lacked/);
+    assert.equal(writes, 1);
+    rejectWriter(failure);
+    await queue.flush();
+    assert.equal(helper.proofError, failure.message, 'Diagnostic error cannot become a successful fallback.');
+  });
+}
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 function reencodeAck(ack) {
   const bytes = Buffer.from(JSON.stringify(ack.value));
@@ -82,7 +117,7 @@ function causalFixture(report, desktop) {
     Object.assign(member, { sourceHead: context.sourceHead, runId: '1', attempt: '1', caseId: desktop.ownedDesktop });
   report.nodeEvents = []; report.causalRequests = [];
   const event = (request, kind, tick, extra = {}) => {
-    const value = { ...request, kind, ticks: String(tick), clock: 'Node-process-hrtime', at: 1200, ...extra };
+    const value = { ...request, kind, ticks: String(BigInt(tick) * 100000n), clock: 'Node-process-hrtime', at: 1200, ...extra };
     delete value.begin; delete value.returned; delete value.spawn;
     report.nodeEvents.push(value);
     return value;
@@ -165,8 +200,10 @@ function causalFixture(report, desktop) {
   if (report.startupRecovery) {
     const failed = report.helpers[0];
     failed.startupFailureDelayMs = 300;
+    failed.injectionDeadlineTicks = (BigInt(failed.events[0].causal.ticks) + 300000000n).toString();
+    failed.injectionArmed = event(failed.causalRequest, 'owned-injection-timer-armed', 20000);
     report.startupRecovery.injection = event(failed.causalRequest, 'owned-injection-requested', 23000);
-    report.rootReadyEvent = { ...context, kind: 'root-ready', ticks: '31000', clock: 'Node-process-hrtime' };
+    report.rootReadyEvent = { ...context, kind: 'root-ready', ticks: '3100000000', clock: 'Node-process-hrtime' };
     report.nodeEvents.push(report.rootReadyEvent);
   }
   report.nodeEvents.sort((a, b) => Number(BigInt(a.ticks) - BigInt(b.ticks)));
@@ -407,7 +444,7 @@ for (const [label, change] of [
   ['injection before actual committed ACK', (r) => { r.startupRecovery.injection.ticks = '20000'; }],
   ['missing pre-injection completed ACK', (r) => { r.helpers[0].readyAcks = []; }],
   ['replacement before actual close', (r) => { r.helpers[0].close.ticks = '26000'; }],
-  ['detached root ready event', (r) => { r.rootReadyEvent = { ...r.rootReadyEvent, ticks: '999999' }; }],
+  ['detached root ready event', (r) => { r.rootReadyEvent = { ...r.rootReadyEvent, ticks: '999999999999' }; }],
   ['wrong root ready clock domain', (r) => { r.rootReadyEvent.clock = 'native-process-Stopwatch'; }],
   ['wrong root ready context', (r) => { r.rootReadyEvent.caseId = 'other'; }],
   ['wrong root ready event ID', (r) => { r.rootReadyEvent.eventId = 999; }],

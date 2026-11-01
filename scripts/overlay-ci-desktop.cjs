@@ -97,6 +97,49 @@ function downAuthority(value) {
     threadDesktop: value.threadDesktop, inputDesktop: value.inputDesktop, requestNonce: value.requestNonce,
     responseSHA256: value.committedAck.sha256 };
 }
+function armOwnedEarlyInjection(helper, request, report, child, readyEvent, completed) {
+  const deadline = ticks(readyEvent.causal.ticks) + 300000000n;
+  helper.startupFailureScheduled = true;
+  helper.startupFailureDelayMs = 300;
+  helper.injectionDeadlineTicks = deadline.toString();
+  helper.injectionArmed = nodeEvent(report, 'owned-injection-timer-armed', { requestId: request.requestId,
+    deadlineTicks: deadline.toString() });
+  const remaining = Math.max(0, Math.ceil(Number(deadline - process.hrtime.bigint()) / 1000000));
+  return setTimeout(() => {
+    helper.startupFailureRequestedAt = Date.now();
+    helper.injection = nodeEvent(report, 'owned-injection-requested', { requestId: request.requestId, pid: child.pid });
+    if (!helper.readyAcks.some((ack) => ack.readySequence === 1 &&
+        ticks(ack.acknowledged.ticks) < deadline &&
+        ticks(ack.acknowledged.ticks) < ticks(helper.injection.ticks))) {
+      helper.proofError = 'Original 300ms injection lacked a completed matching pre-injection receipt ACK.';
+    }
+    helper.ownedStartupFailureInjected = child.kill();
+    completed();
+  }, remaining);
+}
+function helperCheckpointQueue(write, fail, held) {
+  const pending = new Map();
+  let active;
+  const drain = () => {
+    if (held || active || !pending.size) return;
+    active = (async () => {
+      while (!held && pending.size) {
+        const [file, item] = pending.entries().next().value;
+        pending.delete(file);
+        try { await write(file, item.text); }
+        catch (error) { fail(item.helper, error); }
+      }
+    })().finally(() => { active = undefined; drain(); });
+  };
+  return {
+    enqueue(file, text, helper) {
+      assert.ok(pending.has(file) || pending.size < 32, 'Bounded helper checkpoint queue exceeded.');
+      pending.set(file, { text, helper }); drain();
+    },
+    release() { held = false; drain(); },
+    async flush() { held = false; drain(); while (active) await active; },
+  };
+}
 
 function finiteTime(value) {
   assert.ok(Number.isFinite(value) && value > 0, 'A completed proof lacks its actual timestamp.');
@@ -577,8 +620,13 @@ function assertDesktopChain(report, desktop) {
     const ack = failed.readyAcks.find(({ readySequence }) => readySequence === 1);
     assert.equal(failed.startupFailureDelayMs, 300);
     assertNodeEvent(recovery.injection, report, failed.causalRequest);
+    assertNodeEvent(failed.injectionArmed, report, failed.causalRequest);
+    assert.equal(ticks(failed.injectionDeadlineTicks), ticks(failed.events[0].causal.ticks) + 300000000n);
+    assert.ok(ticks(failed.injectionArmed.ticks) <= ticks(failed.injectionDeadlineTicks) &&
+      ticks(failed.injectionDeadlineTicks) <= ticks(recovery.injection.ticks));
     assertRootReadyEvent(report.rootReadyEvent, report, desktop);
-    assert.ok(ticks(ack.acknowledged.ticks) < ticks(recovery.injection.ticks), 'Actual committed receipt ACK must precede injection.');
+    assert.ok(ticks(ack.acknowledged.ticks) < ticks(failed.injectionDeadlineTicks) &&
+      ticks(ack.acknowledged.ticks) < ticks(recovery.injection.ticks), 'Actual committed receipt ACK must precede the fixed injection deadline.');
     assert.ok(ticks(recovery.injection.ticks) <= ticks(failed.exit.causal.ticks) &&
       ticks(failed.exit.causal.ticks) <= ticks(failed.close.ticks) &&
       ticks(failed.close.ticks) <= ticks(recovered.causalRequest.begin.ticks) &&
@@ -593,4 +641,4 @@ function assertDesktopChain(report, desktop) {
 }
 
 module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
-  consumeCommitted, executeOwnedDriver, downAuthority };
+  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue };

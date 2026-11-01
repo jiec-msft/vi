@@ -16,7 +16,7 @@ if ($Role -ne 'os-mouse-driver' -and $Generation -gt 4) { throw 'Native helper l
     requestId = $env:VI_CI_NATIVE_SPAWN_REQUEST; requestNonce = $env:VI_CI_NATIVE_REQUEST_NONCE;
     at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 } | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-Add-Type -ReferencedAssemblies 'System', 'System.Runtime.Serialization', 'System.Core' -TypeDefinition @'
+Add-Type -ReferencedAssemblies 'System', 'System.Xml', 'System.Runtime.Serialization', 'System.Core' -TypeDefinition @'
 using System;
 using System.Text;
 using System.Diagnostics;
