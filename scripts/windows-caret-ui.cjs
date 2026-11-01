@@ -42,6 +42,7 @@ childProcess.spawn = (...args) => {
   return child;
 };
 const { NativeDelivery } = require('../app/native-delivery.cjs');
+const controlledFiles = require('./caret-fixture-files.cjs').fixtureFiles({ root: directory, fs, stage: bootStage });
 app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -126,18 +127,19 @@ async function run() {
   service = await require(path.join(provider, 'fixtures', 'provider-service.cjs')).createService();
   bootStage('provider-after');
   const fixture = path.join(directory, 'fixture-provider');
-  await fs.mkdir(fixture, { recursive: true });
-  await fs.writeFile(path.join(fixture, 'plugin.json'), JSON.stringify({
+  await controlledFiles.run('mkdir-fixture', fixture, () => fs.mkdir(fixture, { recursive: true }));
+  await controlledFiles.run('write-plugin', path.join(fixture, 'plugin.json'), () => fs.writeFile(path.join(fixture, 'plugin.json'), JSON.stringify({
     id: 'fixture.service', kind: 'service-provider', apiVersion: 1, entry: 'index.cjs',
-  }));
-  await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ endpoint: service.endpoint }));
-  await fs.writeFile(path.join(fixture, 'index.cjs'),
+  })));
+  await controlledFiles.run('write-config', path.join(fixture, 'config.json'),
+    () => fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ endpoint: service.endpoint })));
+  await controlledFiles.run('write-index', path.join(fixture, 'index.cjs'), () => fs.writeFile(path.join(fixture, 'index.cjs'),
     `exports.createSession = options => require(${JSON.stringify(path.join(provider, 'src', 'providers', 'index.cjs'))})` +
-    `.createSession({...options, credentialSource: async () => ({token:'fixture-credential'})});\n`);
-  await fs.writeFile(path.join(profile, 'settings.json'), JSON.stringify({
+    `.createSession({...options, credentialSource: async () => ({token:'fixture-credential'})});\n`));
+  await controlledFiles.run('write-settings', path.join(profile, 'settings.json'), () => fs.writeFile(path.join(profile, 'settings.json'), JSON.stringify({
     consent: true, sounds: false, openAtLogin: false, caretIndicator: true,
     shortcut: 'Control+Alt+Shift+F9', cancelShortcut: 'Control+Alt+Shift+F10',
-  }));
+  })));
   bootStage('app-import-before');
   require('../app/main.cjs');
   bootStage('app-import-after');
