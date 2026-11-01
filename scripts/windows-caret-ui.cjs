@@ -137,7 +137,7 @@ async function run() {
   assert.equal(await evaluate("document.getElementById('caret-indicator').checked"), true);
   report.checks.push('actual-app-settings-opt-in');
   mainWindow.hide();
-  editor = new NativeDelivery('win32', __dirname, 'windows-caret-fixture.ps1');
+  editor = new NativeDelivery('win32', __dirname, undefined, 'windows-caret-fixture.ps1');
   editor.process.stderr.on('data', (bytes) => {
     const value = bytes.toString();
     report.fixtureDiagnostics = ((report.fixtureDiagnostics || '') + value).slice(-8192);

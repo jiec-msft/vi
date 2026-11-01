@@ -38,6 +38,14 @@ public static class VoiceCommands {
     }
 }
 public static class VoiceInput {
+    static readonly Action<string,string,int> diagnostic = FindDiagnostic();
+    static Action<string,string,int> FindDiagnostic() {
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()) {
+            Type type = assembly.GetType("ViNativeDiagnostics");
+            if (type != null) return (Action<string,string,int>)Delegate.CreateDelegate(typeof(Action<string,string,int>), type.GetMethod("Record"));
+        }
+        return null;
+    }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct GUI {
         public int Size, Flags;
@@ -107,8 +115,11 @@ public static class VoiceInput {
         // Show() can raise a window even when Windows denies its activation request.
         // Do not cover the still-active application or change its keyboard focus.
         IntPtr after = (GetWindowLong(root, -20) & 8) != 0 ? new IntPtr(-2) : root;
-        if (!SetWindowPos(window, after, 0, 0, 0, 0, 0x0213))
-            throw new InvalidOperationException("Window ordering failed.");
+        if (diagnostic != null) diagnostic("SetWindowPos", "begin", 0);
+        bool placed = SetWindowPos(window, after, 0, 0, 0, 0, 0x0213);
+        int error = placed ? 0 : Marshal.GetLastWin32Error();
+        if (diagnostic != null) diagnostic("SetWindowPos", placed ? "end" : "failure", error);
+        if (!placed) throw new System.ComponentModel.Win32Exception(error);
         return true;
     }
 

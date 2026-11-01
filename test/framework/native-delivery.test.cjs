@@ -6,20 +6,42 @@ const { readFileSync } = require('node:fs');
 const { setImmediate: nextTurn } = require('node:timers/promises');
 const vm = require('node:vm');
 
-function fixture() {
-  const child = new EventEmitter(), commands = [];
+function fixture(diagnostics, script) {
+  const child = new EventEmitter(), commands = [], launches = [];
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.stdin = new PassThrough();
   child.stdin.on('data', (data) => commands.push(JSON.parse(data.toString())));
   child.kill = () => { child.killed = true; };
   const context = vm.createContext({ module: { exports: {} },
-    require: (name) => name === 'node:child_process' ? { spawn: () => child } : require(name),
-    setTimeout, clearTimeout });
+    require: (name) => name === 'node:child_process' ? { spawn: (...args) => { launches.push(args); return child; } }
+      : name === './native-diagnostics.cjs' ? require('../../app/native-diagnostics.cjs') : require(name),
+    setTimeout, clearTimeout, process });
   vm.runInContext(readFileSync(require.resolve('../../app/native-delivery.cjs'), 'utf8'), context);
-  const driver = new context.module.exports.NativeDelivery('win32', 'owned-resources');
-  return { driver, child, commands, reply: (value) => child.stdout.write(`${JSON.stringify(value)}\n`) };
+  const driver = new context.module.exports.NativeDelivery('win32', 'owned-resources', diagnostics, script);
+  return { driver, child, commands, launches, reply: (value) => child.stdout.write(`${JSON.stringify(value)}\n`) };
 }
+
+test('custom caret script preserves the diagnostics argument and does not receive delivery-only sidecar options', async () => {
+  const rows = [];
+  const diagnostics = { directory: 'synthetic-logs', runId: 'synthetic-run',
+    record: (_event, value) => rows.push(value), checkpoint: (_event, value) => rows.push(value) };
+  const f = fixture(diagnostics, 'windows-caret.ps1');
+  try {
+    assert.ok(f.launches[0][1].some((arg) => arg.endsWith('windows-caret.ps1')));
+    assert.equal(f.launches[0][1].includes('-DiagnosticsDirectory'), false);
+    rows.length = 0;
+    const pending = f.driver.request('sample');
+    await nextTurn();
+    f.reply({ id: 1, ok: true, value: { status: 'pending' } });
+    await pending;
+    assert.equal(rows.length, 0, 'Fast caret sampling must not flood the diagnostic writer.');
+    f.child.stderr.write('error CS1003 PRIVATE_SYNTHETIC\n');
+    assert.equal(rows[0].component, 'caret');
+    assert.equal(rows[0].fault, 'compilation');
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE/);
+  } finally { f.driver.close(); }
+});
 
 test('native clipboard and key queries are serialized on one helper', async () => {
   const f = fixture();

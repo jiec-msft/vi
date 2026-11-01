@@ -1107,6 +1107,8 @@ public static class ViCiDesktop
                 Win32(OpenProcessToken(own.Handle, allowDerivedRestricted ? 0x8bU : 8U, out ownToken), "Read runner's own token");
             int originalIntegrity = TokenIntegrity(ownToken);
             parentPrivileges = Privileges(ownToken);
+            Win32(LookupPrivilegeValueW(null, "SeIncreaseQuotaPrivilege", out long quota), "Read existing parent quota privilege identity");
+            report["parentQuotaAlreadyEnabled"] = parentPrivileges.TryGetValue(quota, out uint quotaAttributes) && (quotaAttributes & 2) != 0;
             report["originalIntegrity"] = originalIntegrity;
             IntPtr launchToken = ownToken;
             report["tokenOrigin"] = "existing-medium";

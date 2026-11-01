@@ -16,8 +16,27 @@ concurrency:
   group: caret-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  unit:
+    name: Caret and startup diagnostics integration
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Targeted lifecycle, diagnostics, delivery and native syntax
+        run: >-
+          node --test test/framework/caret-indicator.test.cjs
+          test/framework/desktop.test.cjs test/framework/native-delivery.test.cjs
+          test/framework/diagnostics.test.cjs test/framework/native-diagnostics.test.cjs
+          test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
   native:
     name: Caret App integration (Windows x64)
+    needs: unit
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-2025
     timeout-minutes: 10

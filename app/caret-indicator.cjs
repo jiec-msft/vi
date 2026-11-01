@@ -3,11 +3,11 @@ const { NativeDelivery } = require('./native-delivery.cjs');
 const { markerPlacement } = require('./caret-placement.cjs');
 
 class CaretIndicator {
-  constructor({ platform = process.platform, createDriver, validateLease = async () => false, onState = () => {} } = {}) {
+  constructor({ platform = process.platform, createDriver, diagnostics, validateLease = async () => false, onState = () => {} } = {}) {
     this.platform = platform;
     this.createDriver = createDriver || (() => new NativeDelivery('win32',
       path.join(__dirname, '..', 'native').replace('app.asar', 'app.asar.unpacked'),
-      'windows-caret.ps1'));
+      diagnostics, 'windows-caret.ps1'));
     this.onState = onState;
     this.validateLease = validateLease;
     this.generation = 0;
