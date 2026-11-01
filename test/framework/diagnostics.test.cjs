@@ -4,7 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { Diagnostics } = require('../../app/diagnostics.cjs');
-const { EventEmitter } = require('node:events');
+const { EventEmitter, once } = require('node:events');
 const { spawn } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 
@@ -13,6 +13,11 @@ async function fixture(t) {
   const failures = [];
   const diagnostics = new Diagnostics(root, (error) => failures.push(error));
   t.after(async () => { diagnostics.close(); await fs.rm(root, { recursive: true, force: true }); });
+  // Content assertions do not impose a cold Worker startup deadline; timing tests below do.
+  const ready = once(diagnostics.writer, 'message');
+  diagnostics.writer.postMessage({ lines: [], seq: 0 });
+  const [ack] = await ready;
+  assert.equal(ack.seq, 0);
   return { diagnostics, async entries() {
     await diagnostics.flush();
     assert.deepEqual(failures, []);
