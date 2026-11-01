@@ -71,6 +71,13 @@ jobs:
         shell: pwsh
         run: |
           "VI_DESKTOP_PWSH=$((Get-Process -Id $PID).Path)" >> $env:GITHUB_ENV
+      - name: Prepare exact-head native assembly before bounded heartbeat test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\scripts\overlay-ci-heartbeat-reader.ps1 -Mode prepare `
+            -Preparation (Join-Path $PWD "artifacts-ci\overlay-recovery\heartbeat-preparation-$env:VI_PROBE_HEAD") `
+            -Directory (Join-Path $PWD 'artifacts-ci\overlay-recovery\heartbeat-reader') -WorkingDirectory $PWD
       - name: Verify real Default immutable heartbeat publication under held readers
         if: runner.os == 'Windows'
         run: node --test scripts/overlay-ci-heartbeat.test.cjs
@@ -119,6 +126,8 @@ jobs:
             artifacts-ci/overlay-recovery/*.png
             artifacts-ci/overlay-recovery/desktop-*.json
             artifacts-ci/overlay-recovery/heartbeat-reader/report.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/progress.json
+            artifacts-ci/overlay-recovery/heartbeat-preparation-*/*.json
             artifacts-ci/overlay-recovery/heartbeat-reader/default/immutable-identity.json
             artifacts-ci/overlay-recovery/heartbeat-reader/default/heartbeat-*.json
             artifacts-ci/overlay-recovery/heartbeat-reader/producer-failure/*.json

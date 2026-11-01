@@ -488,6 +488,13 @@ public static class ViCiDesktop
         }
         return rejected;
     }
+    static void HeartbeatProgress(string directory, Stopwatch clock, string phase, object detail = null)
+    {
+        Write(directory, "progress.json", new { phase, detail, readerPid = Environment.ProcessId,
+            at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), ticks = Stopwatch.GetTimestamp().ToString(),
+            monotonicFrequency = Stopwatch.Frequency.ToString(), monotonicClock = "native-verification-Stopwatch",
+            elapsedSeconds = clock.Elapsed.TotalSeconds, scope = "bounded-verification-progress-not-heartbeat-freshness-proof" });
+    }
     public static int VerifyImmutableHeartbeats(string executable, string script, string directory, string workingDirectory)
     {
         Guard();
@@ -502,6 +509,7 @@ public static class ViCiDesktop
         var heldHandles = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
         report["overlaps"] = overlaps;
         try {
+            HeartbeatProgress(directory, clock, "native-test-started");
             desktop = OpenInputDesktop(0, false, ReadSwitch);
             Win32(desktop != IntPtr.Zero, "Open Default for heartbeat verification");
             Require(Equal(Name(desktop), "Default"), "Heartbeat verification requires the original Default desktop.");
@@ -513,7 +521,9 @@ public static class ViCiDesktop
             Win32(GetProcessTimes(fixture.process, out long created, out long exited, out long kernel, out long user),
                 "Read real heartbeat fixture birth");
             var reader = new ImmutableHeartbeatReader(target, fixture.pid, created.ToString(), 1, 120);
+            HeartbeatProgress(directory, clock, "default-spawned", new { pid = fixture.pid, creationFileTime = created.ToString() });
             WaitReady(fixture, Path.Combine(target, "ready.json"), 20);
+            HeartbeatProgress(directory, clock, "default-ready", new { pid = fixture.pid, latestSequence = reader.Latest().sequence });
             for (int index = 0; index < 64; index++) {
                 var before = FreshHeartbeat(reader, out long openedAt);
                 using (var stream = OpenHeartbeatSnapshot(Path.Combine(target, before.fileName)))
@@ -521,6 +531,8 @@ public static class ViCiDesktop
                     heldHandles.Add(stream.SafeFileHandle);
                     long handleOpenedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     var atOpen = reader.Latest();
+                    HeartbeatProgress(directory, clock, "held-waiting-next", new { iteration = index,
+                        handleOpenedAt, oldSequence = before.sequence, knownSequenceAfterOpen = atOpen.sequence });
                     var next = atOpen;
                     do {
                         Require(clock.Elapsed.TotalSeconds < 25, "Immutable heartbeat concurrent verification deadline exceeded.");
@@ -541,6 +553,8 @@ public static class ViCiDesktop
                         heldHandle = stream.SafeFileHandle.DangerousGetHandle().ToInt64().ToString(),
                         heldReadCompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
                 }
+                HeartbeatProgress(directory, clock, "held-iteration-complete", new { iteration = index,
+                    completedOverlaps = overlaps.Count, latestSequence = reader.Latest().sequence });
             }
             report["producerPid"] = fixture.pid;
             report["producerCreationFileTime"] = created.ToString();
@@ -554,16 +568,21 @@ public static class ViCiDesktop
                 "The immutable protocol lost its actual freshness/PID boundary.");
             report["freshnessBoundary"] = new { at2999 = true, at3000 = false, wrongPid = false };
             var negativeWitnesses = new List<object>();
+            HeartbeatProgress(directory, clock, "negative-frame-cases-started", new { completedOverlaps = overlaps.Count });
             report["negativeCases"] = VerifyInvalidHeartbeats(directory, final, negativeWitnesses);
             report["negativeWitnesses"] = negativeWitnesses;
+            HeartbeatProgress(directory, clock, "negative-frame-cases-complete", new { completedOverlaps = overlaps.Count,
+                rejectedCases = negativeWitnesses.Count });
             failureJob = NewJob();
             string failureTarget = Path.Combine(directory, "producer-failure");
             Directory.CreateDirectory(failureTarget);
             failureFixture = Start(failureJob, executable, script, failureTarget, "Default", "default", "normal",
                 workingDirectory: workingDirectory, immutableHeartbeatLimit: 1);
+            HeartbeatProgress(directory, clock, "cap-failure-producer-spawned", new { pid = failureFixture.pid });
             Win32(GetProcessTimes(failureFixture.process, out long failureCreated, out long failureExited,
                 out long failureKernel, out long failureUser), "Read intended producer failure birth");
             WaitReady(failureFixture, Path.Combine(failureTarget, "ready.json"), 20);
+            HeartbeatProgress(directory, clock, "cap-failure-producer-ready", new { pid = failureFixture.pid });
             uint state;
             do {
                 state = WaitForSingleObject(failureFixture.process, 50);
@@ -583,8 +602,10 @@ public static class ViCiDesktop
                 report["producerFailure"] = new { pid = failureFixture.pid, childExitCode = code,
                     rawError = failure.RootElement.Clone(), stoppedAfterPublishedFrames = 1 };
             }
+            HeartbeatProgress(directory, clock, "cap-failure-witness-complete", report["producerFailure"]);
         } catch (Exception error) { errors.Add(error.ToString()); }
         finally {
+            report["cleanupStartedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             bool readersClosed = heldHandles.TrueForAll(handle => handle.IsClosed);
             report["readerHandlesClosed"] = readersClosed;
             if (!readersClosed) errors.Add("An immutable heartbeat reader handle survived verification.");
@@ -611,8 +632,11 @@ public static class ViCiDesktop
                 if (!CloseDesktop(desktop)) errors.Add("Close heartbeat Default desktop handle failed: " + Marshal.GetLastWin32Error());
             }
             report["elapsedSeconds"] = clock.Elapsed.TotalSeconds;
+            report["cleanupCompletedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             report["errors"] = errors;
             report["passed"] = errors.Count == 0;
+            HeartbeatProgress(directory, clock, "cleanup-complete", new { completedOverlaps = overlaps.Count,
+                readerHandlesClosed = readersClosed, processHandlesClosed = handlesClosed, errors });
             Write(directory, "report.json", report);
         }
         return errors.Count == 0 ? 0 : 1;
