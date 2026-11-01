@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const childProcess = require('node:child_process');
+const readline = require('node:readline');
 const { hostedGuard } = require('./windows-ci-desktop-probe.cjs');
 hostedGuard();
 const { app, BrowserWindow, nativeImage, desktopCapturer } = require('electron');
@@ -22,6 +23,13 @@ childProcess.spawn = (...args) => {
   if (args[1]?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-caret.ps1'))) {
     const record = { pid: child.pid, spawnedAt: Date.now() };
     report.helpers.push(record);
+    const replies = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    replies.on('line', (line) => {
+      try {
+        const reply = JSON.parse(line);
+        if (reply.ok && reply.value?.ready === true) record.identity = reply.value;
+      } catch { record.identityError = 'invalid-native-identity-response'; }
+    });
     child.once('exit', (code) => { record.exit = code; record.exitedAt = Date.now(); });
   }
   return child;
@@ -42,6 +50,11 @@ async function until(action, label, limit = 20000) {
     await pause(60);
   } while (Date.now() < deadline);
   throw new Error(`Caret fixture deadline: ${label}`);
+}
+function ownedFrame(png) {
+  const image = nativeImage.createFromBuffer(png);
+  const { width, height } = image.getSize();
+  return fiveMarkersVisible(image.toBitmap(), width, height);
 }
 async function inspect(label) {
   const value = await editor.request('inspect', { helper: report.helpers.at(-1)?.pid || 0 });
@@ -70,6 +83,12 @@ async function visible() {
   assert.equal(sample.markers.length, 2);
   assert.equal(sample.foregroundPid, report.editor.pid);
   assert.equal(sample.focus, report.editor.focus);
+  const helper = report.helpers.at(-1);
+  assert.equal(helper.identityError, undefined);
+  assert.equal(helper.identity.pid, helper.pid);
+  assert.equal(sample.helperIdentity.pid, helper.pid);
+  assert.equal(sample.helperIdentity.creationFileTime, helper.identity.creationFileTime);
+  assert.equal(sample.helperIdentity.specificJobMember, true);
   for (const marker of sample.markers) {
     assert.equal(marker.owner, report.editor.window);
     assert.equal(marker.styles & 0x080800a8, 0x080800a8);
@@ -127,17 +146,15 @@ async function run() {
   report.editor = await editor.request('ready');
   assert.equal(report.editor.owned, true);
   assert.equal(report.editor.desktop, 'Default');
-  const ownedFrame = (png) => {
-    const image = nativeImage.createFromBuffer(png);
-    const { width, height } = image.getSize();
-    return fiveMarkersVisible(image.toBitmap(), width, height);
-  };
   await until(async () => {
     const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1280, height: 720 } });
     return sources[0] && ownedFrame(sources[0].thumbnail.toPNG());
   }, 'owned editor covers the actual desktop');
   stopVideo = await recordDesktop(directory, (png) => {
-    assert.ok(ownedFrame(png), 'Owned editor was obscured in the actual desktop recording.');
+    if (!ownedFrame(png)) {
+      report.framesTrusted = false;
+      throw new Error('Owned editor was obscured in the actual desktop recording.');
+    }
     report.frames = (report.frames || 0) + 1;
   });
   await begin();
@@ -211,7 +228,8 @@ async function run() {
 run().then(async () => {
   report.passed = true;
   await cleanup();
-  app.quit();
+  if (report.passed) app.quit();
+  else app.exit(1);
 }, async (error) => {
   report.passed = false;
   report.error = error.message;
@@ -221,8 +239,23 @@ run().then(async () => {
 });
 async function cleanup() {
   if (stopVideo) {
-    report.media = await stopVideo();
+    try {
+      report.media = await stopVideo();
+      assert.ok(ownedFrame(await fs.readFile(path.join(directory, 'desktop.png'))),
+        'Final desktop screenshot is not the owned synthetic editor.');
+    } catch (error) {
+      report.mediaError = error.message;
+      report.passed = false;
+      report.framesTrusted = false;
+      console.error('Controlled desktop capture failed.');
+    }
     stopVideo = undefined;
+  }
+  if (report.framesTrusted === false) {
+    for (const name of ['desktop.png', 'desktop.webm', 'caret-visible.png']) {
+      await fs.rm(path.join(directory, name), { force: true });
+    }
+    report.mediaDiscarded = 'unverified-desktop-pixels';
   }
   editor?.close();
   await service?.close();

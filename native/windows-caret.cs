@@ -56,6 +56,7 @@ public sealed class ViCaret : IDisposable {
     [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint pid, out uint session);
+    [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
     [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
     [DllImport("advapi32.dll")] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int size, out int needed);
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
@@ -152,6 +153,14 @@ public sealed class ViCaret : IDisposable {
         timer = new System.Windows.Forms.Timer { Interval = 20 };
         timer.Tick += (sender, args) => Tick();
         timer.Start();
+    }
+    public object Identity() {
+        using (var process = Process.GetCurrentProcess()) {
+            long created, exited, kernel, user;
+            if (!GetProcessTimes(process.Handle, out created, out exited, out kernel, out user))
+                throw new InvalidOperationException("Helper identity unavailable.");
+            return new { ready = true, pid = process.Id, creationFileTime = created.ToString() };
+        }
     }
     bool DesktopAvailable() {
         IntPtr input = OpenInputDesktop(0, false, 1);

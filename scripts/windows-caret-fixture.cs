@@ -42,6 +42,15 @@ public sealed class ViCaretFixture : IDisposable {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr handle, StringBuilder text, int count);
     [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr handle, uint message, IntPtr first, IntPtr second);
     [DllImport("user32.dll")] static extern IntPtr GetFocus();
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr handle, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetWindowDpiAwarenessContext(IntPtr handle);
+    [DllImport("user32.dll")] static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint owner);
+    [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool member);
+    [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr handle);
     sealed class EditorEvents : NativeWindow {
         public int Clicks;
@@ -95,6 +104,8 @@ public sealed class ViCaretFixture : IDisposable {
         var name = new StringBuilder(64);
         if (GetClassName(editor, name, 64) == 0 || name.ToString() != "Edit")
             throw new InvalidOperationException("Fixture is not a native Edit control.");
+        if (!AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(editor), new IntPtr(-4)))
+            throw new InvalidOperationException("Fixture native Edit is not per-monitor-v2 aware.");
         return new { window = window.Handle.ToInt64().ToString(), focus = editor.ToInt64().ToString(),
             pid, desktop = "Default", dpi = "per-monitor-v2", owned = true, fieldClass = name.ToString(),
             screen = new { x = window.Left, y = window.Top, width = window.Width, height = window.Height } };
@@ -110,11 +121,23 @@ public sealed class ViCaretFixture : IDisposable {
         if (SendInput((uint)events.Length, events, Marshal.SizeOf(typeof(Input))) != events.Length)
             throw new InvalidOperationException("Owned native input failed.");
     }
-    void MouseClick(int x, int y) {
+    void MouseTarget(int x, int y, uint helper) {
+        IntPtr hit = WindowFromPoint(new Point { X = x, Y = y });
+        uint owner;
+        GetWindowThreadProcessId(hit, out owner);
+        bool ownEditor = owner == pid && GetAncestor(hit, 2) == window.Handle;
+        bool ownMarker = helper != 0 && owner == helper && GetWindow(hit, 4) == window.Handle &&
+            (GetWindowLong(hit, -20) & 0x080800A8) == 0x080800A8;
+        if (!ownEditor && !ownMarker) throw new InvalidOperationException("Mouse point is not an owned editor/marker window.");
+    }
+    void MouseClick(int x, int y, uint helper = 0) {
         Desktop();
         var rect = window.Bounds;
         if (!rect.Contains(x, y)) throw new InvalidOperationException("Mouse outside the owned fixture.");
+        MouseTarget(x, y, helper);
         if (!SetCursorPos(x, y)) throw new InvalidOperationException("Owned mouse movement failed.");
+        Desktop();
+        MouseTarget(x, y, helper);
         Send(new[] { new Input { Data = new Union { Mouse = new Mouse { Flags = 2 } } },
             new Input { Data = new Union { Mouse = new Mouse { Flags = 4 } } } });
         Pump();
@@ -171,10 +194,27 @@ public sealed class ViCaretFixture : IDisposable {
         GetWindowText(editor, text, text.Capacity);
         long selection = SendMessage(editor, 0x00B0, IntPtr.Zero, IntPtr.Zero).ToInt64();
         int start = (int)(selection & 0xffff), end = (int)((selection >> 16) & 0xffff);
+        var markers = Windows(helper);
+        object identity = null;
+        if (markers.Count > 0) {
+            string jobName = Environment.GetEnvironmentVariable("VI_CARET_JOB_NAME");
+            IntPtr job = OpenJobObject(4, false, jobName), process = OpenProcess(0x1000, false, helper);
+            try {
+                bool member;
+                long created, exited, kernel, user;
+                if (job == IntPtr.Zero || process == IntPtr.Zero || !IsProcessInJob(process, job, out member) || !member ||
+                    !GetProcessTimes(process, out created, out exited, out kernel, out user) || exited != 0)
+                    throw new InvalidOperationException("Visible helper lacks its specific owned Job and live birth identity.");
+                identity = new { pid = helper, creationFileTime = created.ToString(), specificJobMember = member, jobName };
+            } finally {
+                if (process != IntPtr.Zero) CloseHandle(process);
+                if (job != IntPtr.Zero) CloseHandle(job);
+            }
+        }
         return new { pid, window = window.Handle.ToInt64().ToString(), foregroundPid,
             focus = gui.Focus.ToInt64().ToString(), caret = new { x = point.X, y = point.Y,
                 width = gui.Bounds.Right - gui.Bounds.Left, height = gui.Bounds.Bottom - gui.Bounds.Top },
-            markers = Windows(helper), text = text.ToString(), clicks = editorEvents.Clicks,
+            markers, helperIdentity = identity, text = text.ToString(), clicks = editorEvents.Clicks,
             selectionStart = start, selectionLength = end - start };
     }
     public object Move() {
@@ -206,7 +246,7 @@ public sealed class ViCaretFixture : IDisposable {
             (GetWindowLong(found, -20) & 0x080800A8) != 0x080800A8)
             throw new InvalidOperationException("Owned transparent marker unavailable.");
         int before = editorEvents.Clicks;
-        MouseClick((badge.Left + badge.Right) / 2, (badge.Top + badge.Bottom) / 2);
+        MouseClick((badge.Left + badge.Right) / 2, (badge.Top + badge.Bottom) / 2, helper);
         // The badge overlays the editor client, so a real mouse must reach that editor.
         uint foreground;
         GetWindowThreadProcessId(GetForegroundWindow(), out foreground);

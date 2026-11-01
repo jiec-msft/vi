@@ -18,16 +18,19 @@ concurrency:
 jobs:
   native:
     name: Caret App integration (Windows x64)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-2025
     timeout-minutes: 10
     env:
       VI_EXPECTED_ARCH: x64
       VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
+      VI_CARET_TRUSTED_HEAD: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -43,6 +46,11 @@ jobs:
         run: node scripts/prepare-provider.cjs
       - name: Pure caret lifecycle and lease
         run: node --test test/framework/caret-indicator.test.cjs prototypes/desktop-presentation/presentation.test.cjs
+      - name: Verify own source head
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:VI_PROBE_HEAD) { throw 'Caret source checkout differs from the trusted current head.' }
       - name: Prepare hosted desktop
         shell: pwsh
         run: .\scripts\prepare-desktop.ps1

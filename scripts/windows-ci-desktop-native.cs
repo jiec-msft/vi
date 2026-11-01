@@ -69,6 +69,10 @@ public static class ViCiDesktop
     struct InputEvent { public uint type; public MouseInput mouse; }
     [StructLayout(LayoutKind.Sequential)]
     struct UserFlags { public int inherit, reserved; public uint flags; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SidAttributes { public IntPtr sid; public uint attributes; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct TokenGroups { public uint count; public SidAttributes first; }
     delegate bool EnumWindow(IntPtr window, IntPtr parameter);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -153,6 +157,17 @@ public static class ViCiDesktop
     static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ProcessIdToSessionId(uint pid, out uint session);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disableCount, IntPtr disabled,
+        uint deleteCount, IntPtr deleted, uint restrictCount, IntPtr restricted, out IntPtr result);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetTokenInformation(IntPtr token, int kind, IntPtr data, uint size);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSidToSidW(string text, out IntPtr sid);
+    [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
 
     static void Require(bool condition, string message)
     {
@@ -215,9 +230,9 @@ public static class ViCiDesktop
         }, IntPtr.Zero), "Enumerate owned windows");
         return count;
     }
-    static IntPtr NewJob()
+    static IntPtr NewJob(string name = null)
     {
-        IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+        IntPtr job = CreateJobObjectW(IntPtr.Zero, name);
         Win32(job != IntPtr.Zero, "Create owned process job");
         try {
             var limits = new ExtendedLimits();
@@ -937,7 +952,8 @@ public static class ViCiDesktop
     static IntPtr TokenData(IntPtr token, int kind)
     {
         GetTokenInformation(token, kind, IntPtr.Zero, 0, out int needed);
-        Require(needed > 0 && needed <= 4096, "Owned token metadata unavailable.");
+        if (needed <= 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Read owned token metadata class " + kind);
+        Require(needed <= 4096, "Owned token metadata bound exceeded.");
         IntPtr data = Marshal.AllocHGlobal(needed);
         try {
             Win32(GetTokenInformation(token, kind, data, needed, out needed), "Read owned token metadata class " + kind);
@@ -954,10 +970,120 @@ public static class ViCiDesktop
             return Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)count - 1));
         } finally { Marshal.FreeHGlobal(data); }
     }
-    public static int RunCaret(string executable, string script, string directory, string workingDirectory, int timeout)
+    static int TokenNumber(IntPtr token, int kind)
+    {
+        IntPtr data = TokenData(token, kind);
+        try { return Marshal.ReadInt32(data); }
+        finally { Marshal.FreeHGlobal(data); }
+    }
+    static List<SidAttributes> Groups(IntPtr data)
+    {
+        int count = Marshal.ReadInt32(data), offset = Marshal.OffsetOf<TokenGroups>("first").ToInt32();
+        Require(count >= 0 && count <= 128, "Owned token group bound exceeded.");
+        var groups = new List<SidAttributes>();
+        for (int index = 0; index < count; index++)
+            groups.Add(Marshal.PtrToStructure<SidAttributes>(IntPtr.Add(data, offset + index * Marshal.SizeOf<SidAttributes>())));
+        return groups;
+    }
+    static Dictionary<long, uint> Privileges(IntPtr token)
+    {
+        IntPtr data = TokenData(token, 3);
+        try {
+            int count = Marshal.ReadInt32(data);
+            Require(count >= 0 && count <= 128, "Owned token privilege bound exceeded.");
+            var result = new Dictionary<long, uint>();
+            for (int index = 0; index < count; index++)
+                result.Add(Marshal.ReadInt64(data, 4 + index * 12), (uint)Marshal.ReadInt32(data, 12 + index * 12));
+            return result;
+        } finally { Marshal.FreeHGlobal(data); }
+    }
+    static IntPtr RestrictedMedium(IntPtr source)
+    {
+        Require(TokenNumber(source, 8) == 1, "Restricted derivation requires runner's own primary token.");
+        IntPtr data = TokenData(source, 2), disabled = IntPtr.Zero, admin = IntPtr.Zero,
+            medium = IntPtr.Zero, label = IntPtr.Zero, candidate = IntPtr.Zero;
+        try {
+            Win32(ConvertStringSidToSidW("S-1-5-32-544", out admin), "Create well-known administrator SID");
+            var groups = Groups(data).FindAll(group => (group.attributes & 8) != 0 || EqualSid(group.sid, admin));
+            Require(groups.Count > 0, "High runner token has no privileged group to disable.");
+            disabled = Marshal.AllocHGlobal(groups.Count * Marshal.SizeOf<SidAttributes>());
+            for (int index = 0; index < groups.Count; index++)
+                Marshal.StructureToPtr(groups[index], IntPtr.Add(disabled, index * Marshal.SizeOf<SidAttributes>()), false);
+            // DISABLE_MAX_PRIVILEGE only: never SANDBOX_INERT, new credentials, or privilege enablement.
+            Win32(CreateRestrictedToken(source, 1, (uint)groups.Count, disabled, 0, IntPtr.Zero, 0, IntPtr.Zero, out candidate),
+                "Derive restricted token from runner's own primary token");
+            Win32(ConvertStringSidToSidW("S-1-16-8192", out medium), "Create well-known medium integrity SID");
+            uint sidSize = GetLengthSid(medium);
+            Require(sidSize > 0 && sidSize <= 256, "Medium integrity SID bound exceeded.");
+            int labelSize = Marshal.SizeOf<SidAttributes>(), total = labelSize + (int)sidSize;
+            label = Marshal.AllocHGlobal(total);
+            var bytes = new byte[sidSize];
+            Marshal.Copy(medium, bytes, 0, bytes.Length);
+            Marshal.Copy(bytes, 0, IntPtr.Add(label, labelSize), bytes.Length);
+            Marshal.StructureToPtr(new SidAttributes { sid = IntPtr.Add(label, labelSize), attributes = 0x20 }, label, false);
+            Win32(SetTokenInformation(candidate, 25, label, (uint)total), "Lower derived token integrity to medium");
+            return candidate;
+        } catch {
+            if (candidate != IntPtr.Zero) CloseHandle(candidate);
+            throw;
+        } finally {
+            Marshal.FreeHGlobal(data);
+            if (disabled != IntPtr.Zero) Marshal.FreeHGlobal(disabled);
+            if (label != IntPtr.Zero) Marshal.FreeHGlobal(label);
+            if (admin != IntPtr.Zero) LocalFree(admin);
+            if (medium != IntPtr.Zero) LocalFree(medium);
+        }
+    }
+    static object VerifyCaretToken(IntPtr source, IntPtr candidate, bool derived)
+    {
+        IntPtr original = TokenData(source, 1), user = IntPtr.Zero, sourceStats = IntPtr.Zero,
+            candidateStats = IntPtr.Zero, groupData = IntPtr.Zero, admin = IntPtr.Zero;
+        try {
+            user = TokenData(candidate, 1);
+            Require(EqualSid(Marshal.ReadIntPtr(original), Marshal.ReadIntPtr(user)), "Caret token user differs from runner.");
+            sourceStats = TokenData(source, 10); candidateStats = TokenData(candidate, 10);
+            Require(Marshal.ReadInt64(sourceStats, 8) == Marshal.ReadInt64(candidateStats, 8),
+                "Caret token logon authentication identity changed.");
+            Require(TokenNumber(source, 12) == TokenNumber(candidate, 12), "Caret token session changed.");
+            Require(TokenNumber(candidate, 8) == 1 && TokenIntegrity(candidate) == 0x2000, "Caret token must be primary and medium.");
+            Require(TokenNumber(candidate, 26) == 0 && TokenNumber(candidate, 26) <= TokenNumber(source, 26),
+                "Caret token UIAccess was raised.");
+            var before = Privileges(source), after = Privileges(candidate);
+            foreach (var privilege in after)
+                Require(before.TryGetValue(privilege.Key, out uint attributes) &&
+                    ((privilege.Value & 2) == 0 || (attributes & 2) != 0), "Caret token added or enabled a privilege.");
+            Require(after.Count <= before.Count, "Caret token privilege count increased.");
+            groupData = TokenData(candidate, 2);
+            Win32(ConvertStringSidToSidW("S-1-5-32-544", out admin), "Create well-known administrator SID for verification");
+            bool adminDenied = true;
+            foreach (var group in Groups(groupData))
+                if (EqualSid(group.sid, admin))
+                    adminDenied = adminDenied && (group.attributes & 4) == 0 && (group.attributes & 0x10) != 0;
+            Require(adminDenied, "Caret token retains an enabled administrator group.");
+            bool filtered = TokenNumber(candidate, 21) != 0;
+            Require(!derived || filtered, "Derived caret token has no filtered provenance.");
+            return new { primary = true, integrity = 8192, sameUser = true, sameLogon = true, sameSession = true,
+                adminDenyOnly = adminDenied, privilegesNotIncreased = true, parentPrivilegeCount = before.Count,
+                privilegeCount = after.Count, uiAccess = 0, hasRestrictions = filtered };
+        } finally {
+            Marshal.FreeHGlobal(original);
+            foreach (IntPtr value in new[] { user, sourceStats, candidateStats, groupData })
+                if (value != IntPtr.Zero) Marshal.FreeHGlobal(value);
+            if (admin != IntPtr.Zero) LocalFree(admin);
+        }
+    }
+    public static int RunCaret(string executable, string script, string directory, string workingDirectory, int timeout,
+        bool allowDerivedRestricted = false)
     {
         Guard();
         Require(timeout == 180 && File.Exists(executable) && File.Exists(script), "Bounded caret executable/entry required.");
+        Require(Environment.GetEnvironmentVariable("VI_CARET_TRUSTED_HEAD") == "true" &&
+            Environment.GetEnvironmentVariable("GITHUB_REPOSITORY") == "jiec-msft/vi", "Caret exception requires a trusted own-repository CI head.");
+        string entry = Path.GetFileName(script);
+        Require((entry == "windows-caret-ui.cjs" || entry == "windows-caret-quiet.cjs") &&
+            String.Equals(Path.GetFullPath(script), Path.GetFullPath(Path.Combine(workingDirectory, "scripts", entry)), StringComparison.OrdinalIgnoreCase) &&
+            String.Equals(Path.GetFullPath(executable), Path.GetFullPath(Path.Combine(workingDirectory, "node_modules", "electron", "dist", "electron.exe")),
+                StringComparison.OrdinalIgnoreCase), "Only the prepared own-head caret App/quiet fixture and Electron binary are allowed.");
         Directory.CreateDirectory(directory);
         var clock = Stopwatch.StartNew();
         var errors = new List<string>();
@@ -965,43 +1091,57 @@ public static class ViCiDesktop
             ["sourceHead"] = Environment.GetEnvironmentVariable("VI_PROBE_HEAD"),
             ["runId"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ID"),
             ["attempt"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT"),
-            ["scope"] = "same-user-filtered-medium-token-owned-job",
+            ["scope"] = "same-user-medium-token-owned-job",
             ["callerPid"] = Environment.ProcessId
         };
-        IntPtr job = IntPtr.Zero, ownToken = IntPtr.Zero, linked = IntPtr.Zero, childToken = IntPtr.Zero;
+        IntPtr job = IntPtr.Zero, ownToken = IntPtr.Zero, linked = IntPtr.Zero, childToken = IntPtr.Zero, restricted = IntPtr.Zero;
         ProcessInfo child = new ProcessInfo();
         bool attached = false;
+        Dictionary<long, uint> parentPrivileges = null;
+        string originalJobName = Environment.GetEnvironmentVariable("VI_CARET_JOB_NAME");
         int result = 1;
         try {
             Require(Name(GetProcessWindowStation()) == "WinSta0" && InputName() == "Default", "Ordinary Default desktop required.");
             using (var own = Process.GetCurrentProcess())
-                Win32(OpenProcessToken(own.Handle, 8, out ownToken), "Read runner's own token");
+                Win32(OpenProcessToken(own.Handle, allowDerivedRestricted ? 0x8bU : 8U, out ownToken), "Read runner's own token");
             int originalIntegrity = TokenIntegrity(ownToken);
+            parentPrivileges = Privileges(ownToken);
             report["originalIntegrity"] = originalIntegrity;
             IntPtr launchToken = ownToken;
+            report["tokenOrigin"] = "existing-medium";
             if (originalIntegrity != 0x2000) {
                 Require(originalIntegrity == 0x3000, "Unknown runner integrity; refusing a token transition.");
-                IntPtr data = TokenData(ownToken, 19);
-                try { linked = Marshal.ReadIntPtr(data); }
-                finally { Marshal.FreeHGlobal(data); }
-                Require(linked != IntPtr.Zero && TokenIntegrity(linked) == 0x2000, "Runner has no filtered medium token.");
-                IntPtr first = TokenData(ownToken, 1), second = IntPtr.Zero;
                 try {
-                    second = TokenData(linked, 1);
-                    Require(EqualSid(Marshal.ReadIntPtr(first), Marshal.ReadIntPtr(second)), "Filtered token is not the runner's own user.");
-                } finally {
-                    Marshal.FreeHGlobal(first);
-                    if (second != IntPtr.Zero) Marshal.FreeHGlobal(second);
+                    IntPtr data = TokenData(ownToken, 19);
+                    try { linked = Marshal.ReadIntPtr(data); }
+                    finally { Marshal.FreeHGlobal(data); }
+                    Require(linked != IntPtr.Zero, "Runner has no linked filtered token.");
+                    launchToken = linked;
+                    report["tokenOrigin"] = "linked-filtered-medium";
+                } catch (Win32Exception error) when (error.NativeErrorCode == 1312 && allowDerivedRestricted) {
+                    report["linkedTokenUnavailableCode"] = 1312;
+                    restricted = RestrictedMedium(ownToken);
+                    launchToken = restricted;
+                    report["tokenOrigin"] = "derived-restricted-medium";
                 }
-                launchToken = linked;
             }
+            report["launchTokenVerification"] = VerifyCaretToken(ownToken, launchToken, restricted != IntPtr.Zero);
             report["launchIntegrity"] = TokenIntegrity(launchToken);
             report["sameUserTokenVerified"] = true;
             report["privilegesEnabledByLauncher"] = false;
-            job = NewJob();
+            string jobName = "vi-ci-caret-" + Environment.GetEnvironmentVariable("GITHUB_RUN_ID") + "-" + Guid.NewGuid().ToString("N");
+            job = NewJob(jobName);
+            Environment.SetEnvironmentVariable("VI_CARET_JOB_NAME", jobName);
+            report["specificJobName"] = jobName;
             var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = @"WinSta0\Default" };
             var command = new StringBuilder(Quote(executable) + " " + Quote(script));
-            bool started = linked == IntPtr.Zero
+            if (launchToken != ownToken) {
+                Win32(LookupPrivilegeValueW(null, "SeImpersonatePrivilege", out long impersonate), "Read required parent privilege identity");
+                if (!parentPrivileges.TryGetValue(impersonate, out uint attributes) || (attributes & 2) == 0)
+                    throw new Win32Exception(1314, "CreateProcessWithTokenW requires already-enabled parent SeImpersonatePrivilege; no enablement is allowed.");
+                report["requiredParentPrivilegeAlreadyEnabled"] = true;
+            }
+            bool started = launchToken == ownToken
                 ? CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false, SuspendedNoWindow, IntPtr.Zero,
                     workingDirectory, ref startup, out child)
                 : CreateProcessWithTokenW(launchToken, 0, executable, command, SuspendedNoWindow, IntPtr.Zero,
@@ -1013,6 +1153,7 @@ public static class ViCiDesktop
             Require(member, "Caret root is not in its owned Job.");
             Win32(OpenProcessToken(child.process, 8, out childToken), "Read suspended caret root token");
             Require(TokenIntegrity(childToken) == 0x2000, "Caret root did not receive medium integrity.");
+            report["rootTokenVerification"] = VerifyCaretToken(ownToken, childToken, restricted != IntPtr.Zero);
             IntPtr ownUser = TokenData(ownToken, 1), childUser = IntPtr.Zero;
             try {
                 childUser = TokenData(childToken, 1);
@@ -1058,7 +1199,19 @@ public static class ViCiDesktop
                 if (!terminated) errors.Add("Unattached owned caret root cleanup failed.");
             }
             CleanupJob(job, errors, report, "ownedJobCleanup");
-            foreach (IntPtr token in new[] { childToken, linked, ownToken })
+            Environment.SetEnvironmentVariable("VI_CARET_JOB_NAME", originalJobName);
+            if (parentPrivileges != null && ownToken != IntPtr.Zero) {
+                try {
+                    var after = Privileges(ownToken);
+                    bool unchanged = after.Count == parentPrivileges.Count;
+                    foreach (var privilege in after)
+                        unchanged = unchanged && parentPrivileges.TryGetValue(privilege.Key, out uint attributes) &&
+                            (attributes & 3) == (privilege.Value & 3);
+                    report["parentPrivilegesUnchanged"] = unchanged;
+                    Require(unchanged, "Caret launch changed parent privilege state.");
+                } catch (Exception error) { errors.Add(error.Message); }
+            }
+            foreach (IntPtr token in new[] { childToken, restricted, linked, ownToken })
                 if (token != IntPtr.Zero && !CloseHandle(token)) errors.Add("Owned token handle cleanup failed.");
             if (child.thread != IntPtr.Zero && !CloseHandle(child.thread)) errors.Add("Caret root thread handle cleanup failed.");
             if (child.process != IntPtr.Zero && !CloseHandle(child.process)) errors.Add("Caret root process handle cleanup failed.");

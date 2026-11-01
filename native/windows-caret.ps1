@@ -13,7 +13,7 @@ try {
             if ($line.Length -gt 4096) { throw 'invalid-request' }
             $request = $line | ConvertFrom-Json
             $value = switch ($request.action) {
-                'ready' { @{ ready = $true } }
+                'ready' { $marker.Identity() }
                 'bind' {
                     $marker.Bind([long]$request.target.window, [long]$request.target.focus, [uint32]$request.target.pid)
                     $script:caretTarget = $request.target

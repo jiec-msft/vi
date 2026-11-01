@@ -156,14 +156,28 @@ This deliberate opt-in behavior does not alter delivery when the setting is off.
 `Windows caret integration` is a separate, standard Windows x64 hosted check
 with a 10-minute whole-job limit and an internal 180-second GUI watchdog. Its
 synthetic native editor exercises the actual application, not the presentation
-prototype. The hosted launcher uses only the runner's own existing filtered
-medium token, checks its user/session and exact suspended root binary, attaches
+prototype. The hosted launcher uses the runner's own existing medium/linked
+token or, only for an absent linked token (Win32 1312), derives a restricted
+medium primary token from its own token. This disables maximum privileges and
+makes existing administrator/owner groups deny-only; it is not a UAC linked token.
+The launcher verifies user/logon/session identity, medium integrity, primary type,
+filtered provenance, admin deny-only, privilege subset and UIAccess. It checks
+the exact suspended root binary and birth identity, attaches
 an owned kill-on-close Job before resuming, and preserves nonzero exits and
-cleanup receipts. It neither enables privileges nor weakens product integrity
+cleanup receipts. `CreateProcessWithTokenW` is permitted only when the required
+parent `SeImpersonatePrivilege` is already enabled; missing privileges (1314)
+block the job. Parent privilege state is compared before/after. The launcher
+never enables privileges, changes UAC/desktop ACLs, or weakens product integrity
 checks. The additional quiet-exit fixture must fail with its exact raw code.
-If a hosted service token has no linked filtered token (Win32 error 1312),
-native qualification remains blocked; the launcher does not fall back to an
-elevated target or alter UAC.
+
+Microsoft's [CreateRestrictedToken guidance](https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
+warns against placing untrusted restricted applications on Default, where they
+could message unrestricted applications. This CI makes a narrow exception only
+for trusted own-repository/current-head App and native-editor fixtures with
+synthetic inputs and exact owned HWND/PID/Job checks, because the product requires
+actual Default-desktop validation. Fork/arbitrary payloads are excluded. This
+is not a sandbox/security-isolation claim or permission to launch this restricted
+fixture on a user's desktop. CI-only launch code is not part of the application.
 Current-head GIF/PNG and native receipts are required before claiming
 CI qualification. CI does not establish real-device, UIA-only editor, secure
 desktop, mixed-monitor or application-package acceptance.
