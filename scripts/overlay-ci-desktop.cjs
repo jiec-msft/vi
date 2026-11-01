@@ -176,61 +176,61 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
     `Native query/READY monotonic ordering failed: ${JSON.stringify({ receipt, emission, event })}`);
     previousWriteTicks = ticks(emission.writeCompletedTicks);
   }
-  function assertNodeEvent(event, report, request) {
-    assert.equal(event.clock, 'Node-process-hrtime');
-    assert.equal(event.requestId, request.requestId);
-    assertRequest(event, request);
-    assert.ok(Number.isInteger(event.eventId) && event.eventId > 0);
-    assert.deepEqual(report.nodeEvents[event.eventId - 1], event, 'Causal event is not the actually retained event.');
-    ticks(event.ticks);
-  }
-  function assertCausalRequest(request, report, desktop) {
-    assert.ok(Number.isInteger(request.generation) && request.generation > 0);
-    assert.ok(Number.isInteger(request.requestSequence) && request.requestSequence > 0);
-    for (const key of ['sourceHead', 'runId', 'attempt', 'caseId'])
-      assert.equal(request[key], report.causalContext[key]);
-    assert.equal(request.caseId, desktop.ownedDesktop);
-    assert.equal(request.callerPid, desktop.ownedPid);
-    assert.match(request.requestNonce, /^[a-f0-9-]{36}$/);
-    assert.equal(request.requestId, `${request.callerPid}-${request.requestSequence}-${request.role}-${request.generation}`);
-    assertNodeEvent(request.begin, report, request);
-    assertNodeEvent(request.returned, report, request);
-    assertNodeEvent(request.spawn, report, request);
-    assert.equal(request.returned.pid, request.returnedPid);
-    assert.equal(request.spawn.pid, request.returnedPid);
-    assert.ok(ticks(request.begin.ticks) <= ticks(request.returned.ticks) &&
-      ticks(request.returned.ticks) <= ticks(request.spawn.ticks));
-  }
-  function assertCommitted(ack, request, report, observation) {
-    const value = JSON.parse(Buffer.from(ack.bytesBase64, 'base64'));
-    const commit = JSON.parse(Buffer.from(ack.commitBytesBase64, 'base64'));
-    assert.deepEqual(ack.value, value);
-    assert.deepEqual(ack.commit, commit);
-    assertRequest(value, request); assertRequest(commit, request);
-    assert.equal(sha256(Buffer.from(ack.bytesBase64, 'base64')), ack.sha256);
-    assert.equal(sha256(Buffer.from(ack.commitBytesBase64, 'base64')), ack.commitSHA256);
-    assert.equal(commit.sha256, ack.sha256);
-    assert.equal(commit.commitComplete, true);
-    assert.equal(commit.pid, request.returnedPid);
-    assert.equal(value.pid, request.returnedPid);
-    assert.equal(commit.creationFileTime, observation.creationFileTime);
-    assert.equal(value.creationFileTime, observation.creationFileTime);
-    assert.equal(commit.executionThread, value.executionThread);
-    assert.equal(commit.monotonicClock, 'native-process-Stopwatch');
-    assert.equal(commit.monotonicFrequency, value.monotonicFrequency);
-    const job = JSON.parse(Buffer.from(ack.jobBytesBase64, 'base64'));
-    assert.deepEqual(job, observation, 'Consumed immutable Job bytes differ from the independent observation.');
-    assert.equal(value.jobReceipt.sha256, sha256(Buffer.from(ack.jobBytesBase64, 'base64')));
-    assert.equal(value.jobReceipt.fileName, `job-${request.returnedPid}-${observation.creationFileTime}.json`);
-    assert.equal(value.jobReceipt.pid, observation.pid);
-    assert.equal(value.jobReceipt.creationFileTime, observation.creationFileTime);
-    assert.equal(value.jobReceipt.snapshotCompletedAt, observation.snapshotCompletedAt);
-    assert.equal(value.jobReceipt.liveCheckedAt, observation.liveCheckedAt);
-    assert.ok(ticks(value.selfLiveCheckedTicks) <= ticks(commit.committedTicks));
-    if (value.writeComplete) assert.ok(ticks(value.writeCompletedTicks) <= ticks(commit.committedTicks));
-    if (value.responseComplete) assert.ok(ticks(value.responseReadyTicks) <= ticks(commit.committedTicks));
-    assertNodeEvent(ack.consumed, report, request);
-  }
+}
+function assertNodeEvent(event, report, request) {
+  assert.equal(event.clock, 'Node-process-hrtime');
+  assert.equal(event.requestId, request.requestId);
+  assertRequest(event, request);
+  assert.ok(Number.isInteger(event.eventId) && event.eventId > 0);
+  assert.deepEqual(report.nodeEvents[event.eventId - 1], event, 'Causal event is not the actually retained event.');
+  ticks(event.ticks);
+}
+function assertCausalRequest(request, report, desktop) {
+  assert.ok(Number.isInteger(request.generation) && request.generation > 0);
+  assert.ok(Number.isInteger(request.requestSequence) && request.requestSequence > 0);
+  for (const key of ['sourceHead', 'runId', 'attempt', 'caseId'])
+    assert.equal(request[key], report.causalContext[key]);
+  assert.equal(request.caseId, desktop.ownedDesktop);
+  assert.equal(request.callerPid, desktop.ownedPid);
+  assert.match(request.requestNonce, /^[a-f0-9-]{36}$/);
+  assert.equal(request.requestId, `${request.callerPid}-${request.requestSequence}-${request.role}-${request.generation}`);
+  assertNodeEvent(request.begin, report, request);
+  assertNodeEvent(request.returned, report, request);
+  assertNodeEvent(request.spawn, report, request);
+  assert.equal(request.returned.pid, request.returnedPid);
+  assert.equal(request.spawn.pid, request.returnedPid);
+  assert.ok(ticks(request.begin.ticks) <= ticks(request.returned.ticks) &&
+    ticks(request.returned.ticks) <= ticks(request.spawn.ticks));
+}
+function assertCommitted(ack, request, report, observation) {
+  const value = JSON.parse(Buffer.from(ack.bytesBase64, 'base64'));
+  const commit = JSON.parse(Buffer.from(ack.commitBytesBase64, 'base64'));
+  assert.deepEqual(ack.value, value);
+  assert.deepEqual(ack.commit, commit);
+  assertRequest(value, request); assertRequest(commit, request);
+  assert.equal(sha256(Buffer.from(ack.bytesBase64, 'base64')), ack.sha256);
+  assert.equal(sha256(Buffer.from(ack.commitBytesBase64, 'base64')), ack.commitSHA256);
+  assert.equal(commit.sha256, ack.sha256);
+  assert.equal(commit.commitComplete, true);
+  assert.equal(commit.pid, request.returnedPid);
+  assert.equal(value.pid, request.returnedPid);
+  assert.equal(commit.creationFileTime, observation.creationFileTime);
+  assert.equal(value.creationFileTime, observation.creationFileTime);
+  assert.equal(commit.executionThread, value.executionThread);
+  assert.equal(commit.monotonicClock, 'native-process-Stopwatch');
+  assert.equal(commit.monotonicFrequency, value.monotonicFrequency);
+  const job = JSON.parse(Buffer.from(ack.jobBytesBase64, 'base64'));
+  assert.deepEqual(job, observation, 'Consumed immutable Job bytes differ from the independent observation.');
+  assert.equal(value.jobReceipt.sha256, sha256(Buffer.from(ack.jobBytesBase64, 'base64')));
+  assert.equal(value.jobReceipt.fileName, `job-${request.returnedPid}-${observation.creationFileTime}.json`);
+  assert.equal(value.jobReceipt.pid, observation.pid);
+  assert.equal(value.jobReceipt.creationFileTime, observation.creationFileTime);
+  assert.equal(value.jobReceipt.snapshotCompletedAt, observation.snapshotCompletedAt);
+  assert.equal(value.jobReceipt.liveCheckedAt, observation.liveCheckedAt);
+  assert.ok(ticks(value.selfLiveCheckedTicks) <= ticks(commit.committedTicks));
+  if (value.writeComplete) assert.ok(ticks(value.writeCompletedTicks) <= ticks(commit.committedTicks));
+  if (value.responseComplete) assert.ok(ticks(value.responseReadyTicks) <= ticks(commit.committedTicks));
+  assertNodeEvent(ack.consumed, report, request);
 }
 function assertSpawnDiagnostics(helper, owner) {
   assert.equal(helper.callerPid, owner);

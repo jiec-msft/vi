@@ -340,7 +340,7 @@ for (const [label, change] of [
   test(`rejects ${label}`, () => {
     const { report, desktop } = fixture();
     change(report, desktop);
-    assert.throws(() => assertDesktopChain(report, desktop));
+    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError' });
   });
 }
 function startupFixture() {
@@ -374,7 +374,7 @@ for (const [label, change] of [
   ['post-injection self completion', (r) => { r.nativeDesktopReceipts[0].queryCompletedAt = 1401; }],
   ['post-exit self completion', (r) => { r.nativeDesktopReceipts[0].queryCompletedAt = 1501; }],
   ['stale self generation', (r) => { r.nativeDesktopReceipts[1].creationFileTime = birth(5); }],
-  ['overlapping generations', (r) => { r.helpers[1].startedAt = 1500; }],
+  ['overlapping generations', (r) => { r.helpers[1].causalRequest.begin.ticks = '23000'; }],
   ['recovery after root readiness', (r) => { r.helpers[1].events[0].causal.ticks = '32000'; }],
   ['injection before actual committed ACK', (r) => { r.startupRecovery.injection.ticks = '20000'; }],
   ['missing pre-injection completed ACK', (r) => { r.helpers[0].readyAcks = []; }],
@@ -383,6 +383,6 @@ for (const [label, change] of [
   test(`rejects startup proof with ${label}`, () => {
     const { report, desktop } = startupFixture();
     change(report, desktop);
-    assert.throws(() => assertDesktopChain(report, desktop));
+    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError' });
   });
 }
