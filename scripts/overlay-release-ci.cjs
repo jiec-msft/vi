@@ -23,6 +23,12 @@ child.once('exit', (code) => {
     const report = JSON.parse(fs.readFileSync(path.join(directory, 'release-negative.json')));
     assert.equal(desktop.controllerPid, child.pid);
     assertDesktopChain(report, desktop);
+    assert.ok(Number.isInteger(report.renderEvidence.paintAttempts) && report.renderEvidence.paintAttempts > 0);
+    assert.ok(Number.isFinite(report.renderEvidence.paintStartedAt) && Number.isFinite(report.renderEvidence.paintCompletedAt) &&
+      report.renderEvidence.paintCompletedAt >= report.renderEvidence.paintStartedAt &&
+      report.renderEvidence.paintCompletedAt - report.renderEvidence.paintStartedAt <= 5000);
+    assert.ok(Number.isFinite(report.rootReadyAt) && report.rootReadyAt >= report.renderEvidence.paintCompletedAt,
+      'Release root readiness must follow actual dual-marker paint.');
     assert.equal(code, 1);
     assert.equal(desktop.childOutcome, 'exit');
     assert.equal(desktop.childExitCode, 1);

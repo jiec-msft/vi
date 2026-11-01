@@ -70,9 +70,6 @@ async function run() {
   report.windowIds = { owner: process.pid, main: handle(main), overlay: handle(overlay), other: handle(other) };
   if (expectedDesktop) {
     assert.ok(desktopReceipt);
-    await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
-      mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
-    await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
     report.electronProcesses = app.getAppMetrics().map(({ pid, type, creationTime }) => ({ pid, type, creationTime }));
     for (const [window, color] of [[main, '#00ffff'], [overlay, '#ff00ff']]) {
       await window.webContents.executeJavaScript(`(() => {
@@ -90,18 +87,34 @@ async function run() {
       }
       return count >= 8;
     };
-    const mainCapture = (await main.webContents.capturePage()).toPNG();
-    const overlayCapture = (await overlay.webContents.capturePage()).toPNG();
-    report.renderEvidence = { coverage: 'compositor-output-not-all-process-threads',
-      roleSource: 'Electron-app-metrics-self-reported', mainCaptureBytes: mainCapture.length,
-      overlayCaptureBytes: overlayCapture.length, mainMarkerVisible: visible(mainCapture, true),
-      overlayMarkerVisible: visible(overlayCapture, false), desktopMarkerSamples: 0 };
+    const paintStartedAt = Date.now(), paintDeadline = paintStartedAt + 5000;
+    let mainCapture, overlayCapture, paintAttempts = 0;
+    while (true) {
+      mainCapture = (await main.webContents.capturePage()).toPNG();
+      overlayCapture = (await overlay.webContents.capturePage()).toPNG();
+      paintAttempts++;
+      report.renderEvidence = { coverage: 'compositor-output-not-all-process-threads',
+        roleSource: 'Electron-app-metrics-self-reported', mainCaptureBytes: mainCapture.length,
+        overlayCaptureBytes: overlayCapture.length, mainMarkerVisible: visible(mainCapture, true),
+        overlayMarkerVisible: visible(overlayCapture, false), desktopMarkerSamples: 0, paintAttempts, paintStartedAt };
+      const paintObservedAt = Date.now();
+      assert.ok(paintObservedAt <= paintDeadline, 'Both release root window markers must paint before readiness.');
+      if (report.renderEvidence.mainMarkerVisible && report.renderEvidence.overlayMarkerVisible) {
+        report.renderEvidence.paintCompletedAt = paintObservedAt;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     assert.equal(report.renderEvidence.mainMarkerVisible, true);
     assert.equal(report.renderEvidence.overlayMarkerVisible, true);
     const renderDirectory = path.join(directory, 'release-render');
     await fs.mkdir(renderDirectory);
     await fs.writeFile(path.join(renderDirectory, 'main-render.png'), mainCapture);
     await fs.writeFile(path.join(renderDirectory, 'overlay-render.png'), overlayCapture);
+    report.rootReadyAt = Date.now();
+    await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
+      mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
+    await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
     const stop = await recordDesktop(renderDirectory, (png) => {
       assert.ok(visible(png, true) && visible(png, false), 'Release fixture render markers missing from whole desktop.');
       report.renderEvidence.desktopMarkerSamples++;
