@@ -304,6 +304,7 @@ async function run() {
     await fs.writeFile(helperFile, injected);
   }
   const spawn = childProcess.spawn;
+  let spawnRequestSequence = 0;
   childProcess.spawn = (file, args, options) => {
     const pointer = args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-overlay.ps1'));
     const delivery = file.endsWith('macos-delivery') ||
@@ -312,16 +313,29 @@ async function run() {
       : delivery && deliveryFile ? args.map((arg) => arg.endsWith('windows-delivery.ps1') ? deliveryFile : arg) : args;
     const role = pointer ? 'overlay-pointer' : 'desktop-delivery';
     const generation = report.helpers.filter((value) => value.role === role).length + 1;
+    const requestSequence = pointer || delivery ? ++spawnRequestSequence : undefined;
+    const requestId = pointer || delivery ? `${process.pid}-${requestSequence}-${role}-${generation}` : undefined;
+    const spawnStartedAt = Date.now(), spawnStartedTicks = process.hrtime.bigint().toString();
     const child = spawn(file, actual, expectedDesktop && (pointer || delivery)
-      ? { ...options, env: { ...(options?.env || process.env), VI_CI_NATIVE_GENERATION: String(generation) } } : options);
+      ? { ...options, env: { ...(options?.env || process.env), VI_CI_NATIVE_GENERATION: String(generation),
+        VI_CI_NATIVE_SPAWN_REQUEST: requestId, VI_CI_NATIVE_REQUEST_SEQUENCE: String(requestSequence) } } : options);
+    const spawnReturnedAt = Date.now(), spawnReturnedTicks = process.hrtime.bigint().toString();
     if (pointer) {
       helpers.push(child);
       report.helperPids.push(child.pid);
     }
     if (pointer || delivery) {
       const helper = { role, pid: child.pid, generation,
-        startedAt: Date.now(), stage, events: [], stderrBytes: 0 };
+        startedAt: Date.now(), helperStartedTicks: process.hrtime.bigint().toString(), stage, events: [], stderrBytes: 0,
+        requestId, requestSequence, callerPid: process.pid, spawnStartedAt, spawnStartedTicks,
+        spawnReturnedAt, spawnReturnedTicks, returnedPid: child.pid,
+        spawnClock: 'Node-process-hrtime', startedAtClock: 'Node-Date.now-not-native-FILETIME',
+        startedAtMeaning: 'observer-after-synchronous-spawn-return-before-spawn-event' };
       report.helpers.push(helper);
+      child.once('spawn', () => {
+        helper.spawnObservedAt = Date.now();
+        helper.spawnObservedTicks = process.hrtime.bigint().toString();
+      });
       const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
       let receiveOrder = 0, readySequence = 0;
       lines.on('line', (line) => {

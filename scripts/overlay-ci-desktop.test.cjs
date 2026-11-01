@@ -32,32 +32,46 @@ function member(pid) {
     specificJobMember: true, liveAtCompletion: true, membershipApi: 'IsProcessInJob',
     liveCheckedAt: 1091, liveCheckApi: 'WaitForSingleObject', liveCheckWaitState: 258, liveCheckWin32Error: 0,
     coverage: 'specific-job-process-identity-not-thread-desktop', status: 'verified-specific-job-process-identity',
+    processCreationApi: 'GetProcessTimes', processCreationClock: 'Win32-FILETIME-not-Node-Date.now',
     threadObservations: [{ ...unknownThread, pid }] };
 }
 function self(pid, role, desktop) {
   return { pid, role, creationFileTime: birth(pid), thread: 105, executionThread: 105, station: 'WinSta0',
     threadDesktop: desktop, inputDesktop: desktop, selfQueryComplete: true, queryStartedAt: 1100, queryCompletedAt: 1101,
     generation: 1, queryStartedTicks: '11000', queryCompletedTicks: '11010',
+    requestId: `1-1-${role}-1`, requestSequence: 1,
     monotonicFrequency: '10000000', monotonicClock: 'native-process-Stopwatch',
     coverage: 'self-execution-thread-not-all-process-threads' };
 }
-function readyEvent(at) {
-  return { type: 'ready', at, readySequence: 1, receiveOrder: 1, receivedTicks: '20000',
+function readyEvent(at, receivedTicks = '20000') {
+  return { type: 'ready', at, readySequence: 1, receiveOrder: 1, receivedTicks,
     message: '{"type":"ready"}', monotonicClock: 'Node-process-hrtime-not-native-stopwatch' };
 }
 function emission(pid, generation = 1) {
   return { pid, role: 'overlay-pointer', creationFileTime: birth(pid), generation, executionThread: 105,
+    requestId: `1-${generation}-overlay-pointer-${generation}`, requestSequence: generation,
     readySequence: 1, messageBase64: Buffer.from('{"type":"ready"}').toString('base64'),
     writeApi: 'Console.WriteLine', writeComplete: true, writeStartedAt: 1110, writeCompletedAt: 1111,
     writeStartedTicks: '11100', writeCompletedTicks: '11110',
     monotonicFrequency: '10000000', monotonicClock: 'native-process-Stopwatch' };
+}
+function spawnDiagnostics(generation = 1) {
+  return { requestId: `1-${generation}-overlay-pointer-${generation}`, requestSequence: generation, callerPid: 1,
+    returnedPid: generation === 1 ? 5 : 7,
+    spawnStartedAt: generation === 1 ? 1000 : 1518, spawnReturnedAt: generation === 1 ? 1001 : 1519,
+    spawnObservedAt: generation === 1 ? 1002 : 1521,
+    spawnStartedTicks: generation === 1 ? '10000' : '25000',
+    spawnReturnedTicks: generation === 1 ? '10010' : '25010', spawnObservedTicks: generation === 1 ? '10020' : '25020',
+    helperStartedTicks: generation === 1 ? '10015' : '25015',
+    spawnClock: 'Node-process-hrtime', startedAtClock: 'Node-Date.now-not-native-FILETIME',
+    startedAtMeaning: 'observer-after-synchronous-spawn-return-before-spawn-event' };
 }
 function fixture() {
   const name = 'vi-ci-test';
   const report = { windowIds: { owner: 1, main: '11', overlay: '12' },
     electronProcesses: [{ pid: 1, type: 'Browser' }, { pid: 2, type: 'GPU' },
       { pid: 3, type: 'Tab' }, { pid: 4, type: 'Tab' }].map((value) => ({ ...value, creationTime: 1000 })),
-    helpers: [{ pid: 5, role: 'overlay-pointer', generation: 1, startedAt: 1001, events: [readyEvent(1120)] }],
+    helpers: [{ pid: 5, role: 'overlay-pointer', generation: 1, startedAt: 1001, events: [readyEvent(1120)], ...spawnDiagnostics() }],
     nativeDesktopReceipts: [self(5, 'overlay-pointer', name)],
     nativeReadyReceipts: [emission(5)],
     osInputs: [{ ...self(6, 'os-mouse-driver', name), driverPid: 6, driverThread: 105,
@@ -143,6 +157,14 @@ for (const [label, change] of [
   ['unjoined native receipt', (r) => { r.nativeDesktopReceipts[0].pid = 99; }],
   ['native process birth mismatch', (r) => { r.nativeDesktopReceipts[0].creationFileTime = birth(99); }],
   ['native generation predates external birth', (r) => { r.helpers[0].startedAt = 900; }],
+  ['missing actual spawn request', (r) => { delete r.helpers[0].requestId; }],
+  ['returned spawn PID mismatched', (r) => { r.helpers[0].returnedPid = 99; }],
+  ['spawn return precedes request ticks', (r) => { r.helpers[0].spawnReturnedTicks = '9999'; }],
+  ['spawn event precedes returned process', (r) => { r.helpers[0].spawnObservedTicks = '10001'; }],
+  ['native spawn request mismatched', (r) => { r.nativeDesktopReceipts[0].requestId = 'other'; }],
+  ['native request sequence mismatched', (r) => { r.nativeDesktopReceipts[0].requestSequence = 99; }],
+  ['native READY spawn request mismatched', (r) => { r.nativeReadyReceipts[0].requestId = 'other'; }],
+  ['birth clock relabeled as Node', (r, d) => { d.descendantDesktopObservations[4].processCreationClock = 'Node-Date.now'; }],
   ['partial self-query', (r) => { r.nativeDesktopReceipts[0].selfQueryComplete = false; }],
   ['wrong native execution thread', (r) => { r.nativeDesktopReceipts[0].executionThread = 999; }],
   ['default native thread', (r) => { r.nativeDesktopReceipts[0].threadDesktop = 'Default'; }],
@@ -202,15 +224,15 @@ for (const [label, change] of [
 function startupFixture() {
   const { report, desktop } = fixture();
   Object.assign(report.helpers[0], { ownedStartupFailureInjected: true, exit: { at: 1500 }, closedAt: 1510 });
-  report.helpers.push({ pid: 7, role: 'overlay-pointer', generation: 2, startedAt: 1520,
-    events: [readyEvent(1580)] });
+  report.helpers.push({ pid: 7, role: 'overlay-pointer', generation: 2, startedAt: 1520, ...spawnDiagnostics(2),
+    events: [readyEvent(1580, '30000')] });
   report.initialPointerRestarts = 1;
   report.rootReadyAt = 1600;
   report.startupRecovery = { failedPid: 5, recoveredPid: 7, injectedAt: 1400, failedExitAt: 1500, recoveredReadyAt: 1580 };
   desktop.descendantDesktopObservations.push({ ...member(7), processCreatedAt: 1515,
     observedAt: 1560, snapshotCompletedAt: 1570, liveCheckedAt: 1571 });
   report.nativeDesktopReceipts.push({ ...self(7, 'overlay-pointer', desktop.ownedDesktop),
-    generation: 2, queryStartedAt: 1572, queryCompletedAt: 1573 });
+    generation: 2, requestId: '1-2-overlay-pointer-2', requestSequence: 2, queryStartedAt: 1572, queryCompletedAt: 1573 });
   report.nativeReadyReceipts.push({ ...emission(7, 2), writeStartedAt: 1574, writeCompletedAt: 1575 });
   return { report, desktop };
 }

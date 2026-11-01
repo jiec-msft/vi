@@ -277,13 +277,18 @@ public static class ViCiDesktop
             Thread.Sleep(100);
         }
         if (observe != null) observe();
-        using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
+        using (var json = JsonDocument.Parse(ReadPublishedText(receipt))) {
             Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid, "Fixture readiness PID mismatch.");
         }
     }
-    public static FileStream OpenHeartbeatSnapshot(string file)
+    public static FileStream OpenPublishedSnapshot(string file)
     {
         return new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    }
+    static string ReadPublishedText(string file)
+    {
+        using (var stream = OpenPublishedSnapshot(file))
+        using (var reader = new StreamReader(stream, Encoding.UTF8)) { return reader.ReadToEnd(); }
     }
     public static bool IsDefaultHeartbeatFresh(uint pid, uint heartbeatPid, long heartbeatAt, long sampleAt)
     {
@@ -363,10 +368,7 @@ public static class ViCiDesktop
                     Require(frame.fileLastWriteTicks == info.LastWriteTimeUtc.Ticks && frame.fileLength == info.Length,
                         "A published immutable heartbeat frame changed while its fixture was live.");
                 } else {
-                    string text;
-                    using (var stream = OpenHeartbeatSnapshot(file))
-                    using (var reader = new StreamReader(stream, Encoding.UTF8)) { text = reader.ReadToEnd(); }
-                    frame = Parse(text, name);
+                    frame = Parse(ReadPublishedText(file), name);
                     frame.fileLastWriteTicks = info.LastWriteTimeUtc.Ticks;
                     frame.fileLength = info.Length;
                     frames.Add(sequence, frame);
@@ -526,7 +528,7 @@ public static class ViCiDesktop
             HeartbeatProgress(directory, clock, "default-ready", new { pid = fixture.pid, latestSequence = reader.Latest().sequence });
             for (int index = 0; index < 64; index++) {
                 var before = FreshHeartbeat(reader, out long openedAt);
-                using (var stream = OpenHeartbeatSnapshot(Path.Combine(target, before.fileName)))
+                using (var stream = OpenPublishedSnapshot(Path.Combine(target, before.fileName)))
                 using (var held = new StreamReader(stream, Encoding.UTF8)) {
                     heldHandles.Add(stream.SafeFileHandle);
                     long handleOpenedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -571,6 +573,22 @@ public static class ViCiDesktop
             HeartbeatProgress(directory, clock, "negative-frame-cases-started", new { completedOverlaps = overlaps.Count });
             report["negativeCases"] = VerifyInvalidHeartbeats(directory, final, negativeWitnesses);
             report["negativeWitnesses"] = negativeWitnesses;
+            string readySharing = Path.Combine(directory, "readiness-sharing.json");
+            var readyJson = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { pid = Environment.ProcessId }));
+            bool oldReaderRejected = false;
+            using (var writer = new FileStream(readySharing, FileMode.CreateNew, FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete)) {
+                writer.Write(readyJson, 0, readyJson.Length);
+                writer.Flush();
+                try { File.ReadAllText(readySharing); }
+                catch (IOException error) when ((error.HResult & 0xffff) == 32) { oldReaderRejected = true; }
+                Require(oldReaderRejected, "Controlled readiness publisher did not reproduce old reader sharing violation.");
+                using (var json = JsonDocument.Parse(ReadPublishedText(readySharing)))
+                    Require(json.RootElement.GetProperty("pid").GetInt32() == Environment.ProcessId,
+                        "Compatible production readiness reader lost the completed published PID.");
+            }
+            report["readinessSharing"] = new { oldReaderRejected, oldReaderWin32Error = 32,
+                newReaderVerified = true, scope = "controlled-open-publication-handle-not-unknown-original-holder-proof" };
             HeartbeatProgress(directory, clock, "negative-frame-cases-complete", new { completedOverlaps = overlaps.Count,
                 rejectedCases = negativeWitnesses.Count });
             failureJob = NewJob();
@@ -672,7 +690,7 @@ public static class ViCiDesktop
     static void ValidateHarnessReady(ProcessInfo child, string receipt, string desktop, IntPtr owned,
         List<object> observations, Dictionary<string, object> report)
     {
-        using (var json = JsonDocument.Parse(File.ReadAllText(receipt))) {
+        using (var json = JsonDocument.Parse(ReadPublishedText(receipt))) {
             var root = json.RootElement;
             Require(root.GetProperty("pid").GetUInt32() == child.pid &&
                 Equal(root.GetProperty("desktop").GetString(), desktop), "Harness readiness root/desktop mismatch.");
@@ -740,6 +758,8 @@ public static class ViCiDesktop
         public long observedAt { get; set; }
         public long snapshotCompletedAt { get; set; }
         public long processCreatedAt { get; set; }
+        public string processCreationApi { get; set; } = "GetProcessTimes";
+        public string processCreationClock { get; set; } = "Win32-FILETIME-not-Node-Date.now";
         public string creationFileTime { get; set; }
         public bool specificJobMember { get; set; }
         public bool liveAtCompletion { get; set; }

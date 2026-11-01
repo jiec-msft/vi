@@ -160,6 +160,9 @@ test('real Default fixture publishes new immutable frames while old reader handl
         'invalid-time', 'invalid-time-type', 'wrong-protocol', 'duplicate-property', 'over-cap', 'stale-latest']);
       assert.deepEqual(report.negativeWitnesses.map(({ label }) => label), report.negativeCases);
       assert.ok(report.negativeWitnesses.every(({ exceptionType, error }) => exceptionType && error));
+      assert.equal(report.readinessSharing.oldReaderRejected, true);
+      assert.equal(report.readinessSharing.oldReaderWin32Error, 32);
+      assert.equal(report.readinessSharing.newReaderVerified, true);
       assert.equal(report.defaultJobCleanup.active, 0);
       assert.equal(report.producerFailureJobCleanup.active, 0);
       assert.equal(report.processHandlesClosed, true);

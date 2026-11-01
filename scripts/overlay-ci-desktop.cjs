@@ -24,6 +24,8 @@ function ticks(value) {
   return BigInt(value);
 }
 function assertReadyDiagnostics(helper, receipt, emissions) {
+  assert.equal(receipt.requestId, helper.requestId);
+  assert.equal(receipt.requestSequence, helper.requestSequence);
   assert.equal(receipt.generation, helper.generation);
   assert.equal(receipt.monotonicClock, 'native-process-Stopwatch');
   assert.ok(ticks(receipt.monotonicFrequency) > 0n);
@@ -47,6 +49,8 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
     const emission = matches[0];
     assert.equal(emission.creationFileTime, receipt.creationFileTime);
     assert.equal(emission.generation, helper.generation);
+    assert.equal(emission.requestId, helper.requestId);
+    assert.equal(emission.requestSequence, helper.requestSequence);
     assert.equal(emission.executionThread, receipt.executionThread);
     assert.equal(emission.messageBase64, Buffer.from(event.message).toString('base64'));
     assert.equal(emission.writeApi, 'Console.WriteLine');
@@ -61,6 +65,23 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
     `Native query/READY monotonic ordering failed: ${JSON.stringify({ receipt, emission, event })}`);
     previousWriteTicks = ticks(emission.writeCompletedTicks);
   }
+}
+function assertSpawnDiagnostics(helper, owner) {
+  assert.equal(helper.callerPid, owner);
+  assert.ok(Number.isInteger(helper.requestSequence) && helper.requestSequence > 0);
+  assert.equal(helper.requestId, `${owner}-${helper.requestSequence}-${helper.role}-${helper.generation}`);
+  assert.equal(helper.returnedPid, helper.pid);
+  assert.equal(helper.spawnClock, 'Node-process-hrtime');
+  assert.equal(helper.startedAtClock, 'Node-Date.now-not-native-FILETIME');
+  assert.equal(helper.startedAtMeaning, 'observer-after-synchronous-spawn-return-before-spawn-event');
+  finiteTime(helper.spawnStartedAt);
+  finiteTime(helper.spawnReturnedAt);
+  finiteTime(helper.spawnObservedAt);
+  assert.ok(ticks(helper.spawnStartedTicks) <= ticks(helper.spawnReturnedTicks) &&
+    ticks(helper.spawnReturnedTicks) <= ticks(helper.helperStartedTicks) &&
+    ticks(helper.helperStartedTicks) <= ticks(helper.spawnObservedTicks));
+  for (const ready of helper.events.filter(({ type }) => type === 'ready'))
+    assert.ok(ticks(helper.spawnObservedTicks) <= ticks(ready.receivedTicks));
 }
 function assertWrapperOutcome(desktop, expectedErrors = []) {
   assert.ok(Array.isArray(desktop.errors), 'Owned desktop wrapper lacks its raw errors.');
@@ -155,6 +176,8 @@ function assertDesktopChain(report, desktop) {
     assert.equal(observation.liveCheckApi, 'WaitForSingleObject');
     assert.equal(observation.liveCheckWaitState, 258);
     assert.equal(observation.liveCheckWin32Error, 0);
+    assert.equal(observation.processCreationApi, 'GetProcessTimes');
+    assert.equal(observation.processCreationClock, 'Win32-FILETIME-not-Node-Date.now');
     assertCoverage(observation, 'specific-job-process-identity-not-thread-desktop');
     assert.ok(finiteTime(observation.processCreatedAt) <= finiteTime(observation.observedAt) &&
       observation.observedAt <= finiteTime(observation.snapshotCompletedAt) &&
@@ -226,13 +249,16 @@ function assertDesktopChain(report, desktop) {
 
   const receipts = report.nativeDesktopReceipts || [];
   const helpers = report.helpers || [];
+  let previousRequestSequence = 0;
   for (const helper of helpers) {
+    assertSpawnDiagnostics(helper, desktop.ownedPid);
+    assert.ok(helper.requestSequence > previousRequestSequence, 'Spawn requests must preserve their actual call order.');
+    previousRequestSequence = helper.requestSequence;
     const matching = receipts.filter((value) => value.pid === helper.pid && value.role === helper.role);
     assert.equal(matching.length, 1, 'Each required helper generation needs its own execution receipt.');
     const receipt = matching[0];
     assertSelfThread(receipt, desktop);
     const job = member(helper.pid, receipt.creationFileTime);
-    assert.ok(job.processCreatedAt <= helper.startedAt);
     assert.ok(Number.isInteger(helper.generation) && helper.generation > 0);
     assert.ok(helpers.filter((value) => value.role === helper.role && value.generation === helper.generation).length === 1);
     const next = helpers.find((value) => value.role === helper.role && value.generation === helper.generation + 1);
@@ -242,10 +268,18 @@ function assertDesktopChain(report, desktop) {
     assertReadyDiagnostics(helper, receipt, report.nativeReadyReceipts || []);
     const chronology = JSON.stringify({ pid: helper.pid, role: helper.role, generation: helper.generation,
       creationFileTime: receipt.creationFileTime, jobCompletedAt: job.snapshotCompletedAt,
+      processCreatedAt: job.processCreatedAt, processCreationClock: job.processCreationClock,
+      helperStartedAt: helper.startedAt, helperStartedClock: helper.startedAtClock,
+      helperStartedTicks: helper.helperStartedTicks, helperStartedMeaning: helper.startedAtMeaning,
+      spawn: { requestId: helper.requestId, requestSequence: helper.requestSequence, callerPid: helper.callerPid,
+        returnedPid: helper.returnedPid, startedAt: helper.spawnStartedAt, startedTicks: helper.spawnStartedTicks,
+        returnedAt: helper.spawnReturnedAt, returnedTicks: helper.spawnReturnedTicks,
+        observedAt: helper.spawnObservedAt, observedTicks: helper.spawnObservedTicks, clock: helper.spawnClock },
       liveCheckedAt: job.liveCheckedAt, queryStartedAt: receipt.queryStartedAt,
       queryCompletedAt: receipt.queryCompletedAt, queryCompletedTicks: receipt.queryCompletedTicks,
       ready, nativeReady: (report.nativeReadyReceipts || []).filter((value) =>
         value.pid === helper.pid && value.role === helper.role) });
+    assert.ok(job.processCreatedAt <= helper.startedAt, `Native birth/Node original helper start comparison failed: ${chronology}`);
     assert.ok(job.liveCheckedAt <= receipt.queryStartedAt, `Native self-query predates completed Job/live proof: ${chronology}`);
     assert.ok(finiteTime(helper.startedAt) <= receipt.queryCompletedAt);
     assert.ok(receipt.queryCompletedAt <= finiteTime(ready.at), `Native self-query completed after observed readiness: ${chronology}`);

@@ -17,6 +17,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 public static class OverlayDesktopAttestor {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetThreadDesktop(uint thread);
@@ -33,7 +34,8 @@ public static class OverlayDesktopAttestor {
                 Process.GetCurrentProcess().Id + "/" + GetCurrentThreadId() + " error " + Marshal.GetLastWin32Error());
         return value.ToString();
     }
-    static string expected, output, role;
+    static string expected, output, role, spawnRequest;
+    static int requestSequence;
     static uint initialThread;
     static int generation, readySequence;
     static long readyWriteStartedAt, readyWriteStartedTicks;
@@ -59,8 +61,12 @@ public static class OverlayDesktopAttestor {
                 { "queryCompletedTicks", completedTicks.ToString() } };
         }
     }
-    public static void Configure(string desktop, string file, string kind, uint thread, int sequence) {
+    public static void Configure(string desktop, string file, string kind, uint thread, int sequence,
+        string request, int requestNumber) {
+        if (requestNumber <= 0 || !Regex.IsMatch(request, "^[1-9][0-9]*-" + requestNumber + "-" + kind + "-" + sequence + "$"))
+            throw new InvalidOperationException("Native spawn request identity unavailable.");
         expected = desktop; output = file; role = kind; initialThread = thread; generation = sequence;
+        spawnRequest = request; requestSequence = requestNumber;
     }
     // Called inside the generated sampler, or immediately before the delivery protocol on its execution thread.
     public static void ConfirmExecution() {
@@ -72,6 +78,7 @@ public static class OverlayDesktopAttestor {
         string json = "{\"pid\":" + sample["pid"] + ",\"thread\":" + sample["thread"] +
             ",\"executionThread\":" + GetCurrentThreadId() + ",\"role\":\"" + role +
             "\",\"generation\":" + generation +
+            ",\"requestId\":\"" + spawnRequest + "\",\"requestSequence\":" + requestSequence +
             ",\"creationFileTime\":\"" + sample["creationFileTime"] +
             "\",\"station\":\"WinSta0\",\"threadDesktop\":\"" + expected + "\",\"inputDesktop\":\"" + expected +
             "\",\"coverage\":\"self-execution-thread-not-all-process-threads\",\"selfQueryComplete\":true," +
@@ -100,6 +107,7 @@ public static class OverlayDesktopAttestor {
             string json = "{\"pid\":" + process.Id + ",\"creationFileTime\":\"" +
                 process.StartTime.ToUniversalTime().ToFileTimeUtc() + "\",\"role\":\"" + role +
                 "\",\"generation\":" + generation + ",\"executionThread\":" + thread +
+                ",\"requestId\":\"" + spawnRequest + "\",\"requestSequence\":" + requestSequence +
                 ",\"readySequence\":" + readySequence + ",\"messageBase64\":\"" +
                 Convert.ToBase64String(Encoding.UTF8.GetBytes(message)) + "\",\"writeApi\":\"Console.WriteLine\"" +
                 ",\"writeComplete\":true,\"writeStartedAt\":" + readyWriteStartedAt + ",\"writeCompletedAt\":" + completedAt +
@@ -130,4 +138,5 @@ if ($job.pid -ne $PID -or $job.creationFileTime -ne $sample.creationFileTime -or
     $job.liveCheckedAt -lt $job.snapshotCompletedAt) {
     throw "External native process generation/Job proof mismatch for PID $PID."
 }
-[OverlayDesktopAttestor]::Configure($DesktopName, (Join-Path $Output "desktop-$Role-$PID.json"), $Role, $sample.thread, $Generation)
+[OverlayDesktopAttestor]::Configure($DesktopName, (Join-Path $Output "desktop-$Role-$PID.json"), $Role, $sample.thread, $Generation,
+    $env:VI_CI_NATIVE_SPAWN_REQUEST, [int]$env:VI_CI_NATIVE_REQUEST_SEQUENCE)
