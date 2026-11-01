@@ -8,7 +8,7 @@ const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
 const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority,
-  armOwnedEarlyInjection, helperCheckpointQueue } = require('./overlay-ci-desktop.cjs');
+  armOwnedEarlyInjection, helperCheckpointQueue, selfReceiptStem } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
     !process.env.VI_PROVIDER_DIR || !process.argv.includes('--ci-mode=overlay-recovery')) {
@@ -395,8 +395,9 @@ async function run() {
             const ackPromise = (async () => {
               while (true) {
                 try {
-                  const self = await consumeCommitted(directory, `desktop-${role}-${child.pid}`, request, report);
-                  const ready = await consumeCommitted(directory, `desktop-ready-${role}-${child.pid}-${event.readySequence}`, request, report);
+                  const self = await consumeCommitted(directory, selfReceiptStem(request, child.pid), request, report);
+                  const ready = await consumeCommitted(directory,
+                    `desktop-ready-${role}-${child.pid}-${request.requestNonce}-${event.readySequence}`, request, report);
                   const acknowledged = nodeEvent(report, 'helper-ready-ack', { requestId, readySequence: event.readySequence });
                   assert.ok(BigInt(acknowledged.ticks) < deadlineTicks, 'Completed READY sidecar ACK missed the original deadline.');
                   const ack = { self, ready, acknowledged, readySequence: event.readySequence };

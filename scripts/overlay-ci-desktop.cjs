@@ -16,6 +16,11 @@ function nodeEvent(report, kind, extra = {}) {
   report.nodeEvents.push(event);
   return event;
 }
+function selfReceiptStem(request, pid) {
+  assert.ok(Number.isInteger(pid) && pid > 0, 'Immutable native receipt PID is missing.');
+  assert.match(request.requestNonce, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+  return `desktop-${request.role}-${pid}-${request.requestNonce}`;
+}
 function createRequest(report, role, generation, caseId) {
   report.causalRequests ||= [];
   const sequence = report.causalRequests.length + 1;
@@ -317,6 +322,9 @@ function assertSpawnDiagnostics(helper, owner) {
   for (const ready of helper.events.filter(({ type }) => type === 'ready'))
     assert.ok(ticks(helper.spawnObservedTicks) <= ticks(ready.receivedTicks));
 }
+function assertRootReport(report) {
+  if (report.status === 'failed') throw new Error(`Raw overlay root failed: ${report.error}`);
+}
 function assertWrapperOutcome(desktop, expectedErrors = []) {
   assert.ok(Array.isArray(desktop.errors), 'Owned desktop wrapper lacks its raw errors.');
   assert.deepEqual(desktop.errors, expectedErrors,
@@ -470,6 +478,7 @@ function assertDesktopChain(report, desktop) {
     }
   }
   const metrics = report.electronProcesses;
+  assert.ok(Array.isArray(metrics), 'Required Electron process inventory is missing.');
   assert.ok(metrics.some(({ pid, type }) => pid === desktop.ownedPid && type === 'Browser'));
   assert.ok(metrics.some(({ type }) => type === 'GPU'));
   assert.ok(metrics.filter(({ type }) => type === 'Tab').length >= 2);
@@ -548,6 +557,9 @@ function assertDesktopChain(report, desktop) {
     assert.ok(job.processCreatedAt <= receipt.queryStartedAt, 'Native-only birth interval invalid.');
     assert.equal(helper.readyAcks.length, helper.events.filter(({ type }) => type === 'ready').length);
     for (const ack of helper.readyAcks) {
+      assert.equal(ack.self.commit.fileName, `${selfReceiptStem(request, helper.pid)}.json`);
+      assert.equal(ack.ready.commit.fileName,
+        `desktop-ready-${helper.role}-${helper.pid}-${request.requestNonce}-${ack.readySequence}.json`);
       assertCommitted(ack.self, request, report, job); assertCommitted(ack.ready, request, report, job);
       assert.deepEqual(ack.self.value, receipt);
       const event = helper.events.find((value) => value.readySequence === ack.readySequence);
@@ -650,4 +662,4 @@ function assertDesktopChain(report, desktop) {
 }
 
 module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
-  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath };
+  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath, selfReceiptStem, assertRootReport };

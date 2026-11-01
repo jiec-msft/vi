@@ -62,6 +62,11 @@ public static class OverlayDesktopAttestor {
     public static string Json(Dictionary<string, object> value) {
         return new JavaScriptSerializer().Serialize(value);
     }
+    public static string SelfStem(string kind, int pid, string requestNonce) {
+        Require(pid > 0 && Regex.IsMatch(requestNonce ?? "", "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"),
+            "Immutable receipt nonce identity unavailable.");
+        return "desktop-" + kind + "-" + pid + "-" + requestNonce;
+    }
     public static string Hash(byte[] bytes) {
         using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
     }
@@ -140,7 +145,7 @@ public static class OverlayDesktopAttestor {
             self["selfLiveCheckedAt"] = liveAt; self["selfLiveCheckedTicks"] = liveTicks.ToString();
             self["selfLiveWaitState"] = state; self["selfLiveWin32Error"] = error;
             self["selfLiveApi"] = "WaitForSingleObject";
-            Publish(self, "desktop-" + role + "-" + process.Id);
+            Publish(self, SelfStem(role, process.Id, nonce));
         }
     }
     public static Dictionary<string, object> Self() { ConfirmExecution(); return new Dictionary<string, object>(self); }
@@ -175,7 +180,7 @@ public static class OverlayDesktopAttestor {
         value["writeApi"] = "Console.WriteLine"; value["writeComplete"] = true;
         value["writeStartedAt"] = readyStartedAt; value["writeCompletedAt"] = endedAt;
         value["writeStartedTicks"] = readyStartedTicks.ToString(); value["writeCompletedTicks"] = endedTicks.ToString();
-        Publish(value,"desktop-ready-" + role + "-" + Process.GetCurrentProcess().Id + "-" + readySequence);
+        Publish(value, SelfStem("ready-" + role, Process.GetCurrentProcess().Id, nonce) + "-" + readySequence);
         readyMessage = null;
     }
     public static string CommitResponse(string json) {
@@ -222,6 +227,15 @@ if ($SerializationProbe) {
     $probe = [Collections.Generic.Dictionary[string,object]]::new()
     $probe['pid'] = $PID; $probe['creationFileTime'] = $birth; $probe['jobReceipt'] = $job
     $probe['scope'] = 'serialization-only-not-job-membership'; $probe['complete'] = $true
+    $probe['firstReceiptStem'] = [OverlayDesktopAttestor]::SelfStem('os-mouse-driver', $PID, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+    $probe['secondReceiptStem'] = [OverlayDesktopAttestor]::SelfStem('os-mouse-driver', $PID, 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+    foreach ($nonceValue in @('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')) {
+        $stem = [OverlayDesktopAttestor]::SelfStem('os-mouse-driver', $PID, $nonceValue)
+        $record = [Collections.Generic.Dictionary[string,object]]::new($probe)
+        $record['requestNonce'] = $nonceValue
+        [IO.File]::WriteAllText((Join-Path $Output "$stem.tmp"), [OverlayDesktopAttestor]::Json($record), [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move((Join-Path $Output "$stem.tmp"), (Join-Path $Output "$stem.json"))
+    }
     [Console]::WriteLine([OverlayDesktopAttestor]::Json($probe))
     exit 0
 }

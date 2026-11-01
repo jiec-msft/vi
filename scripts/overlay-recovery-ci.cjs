@@ -2,7 +2,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { assertDesktopChain, assertWrapperOutcome } = require('./overlay-ci-desktop.cjs');
+const { assertDesktopChain, assertWrapperOutcome, assertRootReport } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Overlay UI checks require an isolated CI runner.');
 const timeoutProbe = process.argv.includes('--desktop-timeout-probe');
@@ -38,6 +38,7 @@ child.once('exit', async (code) => {
       assertWrapperOutcome(desktop, timeoutProbe ? ['Owned child timed out.'] : []);
       if (!desktop.rootWindowsVerified) throw new Error(`Owned root readiness failed: ${desktop.errors.join('; ')}`);
       report = JSON.parse(fs.readFileSync(path.join(output, 'report.json')));
+      assertRootReport(report);
       assert.equal(desktop.controllerPid, child.pid);
       assertDesktopChain(report, desktop);
       if (!timeoutProbe) assert.ok(report.startupRecovery, 'The normal owned-desktop run requires early-generation recovery proof.');

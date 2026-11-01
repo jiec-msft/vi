@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent,
-  assertJobReceiptPath } = require('./overlay-ci-desktop.cjs');
+  assertJobReceiptPath, selfReceiptStem, assertRootReport } = require('./overlay-ci-desktop.cjs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
@@ -26,7 +26,26 @@ test('actual PS5 Json producer preserves the committed nested receipt object sch
   assert.equal(value.jobReceipt.pid, value.pid);
   assert.equal(value.jobReceipt.sha256, createHash('sha256').update('serialization-only-not-job-proof').digest('hex'));
   assert.equal(JSON.stringify(value).includes('__type'), false);
+  assert.equal(value.firstReceiptStem, selfReceiptStem({ role: 'os-mouse-driver',
+    requestNonce: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }, value.pid));
+  assert.equal(value.secondReceiptStem, selfReceiptStem({ role: 'os-mouse-driver',
+    requestNonce: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }, value.pid));
+  assert.notEqual(value.firstReceiptStem, value.secondReceiptStem);
+  const first = await fs.readFile(path.join(directory, `${value.firstReceiptStem}.json`), 'utf8');
+  const second = await fs.readFile(path.join(directory, `${value.secondReceiptStem}.json`), 'utf8');
+  assert.deepEqual(JSON.parse(first), { ...value, requestNonce: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' });
+  assert.deepEqual(JSON.parse(second), { ...value, requestNonce: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' });
+  assert.equal(await fs.readFile(path.join(directory, `${value.firstReceiptStem}.json`), 'utf8'), first);
 });
+test('primary failed root with no metrics preserves the native cause', () => {
+  assert.throws(() => assertRootReport({ status: 'failed', error: 'native immutable file already exists' }),
+    { message: /native immutable file already exists/ });
+});
+for (const requestNonce of ['------------------------------------', 'aaaaaaaa/aaaa-aaaa-aaaa-aaaaaaaaaaaa']) {
+  test('immutable self naming rejects malformed or path-separated nonce', () => {
+    assert.throws(() => selfReceiptStem({ role: 'os-mouse-driver', requestNonce }, 7), { name: 'AssertionError' });
+  });
+}
 for (const [label, jobReceipt] of [['key/value array', [{ key: 'fileName', value: 'job-1-2.json' }]], ['missing filename', {}]]) {
   test(`production consumer rejects ${label} before filesystem lookup`, () => {
     assert.throws(() => assertJobReceiptPath({ creationFileTime: '2', jobReceipt }, { returnedPid: 1 }),
@@ -202,8 +221,8 @@ function causalFixture(report, desktop) {
     const emissionValue = { ...receipt, ...readyFields,
       ...context, requestId: req.requestId, requestNonce: req.requestNonce, requestSequence: req.requestSequence };
     report.nativeReadyReceipts[index] = emissionValue;
-    helper.readyAcks = [{ readySequence: 1, self: ack(receipt, req, job, `desktop-${helper.role}-${helper.pid}`, Number(ready.receivedTicks) + 1),
-      ready: ack(emissionValue, req, job, `desktop-ready-${helper.role}-${helper.pid}-1`, Number(ready.receivedTicks) + 2),
+    helper.readyAcks = [{ readySequence: 1, self: ack(receipt, req, job, selfReceiptStem(req, helper.pid), Number(ready.receivedTicks) + 1),
+      ready: ack(emissionValue, req, job, `desktop-ready-${helper.role}-${helper.pid}-${req.requestNonce}-1`, Number(ready.receivedTicks) + 2),
       acknowledged: event(req, 'helper-ready-ack', Number(ready.receivedTicks) + 3) }];
     if (helper.exit) {
       helper.exit.code = 0; helper.exit.signal = null;
@@ -338,7 +357,7 @@ for (const [label, value] of [['wrong domain', 'Node-process-hrtime'], ['missing
     assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError' });
   });
 }
-for (const [label, change] of [
+for (const [label, change, reason] of [
   ['unrelated root PID', (r) => { r.windowIds.owner = 99; }],
   ['missing precise window', (r, d) => { d.rootWindowObservations.pop(); }],
   ['window missing from desktop enumeration', (r, d) => { d.rootWindowObservations[0].enumeratedOnOwnedDesktop = false; }],
@@ -360,6 +379,7 @@ for (const [label, change] of [
   ['live check after self-query start', (r, d) => { d.descendantDesktopObservations[5].liveCheckedAt = 1102; }],
   ['query start used as completion', (r, d) => { delete d.descendantDesktopObservations[5].snapshotCompletedAt; }],
   ['missing GPU', (r) => { r.electronProcesses = r.electronProcesses.filter((p) => p.type !== 'GPU'); }],
+  ['missing process inventory', (r) => { delete r.electronProcesses; }, /Required Electron process inventory is missing/],
   ['metrics PID reuse', (r) => { r.electronProcesses[1].creationTime = 2000; }],
   ['role coverage overclaim', (r) => { r.electronProcesses[1].allThreadDesktop = true; }],
   ['Job falsely marked desktop verified', (r, d) => { d.descendantDesktopObservations[1].desktopVerified = true; }],
@@ -373,6 +393,7 @@ for (const [label, change] of [
   ['native spawn request mismatched', (r) => { r.nativeDesktopReceipts[0].requestId = 'other'; }],
   ['native request sequence mismatched', (r) => { r.nativeDesktopReceipts[0].requestSequence = 99; }],
   ['native READY spawn request mismatched', (r) => { r.nativeReadyReceipts[0].requestId = 'other'; }],
+  ['stale nonce self receipt name', (r) => { r.helpers[0].readyAcks[0].self.commit.fileName = 'desktop-os-mouse-driver-5.json'; }],
   ['birth clock relabeled as Node', (r, d) => { d.descendantDesktopObservations[4].processCreationClock = 'Node-Date.now'; }],
   ['missing causal context', (r) => { delete r.causalContext.sourceHead; }],
   ['reused request nonce', (r) => { r.causalRequests[1].requestNonce = r.causalRequests[0].requestNonce; }],
@@ -439,7 +460,7 @@ for (const [label, change] of [
   test(`rejects ${label}`, () => {
     const { report, desktop } = fixture();
     change(report, desktop);
-    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError' });
+    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError', ...(reason ? { message: reason } : {}) });
   });
 }
 function startupFixture() {
