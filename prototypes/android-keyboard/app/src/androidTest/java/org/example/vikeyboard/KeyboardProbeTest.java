@@ -4,6 +4,8 @@ import static org.junit.Assert.*;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Process;
+import android.os.SystemClock;
+import android.provider.Settings;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
 import androidx.test.uiautomator.UiDevice;
@@ -101,9 +103,26 @@ public final class KeyboardProbeTest {
         click("Switch keyboard");
         assertTrue(device.wait(Until.gone(By.text("Stop / final")), 5_000));
         assertReleased();
-        device.executeShellCommand("ime set " + packageName + "/org.example.vikeyboard.VoiceIme");
-        clickResource("owned_other");
-        waitState("CANCELLED:");
+        String ime = packageName + "/org.example.vikeyboard.VoiceIme";
+        long restoreDeadline = SystemClock.uptimeMillis() + 5_000;
+        String selection = device.executeShellCommand("ime set " + ime);
+        assertTrue("IME selection command did not confirm target: " + selection,
+                selection.contains("Input method " + ime + " selected for user #0"));
+        assertEquals(ime, Settings.Secure.getString(context.getContentResolver(),
+                Settings.Secure.DEFAULT_INPUT_METHOD));
+        long remaining = restoreDeadline - SystemClock.uptimeMillis();
+        assertTrue("IME restore exceeded the existing deadline", remaining > 0);
+        UiObject2 controls = device.wait(Until.findObject(By.pkg(packageName).text("Switch keyboard")),
+                remaining);
+        assertNotNull("Restored prototype IME view is not visible", controls);
+        assertEquals(ime, Settings.Secure.getString(context.getContentResolver(),
+                Settings.Secure.DEFAULT_INPUT_METHOD));
+        UiObject2 restoredEditor = device.findObject(By.res(packageName, "owned_other"));
+        assertNotNull("Missing editor: owned_other", restoredEditor);
+        restoredEditor.click();
+        remaining = restoreDeadline - SystemClock.uptimeMillis();
+        assertTrue("IME restore exceeded the existing deadline", remaining > 0);
+        waitState("CANCELLED:", remaining);
         assertEquals(1, OwnedEditorActivity.COMMITS.get());
         assertEquals(0, OwnedEditorActivity.ACTIONS.get());
 
@@ -147,8 +166,11 @@ public final class KeyboardProbeTest {
         return value.get();
     }
     private void waitState(String prefix) {
+        waitState(prefix, 5_000);
+    }
+    private void waitState(String prefix, long timeoutMilliseconds) {
         assertTrue("Missing state: " + prefix,
-                device.wait(Until.hasObject(By.textStartsWith(prefix)), 5_000));
+                device.wait(Until.hasObject(By.textStartsWith(prefix)), timeoutMilliseconds));
     }
     private void screenshot(String name) {
         assertTrue(device.takeScreenshot(new File(evidence, name)));
