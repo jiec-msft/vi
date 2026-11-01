@@ -33,7 +33,12 @@ jobs:
           node-version: '24'
           cache: npm
       - name: Install bounded fixture dependencies
-        run: npm ci --no-audit --no-fund
+        shell: pwsh
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Caret fixture dependencies failed.' }
+          node -e "console.log(require('electron'))"
+          if ($LASTEXITCODE -ne 0) { throw 'Electron fixture binary preparation failed.' }
       - name: Prepare CI-owned provider
         run: node scripts/prepare-provider.cjs
       - name: Pure caret lifecycle and lease
