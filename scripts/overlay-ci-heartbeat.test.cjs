@@ -12,6 +12,34 @@ function assertProtocolCompletion(report) {
   assert.equal(report.producerFailure?.childExitCode, 1, 'The actual intended producer failure must retain exit 1.');
   assert.equal(report.producerFailure.stoppedAfterPublishedFrames, 1);
 }
+async function joinOwnedChildClose(child, closed, launch, saveEvent) {
+  if (child.exitCode === null && child.signalCode === null) {
+    launch.finallyKillRequestedAt = Date.now();
+    saveEvent();
+    launch.finallyKillReturned = child.kill();
+    saveEvent();
+  }
+  await closed;
+}
+test('an exited rejection preserves its error and waits for real close after owned kill', async () => {
+  const original = new Error('injected launcher persistence failure');
+  let close, finished = false, kills = 0;
+  const closed = new Promise((resolve) => { close = resolve; });
+  const child = { exitCode: null, signalCode: null, kill: () => { kills++; return true; } };
+  const launch = {};
+  const result = (async () => {
+    try { await Promise.reject(original); }
+    finally { await joinOwnedChildClose(child, closed, launch, () => {}); }
+  })();
+  result.then(() => { finished = true; }, () => { finished = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(kills, 1);
+  assert.equal(launch.finallyKillReturned, true);
+  assert.equal(finished, false, 'The rejected exited promise cannot complete cleanup before close.');
+  close();
+  await assert.rejects(result, (error) => error === original);
+  assert.equal(finished, true);
+});
 for (const [label, change] of [
   ['missing count', (value) => { delete value.completedOverlaps; }],
   ['partial overlaps', (value) => { value.completedOverlaps = 63; value.overlaps.pop(); }],
@@ -148,12 +176,6 @@ test('real Default fixture publishes new immutable frames while old reader handl
       await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
     } finally {
       clearTimeout(timer);
-      if (child.exitCode === null && child.signalCode === null) {
-        launch.finallyKillRequestedAt = Date.now();
-        saveEvent();
-        launch.finallyKillReturned = child.kill();
-        saveEvent();
-      }
-      await exited;
+      await joinOwnedChildClose(child, closed, launch, saveEvent);
     }
   });

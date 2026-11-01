@@ -60,13 +60,15 @@ if ($Mode -eq 'prepare') {
     [IO.Directory]::CreateDirectory($Directory) | Out-Null
     $electronStartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $electronStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
-    $electron = & node -p "JSON.stringify({path:require('electron'),version:require('electron/package.json').version})"
+    $resolutionFile = Join-Path $Preparation 'electron-resolution.json'
+    $resolutionOutput = & node -e "require('node:fs').writeFileSync(process.argv[1],JSON.stringify({path:require('electron'),version:require('electron/package.json').version}),{flag:'wx'})" -- $resolutionFile
     if ($LASTEXITCODE -ne 0) { throw 'Existing Electron resolution failed during heartbeat preparation.' }
-    $electron = $electron | ConvertFrom-Json
+    $electron = Get-Content -LiteralPath $resolutionFile -Raw | ConvertFrom-Json
     $electronCompletedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $phases.Add(@{ phase = 'resolve-electron'; startedAt = $electronStartedAt;
         completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();
         startedTicks = "$electronStartedTicks"; completedTicks = "$electronCompletedTicks";
+        stdoutLength = ($resolutionOutput -join "`n").Length;
         elapsedSeconds = ($electronCompletedTicks - $electronStartedTicks) / [double][Diagnostics.Stopwatch]::Frequency })
     $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     $compileStartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
