@@ -53,6 +53,9 @@ jobs:
           scripts/windows-ci-desktop-probe.test.cjs test/framework/caret-bootstrap.test.cjs
           test/framework/caret-fixture-files.test.cjs
           test/framework/caret-until.test.cjs
+      - name: Live append, rotation and bounded partial diagnostic snapshot
+        shell: pwsh
+        run: .\scripts\caret-diagnostic-reader.ps1
   native:
     name: Caret App integration (Windows x64)
     needs: contract

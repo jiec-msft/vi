@@ -129,6 +129,68 @@ public static partial class ViCiDesktop {
             CollectOwnAppDiagnostics);
     }
 
+    sealed class DiagnosticSnapshot {
+        public long length;
+        public bool partialTail;
+        public string[] lines;
+    }
+    static DiagnosticSnapshot ReadDiagnosticSnapshot(string file, System.Threading.CancellationToken cancel,
+        Action snapshotCaptured = null) {
+        using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+            long initial = stream.Length;
+            Require(initial <= 524288, "Diagnostic snapshot exceeds its bound.");
+            snapshotCaptured?.Invoke();
+            var bytes = new byte[(int)initial];
+            int read = 0;
+            while (read < bytes.Length && !cancel.IsCancellationRequested) {
+                int count = stream.Read(bytes, read, bytes.Length - read);
+                if (count == 0) break;
+                read += count;
+            }
+            int complete = read;
+            while (complete > 0 && bytes[complete - 1] != 10) complete--;
+            var lines = new List<string>();
+            using (var memory = new MemoryStream(bytes, 0, complete))
+            using (var reader = new StreamReader(memory, new System.Text.UTF8Encoding(false, true), true)) {
+                string line;
+                while (!cancel.IsCancellationRequested && (line = reader.ReadLine()) != null) lines.Add(line);
+            }
+            return new DiagnosticSnapshot { length = initial, partialTail = read > complete, lines = lines.ToArray() };
+        }
+    }
+    public static object VerifyOwnedDiagnosticSnapshotReader(string folder) {
+        Guard();
+        string root = Path.GetFullPath(Environment.GetEnvironmentVariable("GITHUB_WORKSPACE"));
+        folder = Path.GetFullPath(folder);
+        PlainOwnedPath(root, folder);
+        Require(!Directory.Exists(folder), "Reader fixture must be fresh.");
+        Directory.CreateDirectory(folder);
+        string file = Path.Combine(folder, "live.jsonl"), rotated = Path.Combine(folder, "rotated.jsonl");
+        bool passed = false;
+        try {
+            using (var writer = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) {
+                var bytes = new byte[] { 123, 125, 10, 195 };
+                writer.Write(bytes, 0, bytes.Length); writer.Flush();
+                var snapshot = ReadDiagnosticSnapshot(file, System.Threading.CancellationToken.None, () => {
+                    File.Move(file, rotated);
+                    writer.WriteByte(169); writer.WriteByte(10); writer.Flush();
+                    File.WriteAllText(file, "{\"new\":true}\n");
+                });
+                Require(snapshot.length == 4 && snapshot.partialTail && snapshot.lines.Length == 1 && snapshot.lines[0] == "{}",
+                    "Live snapshot followed appends/rotation or exposed a partial UTF8 tail.");
+                var next = ReadDiagnosticSnapshot(file, System.Threading.CancellationToken.None);
+                Require(next.lines.Length == 1 && next.lines[0] == "{\"new\":true}", "Replacement file snapshot failed.");
+                passed = true;
+            }
+        } finally {
+            if (File.Exists(file)) File.Delete(file);
+            if (File.Exists(rotated)) File.Delete(rotated);
+            Directory.Delete(folder, false);
+        }
+        return new { passed, liveWriterSharedRead = true, rotatedWithoutFollow = true, initialLengthBounded = true,
+            partialUtf8TailExcluded = true, ownedFixtureRemoved = !Directory.Exists(folder) };
+    }
+
     static object CollectOwnAppDiagnostics(string root, string directory, uint pid) {
         root = Path.GetFullPath(root); directory = Path.GetFullPath(directory);
         PlainOwnedPath(root, directory);
@@ -156,18 +218,22 @@ public static partial class ViCiDesktop {
                     if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Length > 524288) {
                         files.Add(new { role, presence = "unavailable", category = "bounded-file-required" }); continue;
                     }
-                    int accepted = 0;
-                    foreach (string line in File.ReadLines(file)) {
+                    int accepted = 0, invalidLines = 0;
+                    var snapshot = ReadDiagnosticSnapshot(file, cancel.Token);
+                    foreach (string line in snapshot.lines) {
                         if (cancel.IsCancellationRequested || records.Count >= 2048) break;
                         if (line.Length > 8192) continue;
-                        using (var json = System.Text.Json.JsonDocument.Parse(line)) {
+                        try { using (var json = System.Text.Json.JsonDocument.Parse(line)) {
                             var row = json.RootElement;
+                            if (row.ValueKind != System.Text.Json.JsonValueKind.Object) { invalidLines++; continue; }
                             string ownerKey = role == "main" ? "pid" : "parentPid";
-                            if (!row.TryGetProperty(ownerKey, out var owner) || !owner.TryGetUInt32(out uint recordOwner) || recordOwner != pid) continue;
+                            if (!row.TryGetProperty(ownerKey, out var owner) || owner.ValueKind != System.Text.Json.JsonValueKind.Number ||
+                                !owner.TryGetUInt32(out uint recordOwner) || recordOwner != pid) continue;
                             var safe = new Dictionary<string, object> { ["role"] = role };
                             foreach (string key in new[] { "pid", "parentPid", "helperPid", "seq", "generation", "monoMs", "nativeMonoMs",
                                 "spanMs", "elapsedMs", "win32Error", "errorNumber", "exitCode", "hostGapMs" }) {
-                                if (row.TryGetProperty(key, out var value) && value.TryGetInt64(out long number) &&
+                                if (row.TryGetProperty(key, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                                    value.TryGetInt64(out long number) &&
                                     number >= -2147483648 && number <= 9007199254740991) safe[key] = number;
                             }
                             foreach (string key in new[] { "run", "birthFileTime", "frameworkRevision", "assemblyRevision" }) {
@@ -180,18 +246,25 @@ public static partial class ViCiDesktop {
                                 if (row.TryGetProperty(key, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String &&
                                     stageNames.Contains(value.GetString())) safe[key] = value.GetString();
                             }
-                            if (row.TryGetProperty("state", out var state) && states.Contains(state.GetString())) safe["state"] = state.GetString();
-                            if (row.TryGetProperty("event", out var evt) && new[] { "lifecycle", "app-start", "startup-stage", "native" }.Contains(evt.GetString()))
+                            if (row.TryGetProperty("state", out var state) && state.ValueKind == System.Text.Json.JsonValueKind.String && states.Contains(state.GetString())) safe["state"] = state.GetString();
+                            if (row.TryGetProperty("event", out var evt) && evt.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                new[] { "lifecycle", "app-start", "startup-stage", "native" }.Contains(evt.GetString()))
                                 safe["event"] = evt.GetString();
-                            if (row.TryGetProperty("clock", out var clock) && new[] { "main-performance", "helper-stopwatch" }.Contains(clock.GetString()))
+                            if (row.TryGetProperty("clock", out var clock) && clock.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                new[] { "main-performance", "helper-stopwatch" }.Contains(clock.GetString()))
                                 safe["clock"] = clock.GetString();
-                            if (row.TryGetProperty("time", out var time) && DateTimeOffset.TryParse(time.GetString(), out var parsed))
+                            if (row.TryGetProperty("time", out var time) && time.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                DateTimeOffset.TryParse(time.GetString(), out var parsed))
                                 safe["time"] = parsed.ToUniversalTime().ToString("o");
                             records.Add(safe); accepted++;
-                        }
+                        } } catch (System.Text.Json.JsonException) { invalidLines++; }
                     }
-                    files.Add(new { role, presence = "present", bytes = info.Length, accepted });
-                } catch { files.Add(new { role, presence = "read-error", category = "owned-diagnostic-read-failed" }); }
+                    files.Add(new { role, presence = "present", bytes = snapshot.length, accepted, invalidLines,
+                        partialTail = snapshot.partialTail, category = snapshot.partialTail ? "partial-tail-excluded" : "complete-snapshot" });
+                } catch (Exception error) {
+                    files.Add(new { role, presence = "read-error", category = error is IOException ? "owned-io-read-failed" : "owned-diagnostic-read-failed",
+                        win32Error = error is IOException || error is UnauthorizedAccessException ? error.HResult & 0xffff : 0 });
+                }
             }
             var packet = new { rootPid = pid, head = Environment.GetEnvironmentVariable("VI_PROBE_HEAD"),
                 runId = Environment.GetEnvironmentVariable("GITHUB_RUN_ID"), scope = "allowlisted-owned-app-diagnostics-only",
