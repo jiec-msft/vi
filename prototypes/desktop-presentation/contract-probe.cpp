@@ -4,6 +4,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ole2.h>
 #include <shellapi.h>
 #include <UIAutomation.h>
 
@@ -61,12 +62,11 @@ int main() {
     const bool trusted = AXIsProcessTrustedWithOptions(options);
     CFRelease(options);
     // Compile the provider-dependent attributes; never query another application's fields.
-    const char* attributes[] = {
+    const CFStringRef attributes[] = {
         kAXFocusedUIElementAttribute, kAXSelectedTextRangeAttribute,
         kAXBoundsForRangeParameterizedAttribute, kAXSubroleAttribute, kAXSecureTextFieldSubrole,
         kAXFocusedUIElementChangedNotification, kAXSelectedTextChangedNotification,
     };
-    if (attributes[0] == nullptr) return 1;
     std::printf("{\"schemaVersion\":1,\"evidenceKind\":\"native-contract-metadata\","
         "\"platform\":\"macos\",\"nativeUiExercised\":false,"
         "\"accessibilityTrusted\":%s,\"permissionPrompted\":false,"
