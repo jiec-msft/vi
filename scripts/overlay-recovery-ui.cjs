@@ -50,6 +50,18 @@ let ownedDownReceipt;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
 report.windowEvents = [];
+function helperCheckpoint(helper, phase) {
+  if (!expectedDesktop) return;
+  try {
+    writeFileSync(path.join(directory, `helper-state-${helper.role}-${helper.pid}.json`), JSON.stringify({
+      phase, at: Date.now(), ticks: process.hrtime.bigint().toString(), clock: 'Node-process-hrtime',
+      pid: helper.pid, role: helper.role, generation: helper.generation, requestId: helper.requestId,
+      requestNonce: helper.requestNonce, stderrBytes: helper.stderrBytes, stderrTail: helper.stderrTail || '',
+      readyCount: helper.events.filter(({ type }) => type === 'ready').length,
+      completedAcks: helper.readyAcks.length, proofError: helper.proofError, exit: helper.exit, close: helper.close,
+    }, null, 2));
+  } catch (error) { helper.proofError = `CI helper checkpoint failed: ${error.message}`; console.error(error); }
+}
 async function until(action, label, limit = 15000) {
   const deadline = Date.now() + limit;
   do {
@@ -347,10 +359,12 @@ async function run() {
         startedAtMeaning: 'observer-after-synchronous-spawn-return-before-spawn-event' };
       report.helpers.push(helper);
       pendingHelperAcks.set(helper, []);
+      helperCheckpoint(helper, 'returned-pid');
       child.once('spawn', () => {
         helper.spawnObservedAt = Date.now();
         helper.spawnObservedTicks = process.hrtime.bigint().toString();
         request.spawn = nodeEvent(report, 'process-spawn', { requestId, pid: child.pid });
+        helperCheckpoint(helper, 'process-spawn');
       });
       const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
       let receiveOrder = 0, readySequence = 0;
@@ -364,6 +378,7 @@ async function run() {
             receivedTicks: process.hrtime.bigint().toString(), monotonicClock: 'Node-process-hrtime-not-native-stopwatch',
             ...(eventType === 'ready' ? { readySequence: ++readySequence } : {}) };
           helper.events.push(event);
+          helperCheckpoint(helper, 'native-line');
           if (eventType === 'ready' && expectedDesktop) {
             const deadlineTicks = BigInt(causal.ticks) + 300000000n;
             const ackPromise = (async () => {
@@ -375,6 +390,7 @@ async function run() {
                   assert.ok(BigInt(acknowledged.ticks) < deadlineTicks, 'Completed READY sidecar ACK missed the original deadline.');
                   const ack = { self, ready, acknowledged, readySequence: event.readySequence };
                   helper.readyAcks.push(ack);
+                  helperCheckpoint(helper, 'committed-sidecar-ack');
                   return ack;
                 } catch (error) {
                   if (error.code !== 'ENOENT' || process.hrtime.bigint() >= deadlineTicks) throw error;
@@ -383,7 +399,7 @@ async function run() {
               }
             })();
             pendingHelperAcks.get(helper).push(ackPromise);
-            ackPromise.catch((error) => { helper.proofError = error.message; });
+            ackPromise.catch((error) => { helper.proofError = error.message; helperCheckpoint(helper, 'ack-failed'); });
           }
         }
         if (line.includes('"ok":false')) helper.events.push({ type: 'request-failed', at: Date.now(), stage });
@@ -399,17 +415,24 @@ async function run() {
                 helper.proofError = 'Original 300ms injection lacked a completed matching pre-injection receipt ACK.';
               }
               helper.ownedStartupFailureInjected = child.kill();
+              helperCheckpoint(helper, 'owned-injection');
             }, 300);
           } else if (helpers.length === 2) startupRecoveryCompleted = true;
         }
       });
-      child.stderr.on('data', (bytes) => { helper.stderrBytes += bytes.length; });
+      child.stderr.on('data', (bytes) => {
+        helper.stderrBytes += bytes.length;
+        helper.stderrTail = ((helper.stderrTail || '') + bytes.toString('utf8')).slice(-8192);
+        helperCheckpoint(helper, 'native-stderr');
+      });
       child.once('error', () => { helper.errorAt = Date.now(); });
       child.once('exit', (code, signal) => {
         helper.exit = { at: Date.now(), code, signal, stage, causal: nodeEvent(report, 'process-exit', { requestId, code, signal }) };
+        helperCheckpoint(helper, 'actual-exit');
       });
       child.once('close', (code, signal) => {
         helper.closedAt = Date.now(); helper.close = nodeEvent(report, 'process-close', { requestId, code, signal }); lines.close();
+        helperCheckpoint(helper, 'actual-close');
       });
     }
     return child;
@@ -514,7 +537,6 @@ async function run() {
       '-Window', report.windowIds.overlay, '-Owner', String(process.pid), '-Mode', 'status',
       '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt, '-ProofOutput', directory], directory);
     report.timeoutWitness = witness;
-    report.osInputs.push(witness);
     report.osInputs.push({ mode: 'status', ...report.timeoutWitness, processExitObservedAt: Date.now() });
     assert.equal(report.timeoutWitness.leftHeldBefore, false);
     assert.equal(report.timeoutWitness.leftHeldAfter, false);

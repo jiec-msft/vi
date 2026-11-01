@@ -28,6 +28,12 @@ test('rejects a missing wrapper outcome instead of inventing success', () => {
 const birth = (pid) => `13300000000000000${pid}`;
 const context = { sourceHead: 'a'.repeat(40), runId: '1', attempt: '1', caseId: 'vi-ci-test', callerPid: 1 };
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+function reencodeAck(ack) {
+  const bytes = Buffer.from(JSON.stringify(ack.value));
+  ack.sha256 = hash(bytes); ack.bytesBase64 = bytes.toString('base64'); ack.commit.sha256 = ack.sha256;
+  const commit = Buffer.from(JSON.stringify(ack.commit));
+  ack.commitSHA256 = hash(commit); ack.commitBytesBase64 = commit.toString('base64');
+}
 const unknownThread = { pid: 1, tid: 101, api: 'GetThreadDesktop', rawHandle: '0',
   win32Error: 5, status: 'unobserved-not-desktop-proof', threadDesktop: null };
 function member(pid) {
@@ -160,7 +166,7 @@ function causalFixture(report, desktop) {
     const failed = report.helpers[0];
     failed.startupFailureDelayMs = 300;
     report.startupRecovery.injection = event(failed.causalRequest, 'owned-injection-requested', 23000);
-    report.rootReadyEvent = { kind: 'root-ready', ticks: '31000', clock: 'Node-process-hrtime' };
+    report.rootReadyEvent = { ...context, kind: 'root-ready', ticks: '31000', clock: 'Node-process-hrtime' };
     report.nodeEvents.push(report.rootReadyEvent);
   }
   report.nodeEvents.sort((a, b) => Number(BigInt(a.ticks) - BigInt(b.ticks)));
@@ -239,6 +245,28 @@ test('kernel birth versus Node observer inversion remains diagnostic with real i
   assertDesktopChain(report, desktop);
   assert.equal(report.foreignChronologyDiagnostics[0].bornBeforeNodeStart, false);
 });
+test('a no-held status witness references exactly one canonical causal driver receipt', () => {
+  const { report, desktop } = fixture();
+  report.timeoutWitness = report.osInputs[0];
+  assertDesktopChain(report, desktop);
+});
+test('a repeated timeout status receipt is not a second actual causal request', () => {
+  const { report, desktop } = fixture();
+  report.timeoutWitness = report.osInputs[0];
+  report.osInputs.push({ ...report.timeoutWitness });
+  assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError', message: /Unjoined causal request/ });
+});
+for (const [label, value] of [['wrong domain', 'Node-process-hrtime'], ['missing frequency', undefined], ['zero frequency', '0']]) {
+  test(`driver ${label} with internally valid content hashes is rejected semantically`, () => {
+    const { report, desktop } = fixture();
+    const receipt = report.osInputs[0], ack = receipt.committedAck;
+    const field = label === 'wrong domain' ? 'monotonicClock' : 'monotonicFrequency';
+    if (value === undefined) { delete receipt[field]; delete ack.value[field]; }
+    else { receipt[field] = value; ack.value[field] = value; }
+    reencodeAck(ack);
+    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError' });
+  });
+}
 for (const [label, change] of [
   ['unrelated root PID', (r) => { r.windowIds.owner = 99; }],
   ['missing precise window', (r, d) => { d.rootWindowObservations.pop(); }],
@@ -379,6 +407,10 @@ for (const [label, change] of [
   ['injection before actual committed ACK', (r) => { r.startupRecovery.injection.ticks = '20000'; }],
   ['missing pre-injection completed ACK', (r) => { r.helpers[0].readyAcks = []; }],
   ['replacement before actual close', (r) => { r.helpers[0].close.ticks = '26000'; }],
+  ['detached root ready event', (r) => { r.rootReadyEvent = { ...r.rootReadyEvent, ticks: '999999' }; }],
+  ['wrong root ready clock domain', (r) => { r.rootReadyEvent.clock = 'native-process-Stopwatch'; }],
+  ['wrong root ready context', (r) => { r.rootReadyEvent.caseId = 'other'; }],
+  ['wrong root ready event ID', (r) => { r.rootReadyEvent.eventId = 999; }],
 ]) {
   test(`rejects startup proof with ${label}`, () => {
     const { report, desktop } = startupFixture();

@@ -11,6 +11,11 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     throw 'Desktop attestation requires the current isolated owned CI desktop.'
 }
 if ($Role -ne 'os-mouse-driver' -and $Generation -gt 4) { throw 'Native helper lifetime generation cap exceeded.' }
+[IO.File]::WriteAllText((Join-Path $Output "native-init-$Role-$PID.json"), (@{
+    phase = 'attestor-compile-start'; pid = $PID; role = $Role; generation = $Generation;
+    requestId = $env:VI_CI_NATIVE_SPAWN_REQUEST; requestNonce = $env:VI_CI_NATIVE_REQUEST_NONCE;
+    at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+} | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 Add-Type -ReferencedAssemblies 'System', 'System.Runtime.Serialization', 'System.Core' -TypeDefinition @'
 using System;
 using System.Text;
@@ -223,3 +228,8 @@ public static class OverlayDesktopAttestor {
 }
 '@
 [OverlayDesktopAttestor]::Configure($DesktopName, $Output, $JobOutput, $Role, $Generation)
+[IO.File]::WriteAllText((Join-Path $Output "native-consumed-$Role-$PID.json"), (@{
+    phase = 'committed-job-consumed'; pid = $PID; role = $Role; generation = $Generation;
+    requestId = $env:VI_CI_NATIVE_SPAWN_REQUEST; requestNonce = $env:VI_CI_NATIVE_REQUEST_NONCE;
+    at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+} | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))

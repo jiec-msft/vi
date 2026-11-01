@@ -108,6 +108,8 @@ function assertCoverage(value, coverage) {
   assert.notEqual(value.desktopVerified, true, 'Job membership alone is not desktop proof.');
 }
 function assertSelfThread(receipt, desktop) {
+  assert.equal(receipt.monotonicClock, 'native-process-Stopwatch', 'Native receipt clock domain mismatch.');
+  assert.ok(ticks(receipt.monotonicFrequency) > 0n, 'Native frequency must be positive.');
   assert.equal(receipt.selfQueryComplete, true);
   assert.ok(Number.isInteger(receipt.thread ?? receipt.driverThread) && (receipt.thread ?? receipt.driverThread) > 0);
   assert.equal(receipt.executionThread, receipt.thread ?? receipt.driverThread);
@@ -128,6 +130,7 @@ function assertSelfThread(receipt, desktop) {
     ticks(receipt.queryCompletedTicks) <= ticks(receipt.selfLiveCheckedTicks));
 }
 function ticks(value) {
+  assert.equal(typeof value, 'string', 'A native/Node clock sample must be an explicit string.');
   assert.match(value, /^[1-9][0-9]*$/, 'A native readiness diagnostic lacks its monotonic sample.');
   return BigInt(value);
 }
@@ -218,6 +221,9 @@ function assertCommitted(ack, request, report, observation) {
   assert.equal(value.creationFileTime, observation.creationFileTime);
   assert.equal(commit.executionThread, value.executionThread);
   assert.equal(commit.monotonicClock, 'native-process-Stopwatch');
+  assert.equal(value.monotonicClock, 'native-process-Stopwatch', 'Committed value clock domain mismatch.');
+  assert.equal(commit.monotonicClock, value.monotonicClock);
+  assert.ok(ticks(value.monotonicFrequency) > 0n, 'Committed native frequency must be positive.');
   assert.equal(commit.monotonicFrequency, value.monotonicFrequency);
   const job = JSON.parse(Buffer.from(ack.jobBytesBase64, 'base64'));
   assert.deepEqual(job, observation, 'Consumed immutable Job bytes differ from the independent observation.');
@@ -231,6 +237,17 @@ function assertCommitted(ack, request, report, observation) {
   if (value.writeComplete) assert.ok(ticks(value.writeCompletedTicks) <= ticks(commit.committedTicks));
   if (value.responseComplete) assert.ok(ticks(value.responseReadyTicks) <= ticks(commit.committedTicks));
   assertNodeEvent(ack.consumed, report, request);
+}
+function assertRootReadyEvent(event, report, desktop) {
+  assert.ok(event && typeof event === 'object', 'Root readiness event is missing.');
+  assert.equal(event.kind, 'root-ready');
+  assert.equal(event.clock, 'Node-process-hrtime', 'Root readiness clock domain mismatch.');
+  for (const key of ['sourceHead', 'runId', 'attempt', 'caseId', 'callerPid'])
+    assert.equal(event[key], report.causalContext[key], 'Root readiness context mismatch.');
+  assert.equal(event.callerPid, desktop.ownedPid);
+  assert.ok(Number.isInteger(event.eventId) && event.eventId > 0);
+  assert.deepEqual(report.nodeEvents[event.eventId - 1], event, 'Root readiness event is detached from the retained inventory.');
+  ticks(event.ticks);
 }
 function assertSpawnDiagnostics(helper, owner) {
   assert.equal(helper.callerPid, owner);
@@ -560,6 +577,7 @@ function assertDesktopChain(report, desktop) {
     const ack = failed.readyAcks.find(({ readySequence }) => readySequence === 1);
     assert.equal(failed.startupFailureDelayMs, 300);
     assertNodeEvent(recovery.injection, report, failed.causalRequest);
+    assertRootReadyEvent(report.rootReadyEvent, report, desktop);
     assert.ok(ticks(ack.acknowledged.ticks) < ticks(recovery.injection.ticks), 'Actual committed receipt ACK must precede injection.');
     assert.ok(ticks(recovery.injection.ticks) <= ticks(failed.exit.causal.ticks) &&
       ticks(failed.exit.causal.ticks) <= ticks(failed.close.ticks) &&

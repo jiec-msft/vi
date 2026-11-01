@@ -126,6 +126,9 @@ jobs:
             artifacts-ci/overlay-recovery/*.png
             artifacts-ci/overlay-recovery/desktop-*.json
             artifacts-ci/overlay-recovery/driver-response-*.json
+            artifacts-ci/overlay-recovery/helper-state-*.json
+            artifacts-ci/overlay-recovery/native-init-*.json
+            artifacts-ci/overlay-recovery/native-consumed-*.json
             artifacts-ci/overlay-recovery/heartbeat-reader/report.json
             artifacts-ci/overlay-recovery/heartbeat-reader/progress.json
             artifacts-ci/overlay-recovery/heartbeat-preparation-*/*.json
@@ -142,6 +145,9 @@ jobs:
             artifacts-ci/overlay-recovery/desktop-timeout/*.png
             artifacts-ci/overlay-recovery/desktop-timeout/desktop-*.json
             artifacts-ci/overlay-recovery/desktop-timeout/driver-response-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/helper-state-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/native-init-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/native-consumed-*.json
             artifacts-ci/overlay-recovery/desktop-timeout/desktop-isolation/*.json
             artifacts-ci/overlay-recovery/desktop-timeout/desktop-isolation/default/*.json
           retention-days: 3
