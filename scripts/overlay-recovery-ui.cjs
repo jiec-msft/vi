@@ -279,6 +279,7 @@ async function run() {
   let helperFile;
   let deliveryFile;
   if (process.platform === 'win32') {
+    const quote = (value) => `'${value.replace(/'/g, "''")}'`;
     const original = await fs.readFile(path.resolve('native', 'windows-overlay.ps1'), 'utf8');
     const seam = `
     static bool ReadCursor(out POINT point) {
@@ -287,10 +288,10 @@ async function run() {
     }
 `;
     assert.ok(original.includes('if (!GetCursorPos(out point))'));
-    let injected = original.replace('    POINT last;', `    POINT last;${seam}`)
+    let injected = original.replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+      .replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
-      const quote = (value) => `'${value.replace(/'/g, "''")}'`;
       const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role} -Generation $env:VI_CI_NATIVE_GENERATION`;
       injected = injected.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'\n${attest('overlay-pointer')}`);
       injected = injected.replace('return !System.IO.File.Exists(', `bool confirmed = false;
@@ -322,6 +323,7 @@ async function run() {
       await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
         .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
+        .replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
         .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
           '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))')
         .replace('@{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5',
@@ -379,7 +381,7 @@ async function run() {
       let receiveOrder = 0, readySequence = 0;
       lines.on('line', (line) => {
         receiveOrder++;
-        const type = line.match(/"type":"(ready|cancel|suspended)"/)?.[1];
+        const type = line.match(/"type":"(ready|cancel|suspended|heartbeat)"/)?.[1];
         if (type || line.includes('"ready":true')) {
           const eventType = type || 'ready';
           const causal = nodeEvent(report, 'helper-line', { requestId, type: eventType, receiveOrder });
@@ -574,9 +576,14 @@ async function run() {
     const suspended = overlay.getBounds(), helperCount = helpers.length;
     await mouse('move', { x: point.x - 35, y: point.y - 18 });
     await mouse('move', { x: point.x - 45, y: point.y - 25 });
+    await pause(10000);
     assert.equal((await status()).nativePointerState, 'suspended');
+    assert.equal(helpers.length, helperCount, 'Live suspension consumed the helper restart budget.');
+    assert.ok(report.helpers.at(-1).events.filter(({ type }) => type === 'heartbeat').length >= 8,
+      'Long cursor suspension did not produce native liveness receipts.');
     assert.deepEqual(overlay.getBounds(), suspended, 'Fallback restarted the cancelled held gesture during suspension.');
-    report.checks.push('uncaptured-hover-cleared-on-native-readiness', 'suspended-fallback-cannot-restart-held-drag');
+    report.checks.push('uncaptured-hover-cleared-on-native-readiness', 'suspended-fallback-cannot-restart-held-drag',
+      'live-cursor-suspension-survives-eight-second-timeout');
     await fs.unlink(unavailable);
     await until(async () => (await status()).nativePointer, 'same helper resumed');
     await mouse('move', { x: point.x - 45, y: point.y - 25 });

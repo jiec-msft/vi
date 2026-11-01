@@ -75,6 +75,59 @@ test('temporary cursor loss suspends native input and requires a fresh press aft
   assert.deepEqual(f.failures, []);
 });
 
+test('a live suspended sampler survives a long disconnect without restarting or replaying input', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  await f.send({ type: 'ready' });
+  await f.send({ type: 'down', x: 100, y: 200 });
+  await f.send({ type: 'cancel' });
+  await f.send({ type: 'suspended' });
+  for (let second = 0; second < 120; second++) {
+    t.mock.timers.tick(1000);
+    await f.send({ type: 'heartbeat' });
+  }
+  assert.equal(f.pointer.state, 'suspended');
+  assert.equal(f.pointer.ready, false);
+  assert.equal(f.pointer.pressed, false);
+  assert.equal(f.pointer.restarts, 0);
+  assert.equal(f.process.killed, undefined);
+  assert.deepEqual(f.failures, []);
+  assert.deepEqual(f.events.map((event) => event.type), ['ready', 'down', 'cancel', 'suspended']);
+  await f.send({ type: 'ready' });
+  assert.equal(f.pointer.state, 'ready');
+  assert.equal(f.pointer.pressed, false);
+  await f.send({ type: 'down', x: 120, y: 220 });
+  await f.send({ type: 'up', x: 120, y: 220 });
+  assert.deepEqual(f.events.slice(-3).map((event) => event.type), ['ready', 'down', 'up']);
+});
+
+test('suspended liveness still times out at eight seconds and a heartbeat cannot fake startup readiness', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t);
+  await f.send({ type: 'suspended' });
+  t.mock.timers.tick(7999);
+  assert.equal(f.pointer.state, 'suspended');
+  t.mock.timers.tick(1);
+  assert.equal(f.pointer.state, 'recovering');
+  assert.equal(f.process.killed, true);
+  assert.equal(f.failures.length, 1);
+  const starting = fixture(t);
+  await starting.send({ type: 'heartbeat' });
+  assert.equal(starting.pointer.ready, false);
+  assert.equal(starting.pointer.state, 'recovering');
+  assert.equal(starting.process.killed, true);
+});
+
+test('unexpected exit during healthy suspension still triggers failure and bounded recovery', async (t) => {
+  const f = fixture(t);
+  await f.send({ type: 'suspended' });
+  await f.send({ type: 'heartbeat' });
+  f.process.emit('exit', 1);
+  assert.equal(f.pointer.state, 'recovering');
+  assert.equal(f.pointer.ready, false);
+  assert.equal(f.failures.length, 1);
+});
+
 test('recovery is bounded across ready-then-exit loops and shutdown cancels pending restart', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const children = [];

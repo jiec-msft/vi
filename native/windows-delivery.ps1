@@ -1,4 +1,8 @@
+param([string] $DiagnosticsDirectory = '', [string] $DiagnosticRun = '', [int] $DiagnosticGeneration = 0, [int] $DiagnosticParent = 0)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-diagnostics.ps1')
+[ViNativeDiagnostics]::Configure($DiagnosticsDirectory, $DiagnosticRun, 'delivery', $DiagnosticGeneration, $DiagnosticParent, $false)
+[ViNativeDiagnostics]::Record('compile', 'begin', 0)
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 & (Join-Path $PSScriptRoot 'windows-input.ps1') -Action load
@@ -189,6 +193,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     }
 }
 '@
+[ViNativeDiagnostics]::Record('compile', 'end', 0)
 function Capture-Target {
     $target = [VoiceInput]::Capture()
     [uint32] $owner = 0
@@ -224,6 +229,8 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
     try {
         if ($line.Length -gt 1600000) { throw 'invalid-request' }
         $request = $line | ConvertFrom-Json
+        [ViNativeDiagnostics]::Request([long]$request.id)
+        if ($request.action -ne 'held') { [ViNativeDiagnostics]::Record([string]$request.action, 'begin', 0) }
         $value = switch ($request.action) {
             'ready' { @{ ready = $true } }
             'capture' { Capture-Target }
@@ -259,11 +266,15 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
             }
             default { throw 'invalid-request' }
         }
+        if ($request.action -ne 'held') { [ViNativeDiagnostics]::Record([string]$request.action, 'end', 0) }
         @{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5
     } catch {
+        [ViNativeDiagnostics]::Record([string]$request.action, 'failure', 0)
         $code = $_.Exception.Message
         if ($code -notin @('window-order','target-changed','secure-field','no-input','clipboard-changed','clipboard-unavailable',
             'modifiers-held','composition-active','paste-unconfirmed','restore-failed')) { $code = 'native-error' }
         @{ id = $request.id; ok = $false; code = $code; check = $script:failureCheck } | ConvertTo-Json -Compress
     }
 }
+[ViNativeDiagnostics]::Record('native-exit', 'exit', 0)
+[ViNativeDiagnostics]::Close()
