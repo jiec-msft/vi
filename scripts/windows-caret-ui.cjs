@@ -1,5 +1,13 @@
 const { stage: bootStage } = require('./caret-bootstrap-trace.cjs');
 bootStage('entry-loaded');
+let diagnosticBeats = 0, lastDiagnosticBeat = require('node:perf_hooks').performance.now();
+const livenessDiagnostic = process.argv.includes('--ci-caret-loop-diagnostic');
+const diagnosticHeartbeat = livenessDiagnostic ? setInterval(() => {
+  const now = require('node:perf_hooks').performance.now();
+  bootStage('main-loop-heartbeat', undefined, { beat: ++diagnosticBeats, gapMs: Math.round(now - lastDiagnosticBeat) });
+  lastDiagnosticBeat = now;
+  if (diagnosticBeats >= 80) clearInterval(diagnosticHeartbeat);
+}, 250) : undefined;
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -255,6 +263,7 @@ run().then(async () => {
   app.exit(1);
 });
 async function cleanup() {
+  clearInterval(diagnosticHeartbeat);
   if (stopVideo) {
     try {
       report.media = await stopVideo();

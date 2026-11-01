@@ -10,7 +10,7 @@ const stages = new Set(['entry-loaded', 'guard-before', 'guard-after', 'electron
   'browser-ready', 'actor-start', 'provider-before', 'provider-after', 'app-import-before', 'app-import-after',
   'app-ready-before', 'app-ready-after', 'module-error', 'report-saved',
   'fs-before', 'fs-validation-before', 'fs-validation-after', 'fs-action-before', 'fs-after',
-  'fs-timeout', 'fs-rejected', 'fs-observation']);
+  'fs-timeout', 'fs-rejected', 'fs-observation', 'main-loop-heartbeat']);
 function stage(name, error, detail = {}) {
   if (!stages.has(name)) throw new Error('Invalid bootstrap stage.');
   const row = { stage: name, sequence: ++sequence, pid: process.pid, at: Date.now(), monoMs: Math.round(performance.now()),
@@ -30,7 +30,7 @@ function stage(name, error, detail = {}) {
     if (Number.isSafeInteger(error.errno) && Math.abs(error.errno) <= 65535) row.errorNumber = error.errno;
   }
   if (['mkdir-fixture', 'write-plugin', 'write-config', 'write-index', 'write-settings'].includes(detail.operation)) row.operation = detail.operation;
-  for (const key of ['elapsedMs', 'bytes']) if (Number.isSafeInteger(detail[key]) && detail[key] >= 0) row[key] = detail[key];
+  for (const key of ['elapsedMs', 'bytes', 'beat', 'gapMs']) if (Number.isSafeInteger(detail[key]) && detail[key] >= 0) row[key] = detail[key];
   for (const key of ['exists', 'observerUnavailable']) if (typeof detail[key] === 'boolean') row[key] = detail[key];
   if (detail.parentRole === 'owned-layout') row.parentRole = detail.parentRole;
   if (allowed) {

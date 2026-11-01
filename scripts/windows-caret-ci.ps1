@@ -7,7 +7,7 @@ Add-Type -Path @((Join-Path $PSScriptRoot 'windows-ci-desktop-native.cs'),
     (Join-Path $PSScriptRoot 'caret-access-diagnostic.cs'))
 $root = (Get-Location).Path
 $result = [ViCiDesktop]::RunQualifiedCaretAsUser((Join-Path $root 'node_modules\electron\dist\electron.exe'),
-    (Join-Path $PSScriptRoot 'windows-caret-ui.cjs'), (Join-Path $root 'artifacts-ci\caret'), $root, 180)
+    (Join-Path $PSScriptRoot 'windows-caret-ui.cjs'), (Join-Path $root 'artifacts-ci\caret'), $root, 180, $true)
 if ($result -ne 0) {
     Get-Content -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-launch.json')
     if (Test-Path -LiteralPath (Join-Path $root 'artifacts-ci\caret\caret-report.json')) {

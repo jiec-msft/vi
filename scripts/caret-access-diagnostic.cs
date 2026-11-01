@@ -122,8 +122,9 @@ public static partial class ViCiDesktop {
         return new { present, enabled = present && (attributes & 2) != 0 };
     }
 
-    public static int RunQualifiedCaretAsUser(string executable, string script, string directory, string root, int timeout) {
-        return RunCaret(executable, script, directory, root, timeout, true, true, PrepareQualifiedCaretLayout);
+    public static int RunQualifiedCaretAsUser(string executable, string script, string directory, string root, int timeout,
+        bool diagnoseLoop = false) {
+        return RunCaret(executable, script, directory, root, timeout, true, true, PrepareQualifiedCaretLayout, diagnoseLoop);
     }
 
     static object PrepareQualifiedCaretLayout(string root, string directory, IntPtr own, IntPtr medium) {

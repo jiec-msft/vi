@@ -1079,7 +1079,7 @@ public static partial class ViCiDesktop
     }
     public static int RunCaret(string executable, string script, string directory, string workingDirectory, int timeout,
         bool allowDerivedRestricted = false, bool useOwnRestrictedAsUser = false,
-        Func<string, string, IntPtr, IntPtr, object> prepareOwnedLayout = null)
+        Func<string, string, IntPtr, IntPtr, object> prepareOwnedLayout = null, bool diagnoseLoop = false)
     {
         Guard();
         Require(timeout == 180 && File.Exists(executable) && File.Exists(script), "Bounded caret executable/entry required.");
@@ -1163,6 +1163,7 @@ public static partial class ViCiDesktop
                 report["workingDirectoryRole"] = "owned-checkout";
                 report["runAsNodeEnvironmentPresent"] = Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE") != null;
                 report["runAsNodeEnvironmentEnabled"] = !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE"));
+                if (diagnoseLoop) command.Append(" --ci-caret-loop-diagnostic");
             }
             if (!useOwnRestrictedAsUser && launchToken != ownToken) {
                 Win32(LookupPrivilegeValueW(null, "SeImpersonatePrivilege", out long impersonate), "Read required parent privilege identity");
@@ -1224,8 +1225,43 @@ public static partial class ViCiDesktop
             Win32(ResumeThread(child.thread) != UInt32.MaxValue, "Resume owned caret root");
             try { report["ownedProcessObservations"] = CaretProcessObservation(job, child.pid); }
             catch { report["ownedProcessObservationFailure"] = "owned-observer-unavailable"; }
-            uint wait = WaitForSingleObject(child.process, (uint)timeout * 1000);
-            Require(wait == 0, wait == WaitTimeout ? "Caret App fixture exceeded its 180-second internal watchdog." : "Caret root wait failed.");
+            uint wait;
+            if (diagnoseLoop) {
+                var samples = new List<object>();
+                report["loopDiagnosticSnapshots"] = samples;
+                var diagnosticClock = Stopwatch.StartNew();
+                do {
+                    wait = WaitForSingleObject(child.process, 3000);
+                    bool cpuObserved = GetProcessTimes(child.process, out long sampleCreated, out long sampleExited, out long sampleKernel, out long sampleUser);
+                    int cpuError = cpuObserved ? 0 : Marshal.GetLastWin32Error();
+                    string trace = Path.Combine(workingDirectory, "artifacts-ci", "caret", "bootstrap.jsonl");
+                    string lastStage = "unavailable";
+                    int heartbeatCount = 0;
+                    bool observedTrace = false;
+                    try {
+                        var info = new FileInfo(trace);
+                        if (info.Exists && info.Length <= 65536) {
+                            foreach (string line in File.ReadLines(trace)) {
+                                using (var json = JsonDocument.Parse(line)) {
+                                    var row = json.RootElement;
+                                    if (row.GetProperty("pid").GetUInt32() != child.pid) continue;
+                                    string stage = row.GetProperty("stage").GetString();
+                                    if (stage == "main-loop-heartbeat") heartbeatCount++;
+                                    else if (Regex.IsMatch(stage ?? "", "^[a-z-]{1,40}$")) lastStage = stage;
+                                }
+                            }
+                            observedTrace = true;
+                        }
+                    } catch { lastStage = "owned-trace-unavailable"; }
+                    samples.Add(new { elapsedMs = diagnosticClock.ElapsedMilliseconds, pid = child.pid, waitState = wait,
+                        processCpuObserved = cpuObserved, processCpuMs = cpuObserved ? (sampleKernel + sampleUser) / 10000 : -1,
+                        cpuWin32Error = cpuError, heartbeatCount, lastStage, observedTrace });
+                } while (wait == WaitTimeout && diagnosticClock.Elapsed.TotalSeconds < 15);
+                report["loopDiagnosticDeadlineSeconds"] = 15;
+            } else wait = WaitForSingleObject(child.process, (uint)timeout * 1000);
+            Require(wait == 0, wait == WaitTimeout
+                ? diagnoseLoop ? "Owned controller liveness diagnostic reached its 15-second deadline." : "Caret App fixture exceeded its 180-second internal watchdog."
+                : "Caret root wait failed.");
             Win32(GetExitCodeProcess(child.process, out uint exitCode), "Read caret root raw exit");
             report["rawExitCode"] = exitCode;
             Require(exitCode == 0, "Caret App fixture exited " + exitCode + ".");
