@@ -156,7 +156,12 @@ This deliberate opt-in behavior does not alter delivery when the setting is off.
 `Windows caret integration` is a separate, standard Windows x64 hosted check
 with a 10-minute whole-job limit and an internal 180-second GUI watchdog. Its
 synthetic native editor exercises the actual application, not the presentation
-prototype. Current-head GIF/PNG and native receipts are required before claiming
+prototype. The hosted launcher uses only the runner's own existing filtered
+medium token, checks its user/session and exact suspended root binary, attaches
+an owned kill-on-close Job before resuming, and preserves nonzero exits and
+cleanup receipts. It neither enables privileges nor weakens product integrity
+checks. The additional quiet-exit fixture must fail with its exact raw code.
+Current-head GIF/PNG and native receipts are required before claiming
 CI qualification. CI does not establish real-device, UIA-only editor, secure
 desktop, mixed-monitor or application-package acceptance.
 

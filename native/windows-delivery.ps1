@@ -2,7 +2,6 @@ $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 & (Join-Path $PSScriptRoot 'windows-input.ps1') -Action load
-Add-Type -ReferencedAssemblies System.Windows.Forms -Path (Join-Path $PSScriptRoot 'windows-caret-lease.cs')
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
@@ -233,6 +232,10 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         $value = switch ($request.action) {
             'ready' { @{ ready = $true } }
             'capture' {
+                if ($request.caretLease -and -not $script:caretLeaseLoaded) {
+                    Add-Type -ReferencedAssemblies System.Windows.Forms -Path (Join-Path $PSScriptRoot 'windows-caret-lease.cs')
+                    $script:caretLeaseLoaded = $true
+                }
                 $target = Capture-Target
                 if ($request.caretLease) {
                     $target.caretLease = $true

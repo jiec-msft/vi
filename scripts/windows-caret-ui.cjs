@@ -14,12 +14,11 @@ const report = { head: process.env.VI_PROBE_HEAD, runId: process.env.GITHUB_RUN_
   attempt: process.env.GITHUB_RUN_ATTEMPT, platform: process.platform, arch: process.arch,
   scope: 'Actual application with an owned native synthetic editor; not user-device acceptance',
   checks: [], samples: [], helpers: [], limitations: ['UIA-only editors unsupported', 'No second hosted monitor or real secure desktop'] };
+report.versions = { electron: process.versions.electron, node: process.versions.node };
 let editor, service, mainWindow, stopVideo;
-const children = [];
 const spawn = childProcess.spawn;
 childProcess.spawn = (...args) => {
   const child = spawn(...args);
-  children.push(child);
   if (args[1]?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-caret.ps1'))) {
     const record = { pid: child.pid, spawnedAt: Date.now() };
     report.helpers.push(record);
@@ -211,6 +210,5 @@ async function cleanup() {
   }
   editor?.close();
   await service?.close();
-  for (const child of children) if (child.exitCode === null) child.kill();
   await fs.writeFile(path.join(directory, 'caret-report.json'), JSON.stringify(report, null, 2));
 }
