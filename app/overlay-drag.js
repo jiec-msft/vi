@@ -15,7 +15,17 @@ class OverlayDrag {
   }
 
   move() {
-    if (!this.active || this.window.isDestroyed() || !this.window.isVisible()) return false;
+    if (!this.active) return false;
+    if (this.window.isDestroyed() || !this.window.isVisible()) { this.cancel(); return false; }
+    try {
+      return this.moveToCursor();
+    } catch (error) {
+      this.cancel();
+      throw error;
+    }
+  }
+
+  moveToCursor() {
     const point = this.cursor();
     const area = this.workArea(point);
     const { bounds, cursor } = this.anchor;
@@ -31,31 +41,46 @@ class OverlayDrag {
   async finish() {
     if (!this.active) return;
     this.move();
+    if (!this.active) return;
     this.anchor = undefined;
     if (this.window.isDestroyed()) return;
     const { x, y } = this.window.getBounds();
     await this.persist({ x, y });
   }
+
+  cancel() { this.anchor = undefined; }
 }
 
 function bindDragHandle(handle, bridge, onFailure, view = globalThis, enabled = () => true) {
   let pointer;
   let frame;
   let hovered = false;
+  let gesture = 0;
   const dispatch = (action) => {
+    const current = gesture;
     void bridge.drag(action).then((reply) => {
       if (!reply.ok) throw new Error(reply.error);
-    }).catch(onFailure);
+      if (current === gesture && action === 'start' && reply.value === false) cancel();
+    }).catch((error) => {
+      if (current === gesture) cancel();
+      onFailure(error);
+    });
   };
-  const finish = (event) => {
-    if (event.pointerId !== pointer) return;
+  const release = (action) => {
     const previous = pointer;
     pointer = undefined;
+    gesture++;
     if (frame !== undefined) view.cancelAnimationFrame(frame);
     frame = undefined;
     handle.classList.remove('dragging');
+    hovered = false;
+    if (previous === undefined) return;
     if (handle.hasPointerCapture(previous)) handle.releasePointerCapture(previous);
-    dispatch('end');
+    dispatch(action);
+  };
+  const cancel = () => release('cancel');
+  const finish = (event) => {
+    if (event.pointerId === pointer) release('end');
   };
   const start = (event) => {
     if (!enabled() || event.pointerType !== 'mouse' || pointer !== undefined) return;
@@ -66,6 +91,7 @@ function bindDragHandle(handle, bridge, onFailure, view = globalThis, enabled = 
       return;
     }
     pointer = event.pointerId;
+    gesture++;
     handle.classList.add('dragging');
     dispatch('start');
   };
@@ -73,7 +99,7 @@ function bindDragHandle(handle, bridge, onFailure, view = globalThis, enabled = 
     if (event.button === 0) start(event);
   });
   handle.addEventListener('pointermove', (event) => {
-    if (!enabled()) return;
+    if (!enabled()) { cancel(); return; }
     // Windows can eat the first mouse-down on a non-activating window.
     if (pointer === undefined && event.pointerType === 'mouse') {
       if (event.buttons === 0) hovered = true;
@@ -85,7 +111,11 @@ function bindDragHandle(handle, bridge, onFailure, view = globalThis, enabled = 
     frame = view.requestAnimationFrame(() => { frame = undefined; dispatch('move'); });
   });
   handle.addEventListener('pointerleave', () => { if (pointer === undefined) hovered = false; });
-  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) handle.addEventListener(name, finish);
+  handle.addEventListener('pointerup', finish);
+  for (const name of ['pointercancel', 'lostpointercapture']) {
+    handle.addEventListener(name, (event) => { if (event.pointerId === pointer) cancel(); });
+  }
+  return { cancel };
 }
 
 if (typeof module !== 'undefined') module.exports = { OverlayDrag, bindDragHandle };

@@ -72,7 +72,9 @@ function snapshot() {
     completedSegments: active?.audio?.completedSegments || status.completedSegments || 0,
     frozenTextChars: active?.audio?.committedText.length || 0,
     segmentFinalizing: Boolean(active?.audio?.segmentFinalizing),
-    nativePointer: process.platform === 'win32',
+    nativePointer: Boolean(overlayPointer?.ready),
+    nativePointerState: overlayPointer?.state || 'fallback',
+    nativePointerRestarts: overlayPointer?.restarts || 0,
     overlayControlError, diagnosticsError };
 }
 
@@ -578,15 +580,44 @@ async function finishOverlayInteraction() {
   await saved;
 }
 
+function cancelOverlayInteraction() {
+  const moving = overlayDrag?.active;
+  overlayDrag?.cancel();
+  if (moving) logEvent('drag-end', active, { reason: 'cancelled' });
+  if (overlay && !overlay.isDestroyed()) overlay.webContents.send('overlay-pointer-cancel');
+}
+
+function publishOverlayPointer() {
+  for (const target of [window, overlay]) {
+    if (target && !target.isDestroyed()) target.webContents.send('status', snapshot());
+  }
+}
+
 function observeOverlayPointer(event) {
-  if (event.type === 'ready') return;
+  if (event.type === 'ready' || event.type === 'suspended') {
+    cancelOverlayInteraction();
+    overlayControlError = event.type === 'ready' ? ''
+      : 'Native mouse input is temporarily unavailable. Mouse fallback and shortcuts remain available.';
+    publishOverlayPointer();
+    return;
+  }
+  if (event.type === 'cancel') { cancelOverlayInteraction(); return; }
   if (event.type === 'down') {
-    if (!overlay.isVisible()) return;
+    if (quitting || overlay.isDestroyed() || !overlay.isVisible()) return;
     logEvent('overlay-down', active);
     const point = screen.screenToDipPoint({ x: event.x, y: event.y });
     const bounds = overlay.getBounds();
     overlay.webContents.send('overlay-pointer-down', { x: point.x - bounds.x, y: point.y - bounds.y });
-  } else if (event.type === 'move') overlayDrag.move();
+  } else if (event.type === 'move') {
+    try { overlayDrag.move(); }
+    catch (error) {
+      cancelOverlayInteraction();
+      overlayControlError = error.message;
+      console.error('Floating window movement interrupted.');
+      logEvent('error', active, { reason: 'overlay-cursor' });
+      publishOverlayPointer();
+    }
+  }
   else if (event.type === 'up') {
     void finishOverlayInteraction().catch((error) => console.error(error.message));
   }
@@ -702,7 +733,7 @@ function installIpc() {
   }, true);
   handle('overlay-drag', (action) => {
     if (action === 'start') {
-      if (overlayPointer && !overlayPointer.pressed) return false;
+      if (overlayPointer?.ready && !overlayPointer.pressed) return false;
       const started = !quitting && overlayDrag.start();
       if (started) {
         logEvent('drag-start', active);
@@ -713,6 +744,7 @@ function installIpc() {
     }
     if (action === 'move') return overlayDrag.move();
     if (action === 'end') return finishOverlayInteraction();
+    if (action === 'cancel') return cancelOverlayInteraction();
     throw new Error('Invalid floating-window drag operation.');
   }, true);
   handle('cancel', () => {
@@ -895,7 +927,7 @@ async function launch() {
     }, 250);
   });
   overlay.on('hide', () => {
-    void finishOverlayInteraction().catch((error) => console.error(error.message));
+    cancelOverlayInteraction();
   });
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
     callback(contents === window.webContents && contents.getURL() === uiUrl &&
@@ -924,8 +956,10 @@ async function launch() {
   if (process.platform === 'win32') {
     overlayPointer = new OverlayPointer(overlay, observeOverlayPointer, (error) => {
       overlayControlError = error.message;
-      void finishOverlayInteraction().catch((failure) => console.error(failure.message));
-      publish(status.phase, status.message);
+      cancelOverlayInteraction();
+      console.error(`Native floating pointer interrupted (${error.code}).`);
+      logEvent('error', active, { reason: `overlay-pointer-${error.code}` });
+      publishOverlayPointer();
     });
   }
   tray = new Tray(trayIcon());

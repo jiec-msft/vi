@@ -1,0 +1,154 @@
+name: Overlay recovery evidence
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - app/overlay*
+      - app/main.cjs
+      - native/windows-overlay.ps1
+      - test/framework/overlay*
+      - test/framework/native-types.test.cjs
+      - test/framework/fixtures/overlay-mouse.*
+      - scripts/overlay-recovery-*.cjs
+      - scripts/overlay-release-*.cjs
+      - scripts/overlay-ci-console*.ps1
+      - scripts/overlay-ci-child.ps1
+      - scripts/overlay-ci-attribution*.ps1
+      - scripts/overlay-ci-quiet.ps1
+      - scripts/overlay-ci-desktop*
+      - scripts/overlay-ci-heartbeat*
+      - scripts/windows-ci-desktop*
+      - .github/workflows/overlay-recovery.yml
+permissions:
+  contents: read
+concurrency:
+  group: overlay-recovery-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-ui:
+    name: Overlay OS mouse (${{ matrix.platform.os }}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+          - { os: macos-15, arch: arm64 }
+    env:
+      VI_EXPECTED_ARCH: ${{ matrix.platform.arch }}
+      VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify owned actor generation and unknown attribution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-attribution-test.ps1
+      - name: Verify parent failures and diagnostic I/O cannot bypass rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console-negative.ps1
+      - name: Verify rollback after an injected restore diagnostic failure
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console-test.ps1
+      - name: Select isolated runner Console Host and diagnose Terminal actors
+        id: console-host
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console.ps1 prepare
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Verify strict owned desktop inheritance assertions
+        run: node --test scripts/overlay-ci-desktop.test.cjs
+      - name: Record native PowerShell wrapper executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "VI_DESKTOP_PWSH=$((Get-Process -Id $PID).Path)" >> $env:GITHUB_ENV
+      - name: Prepare exact-head native assembly before bounded heartbeat test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\scripts\overlay-ci-heartbeat-reader.ps1 -Mode prepare `
+            -Preparation (Join-Path $PWD "artifacts-ci\overlay-recovery\heartbeat-preparation-$env:VI_PROBE_HEAD") `
+            -Directory (Join-Path $PWD 'artifacts-ci\overlay-recovery\heartbeat-reader') -WorkingDirectory $PWD
+      - name: Verify real Default immutable heartbeat publication under held readers
+        if: runner.os == 'Windows'
+        run: node --test scripts/overlay-ci-heartbeat.test.cjs
+      - run: node scripts/prepare-provider.cjs
+      - run: node scripts/build-native.cjs
+      - name: Build owned macOS mouse driver
+        if: runner.os == 'macOS'
+        run: swiftc test/framework/fixtures/overlay-mouse.swift -o test/framework/fixtures/overlay-mouse
+      - name: Prepare isolated Windows desktop
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\prepare-desktop.ps1
+      - name: Wait once for observed interference trees before GUI input
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\overlay-ci-quiet.ps1
+      - name: Assert physical drag and bounded helper recovery
+        run: node scripts/overlay-recovery-ci.cjs
+      - name: Verify rejected normal input still releases an owned press only in cleanup
+        if: runner.os == 'Windows'
+        run: node scripts/overlay-release-ci.cjs
+      - name: Verify full harness timeout restores desktop without claiming held-input recovery
+        if: runner.os == 'Windows'
+        run: node scripts/overlay-recovery-ci.cjs --desktop-timeout-probe
+      - name: Restore isolated runner terminal choice
+        if: always() && runner.os == 'Windows' && steps.console-host.outputs.state_saved == 'true'
+        shell: pwsh
+        run: .\scripts\overlay-ci-console.ps1 restore
+      - name: Save native overlay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay-recovery-${{ matrix.platform.os }}
+          path: |
+            artifacts-ci/overlay-recovery/report.json
+            artifacts-ci/overlay-recovery/release-negative.json
+            artifacts-ci/overlay-recovery/environment.json
+            artifacts-ci/overlay-recovery/attribution-tests.json
+            artifacts-ci/overlay-recovery/quiet.json
+            artifacts-ci/overlay-recovery/restore-fault.json
+            artifacts-ci/overlay-recovery/restore-*-fault.json
+            artifacts-ci/overlay-recovery/parent-*.json
+            artifacts-ci/overlay-recovery/negative-parent.json
+            artifacts-ci/overlay-recovery/process-launches.jsonl
+            artifacts-ci/overlay-recovery/desktop.webm
+            artifacts-ci/overlay-recovery/*.png
+            artifacts-ci/overlay-recovery/desktop-*.json
+            artifacts-ci/overlay-recovery/driver-response-*.json
+            artifacts-ci/overlay-recovery/helper-state-*.json
+            artifacts-ci/overlay-recovery/native-init-*.json
+            artifacts-ci/overlay-recovery/native-consumed-*.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/report.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/progress.json
+            artifacts-ci/overlay-recovery/heartbeat-preparation-*/*.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/default/immutable-identity.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/default/heartbeat-*.json
+            artifacts-ci/overlay-recovery/heartbeat-reader/producer-failure/*.json
+            artifacts-ci/overlay-recovery/desktop-isolation/*.json
+            artifacts-ci/overlay-recovery/desktop-isolation/default/*.json
+            artifacts-ci/overlay-recovery/release-desktop-isolation/*.json
+            artifacts-ci/overlay-recovery/release-desktop-isolation/default/*.json
+            artifacts-ci/overlay-recovery/release-render/*
+            artifacts-ci/overlay-recovery/desktop-timeout/report.json
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop.webm
+            artifacts-ci/overlay-recovery/desktop-timeout/*.png
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/driver-response-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/helper-state-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/native-init-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/native-consumed-*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop-isolation/*.json
+            artifacts-ci/overlay-recovery/desktop-timeout/desktop-isolation/default/*.json
+          retention-days: 3
+          if-no-files-found: error

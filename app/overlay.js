@@ -7,12 +7,19 @@ const failure = (error) => {
   document.getElementById('message').textContent = 'Position not saved';
   document.getElementById('drag-handle').title = error.message;
 };
-bindDragHandle(document.getElementById('drag-handle'), window.floatingVoice, failure, globalThis, () => !nativePointer);
+const dragBinding = bindDragHandle(document.getElementById('drag-handle'), window.floatingVoice, failure,
+  globalThis, () => !nativePointer);
+window.floatingVoice.onPointerCancel(() => {
+  dragBinding.cancel();
+});
 window.floatingVoice.onStatus((value) => {
+  if (nativePointer !== value.nativePointer) {
+    dragBinding.cancel();
+  }
   nativePointer = value.nativePointer;
   recording = value.phase === 'recording';
   const elapsed = `${Math.floor(value.elapsedSeconds / 60)}:${String(value.elapsedSeconds % 60).padStart(2, '0')}`;
-  document.getElementById('message').textContent = value.overlayControlError ? 'Use stop shortcut'
+  document.getElementById('message').textContent = value.overlayControlError ? 'Mouse fallback'
     : value.phase === 'error' ? ({ 'input-confirmation': 'Input not confirmed', input: 'Input error',
       microphone: 'Audio interrupted', cloud: 'Connection error', 'no-speech': 'No speech detected',
       plugin: 'Result blocked by plugin' }[value.errorKind] || 'Stopped: error')
@@ -47,16 +54,27 @@ async function cancel() {
   const reply = await window.floatingVoice.cancel();
   if (!reply.ok) document.getElementById('message').textContent = 'Open settings';
 }
-const nativeHandled = (name) => nativePointer && nativeButton?.name === name && Date.now() - nativeButton.at < 1000;
-document.getElementById('stop').onclick = () => { if (!nativeHandled('stop')) void stop(); };
-document.getElementById('cancel').onclick = () => { if (!nativeHandled('cancel')) void cancel(); };
+const nativeHandled = (name, event) => {
+  const handled = event?.detail !== 0 && nativeButton?.name === name;
+  nativeButton = undefined;
+  return handled;
+};
+for (const name of ['stop', 'cancel']) {
+  document.getElementById(name).addEventListener('pointerdown', (event) => {
+    if (!nativePointer && event.pointerType === 'mouse' && event.button === 0) nativeButton = undefined;
+  });
+}
+document.getElementById('stop').onclick = (event) => { if (!nativeHandled('stop', event)) void stop(); };
+document.getElementById('cancel').onclick = (event) => { if (!nativeHandled('cancel', event)) void cancel(); };
 window.floatingVoice.onPointerDown(({ x, y }) => {
+  if (!nativePointer) return;
+  nativeButton = undefined;
   const target = document.elementFromPoint(x, y);
   if (target?.closest('#stop')) {
-    nativeButton = { name: 'stop', at: Date.now() };
+    nativeButton = { name: 'stop' };
     void stop();
   } else if (target?.closest('#cancel')) {
-    nativeButton = { name: 'cancel', at: Date.now() };
+    nativeButton = { name: 'cancel' };
     void cancel();
   }
   else if (target?.closest('#drag-handle')) {
