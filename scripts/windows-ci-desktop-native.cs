@@ -14,7 +14,7 @@ using System.Threading;
 // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-createdesktopw
 // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-switchdesktop
 // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-closedesktop
-public static class ViCiDesktop
+public static partial class ViCiDesktop
 {
     const uint DesktopAccess = 0x01C7; // READ/WRITEOBJECTS, CREATEWINDOW/MENU, ENUMERATE, SWITCHDESKTOP
     const uint ReadSwitch = 0x0141;
