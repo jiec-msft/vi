@@ -8,7 +8,7 @@ const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
 const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority,
-  armOwnedEarlyInjection, helperCheckpointQueue, selfReceiptStem } = require('./overlay-ci-desktop.cjs');
+  armOwnedEarlyInjection, helperCheckpointQueue, selfReceiptStem, committedHelperReady } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
     !process.env.VI_PROVIDER_DIR || !process.argv.includes('--ci-mode=overlay-recovery')) {
@@ -95,6 +95,11 @@ const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expres
 const status = async () => {
   for (const helper of report.helpers) if (helper.proofError) throw new Error(helper.proofError);
   const value = await evaluate('window.voice.status()');
+  if (expectedDesktop && value.nativePointer) {
+    const active = report.helpers.filter(({ role }) => role === 'overlay-pointer').at(-1);
+    assert.ok(active, 'Ready native pointer has no actual helper generation.');
+    await committedHelperReady(active, pendingHelperAcks.get(active));
+  }
   const previous = report.pointerStates.at(-1);
   if (previous?.state !== value.nativePointerState || previous?.restarts !== value.nativePointerRestarts) {
     report.pointerStates.push({ at: Date.now(), stage, state: value.nativePointerState,

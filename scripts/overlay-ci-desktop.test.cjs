@@ -2,11 +2,30 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent,
-  assertJobReceiptPath, selfReceiptStem, assertRootReport } = require('./overlay-ci-desktop.cjs');
+  assertJobReceiptPath, selfReceiptStem, assertRootReport, committedHelperReady } = require('./overlay-ci-desktop.cjs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+test('controlled helper-death readiness cannot overtake the committed receipt ACK', async () => {
+  let commit, released = false;
+  const helper = { events: [{ type: 'ready' }], readyAcks: [] };
+  const pending = new Promise((resolve) => { commit = () => { helper.readyAcks.push({}); resolve(); }; });
+  const ready = committedHelperReady(helper, [pending]).then(() => { released = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(released, false);
+  commit();
+  await ready;
+  assert.equal(released, true);
+  await assert.rejects(committedHelperReady(helper, undefined),
+    { name: 'AssertionError', message: 'Required helper ACK inventory is missing.' });
+  await assert.rejects(committedHelperReady({ events: [{ type: 'ready' }], readyAcks: [] }, []),
+    { name: 'AssertionError', message: /requires its actual committed sidecar ACK/ });
+  await assert.rejects(committedHelperReady({ events: [], readyAcks: [] }, []),
+    { name: 'AssertionError', message: 'Ready helper has no actual READY event.' });
+  const failure = new Error('controlled committed receipt failure');
+  await assert.rejects(committedHelperReady(helper, [Promise.reject(failure)]), failure);
+});
 test('actual PS5 Json producer preserves the committed nested receipt object schema', {
   skip: process.platform !== 'win32', timeout: 20000,
 }, async () => {
@@ -78,7 +97,11 @@ test('rejects a missing wrapper outcome instead of inventing success', () => {
 const birth = (pid) => `13300000000000000${pid}`;
 const context = { sourceHead: 'a'.repeat(40), runId: '1', attempt: '1', caseId: 'vi-ci-test', callerPid: 1 };
 for (const acknowledged of [true, false]) {
-  test(`fixed READY injection is independent of pending diagnostic I/O (ACK ${acknowledged})`, async () => {
+  test(`fixed READY injection is independent of pending diagnostic I/O (ACK ${acknowledged})`, async (t) => {
+    const timer = global.setTimeout;
+    let schedules = 0;
+    t.mock.method(global, 'setTimeout', (callback, delay, ...args) =>
+      timer(callback, schedules++ === 0 ? 0 : delay, ...args));
     const report = { causalContext: { ...context }, nodeEvents: [] };
     const request = { ...context, role: 'overlay-pointer', generation: 1, requestSequence: 1,
       requestId: '1-1-overlay-pointer-1', requestNonce: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' };
@@ -103,6 +126,7 @@ for (const acknowledged of [true, false]) {
     if (acknowledged) helper.readyAcks.push({ readySequence: 1,
       acknowledged: nodeEvent(report, 'helper-ready-ack', { requestId: request.requestId }) });
     await injected;
+    assert.ok(schedules >= 2, 'Early timer dispatch must recheck the unchanged monotonic deadline.');
     assert.equal(killed, 1); assert.equal(completed, true);
     assert.ok(BigInt(helper.injection.ticks) >= BigInt(helper.injectionDeadlineTicks));
     if (!acknowledged) assert.match(helper.proofError, /Original 300ms injection lacked/);

@@ -118,7 +118,12 @@ function armOwnedEarlyInjection(helper, request, report, child, readyEvent, comp
   helper.injectionArmed = nodeEvent(report, 'owned-injection-timer-armed', { requestId: request.requestId,
     deadlineTicks: deadline.toString() });
   const remaining = Math.max(0, Math.ceil(Number(deadline - process.hrtime.bigint()) / 1000000));
-  return setTimeout(() => {
+  const inject = () => {
+    const left = deadline - process.hrtime.bigint();
+    if (left > 0n) {
+      setTimeout(inject, Math.ceil(Number(left) / 1000000));
+      return;
+    }
     helper.startupFailureRequestedAt = Date.now();
     helper.injection = nodeEvent(report, 'owned-injection-requested', { requestId: request.requestId, pid: child.pid });
     if (!helper.readyAcks.some((ack) => ack.readySequence === 1 &&
@@ -128,7 +133,17 @@ function armOwnedEarlyInjection(helper, request, report, child, readyEvent, comp
     }
     helper.ownedStartupFailureInjected = child.kill();
     completed();
-  }, remaining);
+  };
+  return setTimeout(inject, remaining);
+}
+async function committedHelperReady(helper, pending) {
+  assert.ok(Array.isArray(pending), 'Required helper ACK inventory is missing.');
+  await Promise.all(pending);
+  if (helper.proofError) throw new Error(helper.proofError);
+  const readyCount = helper.events.filter(({ type }) => type === 'ready').length;
+  assert.ok(readyCount > 0, 'Ready helper has no actual READY event.');
+  assert.equal(helper.readyAcks.length, readyCount,
+    'Helper readiness requires its actual committed sidecar ACK.');
 }
 function helperCheckpointQueue(write, fail, held) {
   const pending = new Map();
@@ -662,4 +677,5 @@ function assertDesktopChain(report, desktop) {
 }
 
 module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
-  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath, selfReceiptStem, assertRootReport };
+  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath,
+  selfReceiptStem, assertRootReport, committedHelperReady };
