@@ -43,6 +43,9 @@ async function run() {
   const role = argument('role'), testCase = argument('case'), desktop = argument('name');
   const directory = path.resolve(argument('output'));
   assert.ok(['default', 'owned'].includes(role) && ['normal', 'failure', 'timeout'].includes(testCase));
+  const heartbeatMode = process.argv.find((value) => value.startsWith('--desktop-probe-heartbeat='));
+  if (heartbeatMode) assert.ok(heartbeatMode === '--desktop-probe-heartbeat=immutable-v1' &&
+    role === 'default' && testCase === 'normal', 'Immutable heartbeat requires the finite P0 Default fixture.');
   await fs.writeFile(path.join(directory, 'started.json'), JSON.stringify({ pid: process.pid, role, desktop }));
   app.setPath('userData', path.join(directory, 'profile'));
   app.commandLine.appendSwitch('force-color-profile', 'srgb');
@@ -65,9 +68,51 @@ async function run() {
       document.getElementById('click').textContent = 'OS click complete';
     });</script></body>`));
   window.show();
+  if (heartbeatMode) {
+    const identity = JSON.parse(await fs.readFile(path.join(directory, 'immutable-identity.json'), 'utf8'));
+    assert.equal(identity.protocol, 'vi-ci-immutable-heartbeat-v1');
+    assert.equal(identity.pid, process.pid);
+    assert.match(identity.creationFileTime, /^[1-9][0-9]+$/);
+    assert.equal(identity.generation, 1);
+    assert.equal(identity.cadenceMilliseconds, 250);
+    assert.ok(Number.isInteger(identity.frameLimit) && identity.frameLimit > 0 && identity.frameLimit <= 720);
+    let sequence = 0, pending = Promise.resolve(), failed = false, resolveFirst, rejectFirst;
+    const first = new Promise((resolve, reject) => { resolveFirst = resolve; rejectFirst = reject; });
+    const fail = (error) => {
+      if (failed) return;
+      failed = true;
+      clearInterval(timer);
+      rejectFirst(error);
+      console.error(`Immutable heartbeat producer failed: ${error.stack}`);
+      fs.writeFile(path.join(directory, 'immutable-producer-error.json'), JSON.stringify({
+        protocol: identity.protocol, pid: process.pid, creationFileTime: identity.creationFileTime,
+        generation: identity.generation, sequence, error: error.message,
+      })).then(() => app.exit(1), (writeError) => { console.error(writeError); app.exit(1); });
+    };
+    const timer = setInterval(() => {
+      if (sequence >= identity.frameLimit) { fail(new Error('Immutable heartbeat lifetime frame cap exceeded.')); return; }
+      const next = ++sequence, time = Date.now();
+      pending = pending.then(async () => {
+        if (failed) throw new Error('Immutable heartbeat publication already failed.');
+        const stem = `heartbeat-v1-${process.pid}-${identity.creationFileTime}-g${identity.generation}-s${String(next).padStart(6, '0')}`;
+        const temporary = path.join(directory, `${stem}.tmp`), final = path.join(directory, `${stem}.json`);
+        await fs.writeFile(temporary, JSON.stringify({ protocol: identity.protocol, pid: process.pid,
+          creationFileTime: identity.creationFileTime, generation: identity.generation, sequence: next, time }), { flag: 'wx' });
+        assert.equal(await fs.stat(final).then(() => true, (error) => {
+          if (error.code === 'ENOENT') return false;
+          throw error;
+        }), false, 'An immutable published heartbeat frame cannot be replaced.');
+        await fs.rename(temporary, final);
+        if (next === 1) resolveFirst();
+      });
+      pending.catch(fail);
+    }, 250);
+    await first;
+  }
   await fs.writeFile(path.join(directory, 'ready.tmp'), JSON.stringify({ pid: process.pid, role, desktop }));
   await fs.rename(path.join(directory, 'ready.tmp'), path.join(directory, 'ready.json'));
   if (role === 'default') {
+    if (heartbeatMode) return;
     const timer = setInterval(() => {
       fs.writeFile(path.join(directory, 'heartbeat.tmp'), JSON.stringify({ pid: process.pid, time: Date.now() }))
         .then(() => fs.rename(path.join(directory, 'heartbeat.tmp'), path.join(directory, 'heartbeat.json')))
