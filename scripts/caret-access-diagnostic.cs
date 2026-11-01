@@ -122,6 +122,42 @@ public static partial class ViCiDesktop {
         return new { present, enabled = present && (attributes & 2) != 0 };
     }
 
+    public static int RunQualifiedCaretAsUser(string executable, string script, string directory, string root, int timeout) {
+        return RunCaret(executable, script, directory, root, timeout, true, true, PrepareQualifiedCaretLayout);
+    }
+
+    static object PrepareQualifiedCaretLayout(string root, string directory, IntPtr own, IntPtr medium) {
+        root = Path.GetFullPath(root);
+        directory = Path.GetFullPath(directory);
+        string tree = Path.Combine(root, "artifacts-ci", "caret");
+        bool quiet = directory.Equals(Path.Combine(tree, "quiet-exit"), StringComparison.OrdinalIgnoreCase);
+        Require(directory.Equals(tree, StringComparison.OrdinalIgnoreCase) || quiet, "Only the exact controlled caret layout is allowed.");
+        PlainOwnedPath(root, directory);
+        if (!quiet) {
+            Require(!Directory.Exists(tree) && !File.Exists(tree), "App fixture layout must be fresh.");
+            Directory.CreateDirectory(tree);
+            Directory.CreateDirectory(Path.Combine(tree, "profile"));
+            GrantOwnTreeModify(root, tree, own);
+        } else {
+            Require(Directory.Exists(tree) && !Directory.Exists(directory) && !File.Exists(directory), "Quiet fixture requires the existing owned tree and fresh child.");
+            Directory.CreateDirectory(directory);
+        }
+        PlainOwnedPath(root, directory);
+        IntPtr duplicate = IntPtr.Zero;
+        try {
+            Win32(DuplicateTokenEx(medium, 8, IntPtr.Zero, 2, 2, out duplicate), "Duplicate medium token for qualified layout access");
+            var checks = new[] {
+                CheckControlledPath("artifact-ancestor", Path.Combine(root, "artifacts-ci"), true, false, duplicate, "existing"),
+                CheckControlledPath("caret-evidence-tree", tree, true, true, duplicate, "created"),
+                CheckControlledPath(quiet ? "quiet-profile" : "created-profile", quiet ? directory : Path.Combine(tree, "profile"),
+                    true, true, duplicate, "created")
+            };
+            Require(checks.All(check => check.accessGranted), "Qualified layout lost required access.");
+            return new { canonicalNonReparse = true, currentUserModifyOnly = true, originalAceEntriesPreserved = true,
+                scope = "owned-tree-DACL-only-not-launch-guarantee", paths = checks };
+        } finally { if (duplicate != IntPtr.Zero) Win32(CloseHandle(duplicate), "Close qualified layout duplicate token"); }
+    }
+
     static PathFact CheckControlledPath(string role, string path, bool directory, bool writable, IntPtr token, string state) {
         if (directory ? !Directory.Exists(path) : !File.Exists(path))
             throw new InvalidOperationException("Controlled diagnostic path unavailable: " + role);

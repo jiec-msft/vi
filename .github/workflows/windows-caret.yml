@@ -38,8 +38,7 @@ jobs:
   native:
     name: Caret App integration (Windows x64)
     needs: unit
-    # Native launch remains paused until the explicit API plan is approved.
-    if: false
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-2025
     timeout-minutes: 10
     env:

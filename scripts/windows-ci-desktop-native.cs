@@ -153,6 +153,10 @@ public static partial class ViCiDesktop
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags, string application, StringBuilder command,
         uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInfo process);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessAsUserW(IntPtr token, string application, StringBuilder command,
+        IntPtr processSecurity, IntPtr threadSecurity, bool inherit, uint flags, IntPtr environment,
+        string directory, ref StartupInfo startup, out ProcessInfo process);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -1074,7 +1078,8 @@ public static partial class ViCiDesktop
         }
     }
     public static int RunCaret(string executable, string script, string directory, string workingDirectory, int timeout,
-        bool allowDerivedRestricted = false)
+        bool allowDerivedRestricted = false, bool useOwnRestrictedAsUser = false,
+        Func<string, string, IntPtr, IntPtr, object> prepareOwnedLayout = null)
     {
         Guard();
         Require(timeout == 180 && File.Exists(executable) && File.Exists(script), "Bounded caret executable/entry required.");
@@ -1085,7 +1090,7 @@ public static partial class ViCiDesktop
             String.Equals(Path.GetFullPath(script), Path.GetFullPath(Path.Combine(workingDirectory, "scripts", entry)), StringComparison.OrdinalIgnoreCase) &&
             String.Equals(Path.GetFullPath(executable), Path.GetFullPath(Path.Combine(workingDirectory, "node_modules", "electron", "dist", "electron.exe")),
                 StringComparison.OrdinalIgnoreCase), "Only the prepared own-head caret App/quiet fixture and Electron binary are allowed.");
-        Directory.CreateDirectory(directory);
+        if (!useOwnRestrictedAsUser) Directory.CreateDirectory(directory);
         var clock = Stopwatch.StartNew();
         var errors = new List<string>();
         var report = new Dictionary<string, object> {
@@ -1109,10 +1114,21 @@ public static partial class ViCiDesktop
             parentPrivileges = Privileges(ownToken);
             Win32(LookupPrivilegeValueW(null, "SeIncreaseQuotaPrivilege", out long quota), "Read existing parent quota privilege identity");
             report["parentQuotaAlreadyEnabled"] = parentPrivileges.TryGetValue(quota, out uint quotaAttributes) && (quotaAttributes & 2) != 0;
+            report["parentQuotaPresent"] = parentPrivileges.ContainsKey(quota);
             report["originalIntegrity"] = originalIntegrity;
             IntPtr launchToken = ownToken;
             report["tokenOrigin"] = "existing-medium";
-            if (originalIntegrity != 0x2000) {
+            if (useOwnRestrictedAsUser) {
+                Require(allowDerivedRestricted && originalIntegrity == 0x3000 && prepareOwnedLayout != null,
+                    "Explicit AsUser fixture requires the verified own restricted primary and qualified layout.");
+                if (!parentPrivileges.ContainsKey(quota)) throw new Win32Exception(1314, "Existing quota privilege is absent.");
+                restricted = RestrictedMedium(ownToken);
+                launchToken = restricted;
+                report["tokenOrigin"] = "derived-restricted-medium";
+                report["processApi"] = "CreateProcessAsUserW";
+                report["parentQuotaDuringApi"] = "API-managed temporary use of existing privilege may occur; not sampled during call";
+                report["parentQuotaWasDisabled"] = (quotaAttributes & 2) == 0;
+            } else if (originalIntegrity != 0x2000) {
                 Require(originalIntegrity == 0x3000, "Unknown runner integrity; refusing a token transition.");
                 try {
                     IntPtr data = TokenData(ownToken, 19);
@@ -1132,24 +1148,37 @@ public static partial class ViCiDesktop
             report["launchIntegrity"] = TokenIntegrity(launchToken);
             report["sameUserTokenVerified"] = true;
             report["privilegesEnabledByLauncher"] = false;
+            if (useOwnRestrictedAsUser) report["ownedLayoutVerification"] = prepareOwnedLayout(workingDirectory, directory, ownToken, launchToken);
             string jobName = "vi-ci-caret-" + Environment.GetEnvironmentVariable("GITHUB_RUN_ID") + "-" + Guid.NewGuid().ToString("N");
             job = NewJob(jobName);
             Environment.SetEnvironmentVariable("VI_CARET_JOB_NAME", jobName);
             report["specificJobName"] = jobName;
             var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = @"WinSta0\Default" };
             var command = new StringBuilder(Quote(executable) + " " + Quote(script));
-            if (launchToken != ownToken) {
+            if (!useOwnRestrictedAsUser && launchToken != ownToken) {
                 Win32(LookupPrivilegeValueW(null, "SeImpersonatePrivilege", out long impersonate), "Read required parent privilege identity");
                 if (!parentPrivileges.TryGetValue(impersonate, out uint attributes) || (attributes & 2) == 0)
                     throw new Win32Exception(1314, "CreateProcessWithTokenW requires already-enabled parent SeImpersonatePrivilege; no enablement is allowed.");
                 report["requiredParentPrivilegeAlreadyEnabled"] = true;
             }
-            bool started = launchToken == ownToken
+            bool started = useOwnRestrictedAsUser
+                ? CreateProcessAsUserW(launchToken, executable, command, IntPtr.Zero, IntPtr.Zero, false,
+                    SuspendedNoWindow, IntPtr.Zero, workingDirectory, ref startup, out child)
+                : launchToken == ownToken
                 ? CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false, SuspendedNoWindow, IntPtr.Zero,
                     workingDirectory, ref startup, out child)
                 : CreateProcessWithTokenW(launchToken, 0, executable, command, SuspendedNoWindow, IntPtr.Zero,
                     workingDirectory, ref startup, out child);
-            Win32(started, "Start own medium caret fixture");
+            int startError = started ? 0 : Marshal.GetLastWin32Error();
+            if (useOwnRestrictedAsUser) {
+                var afterCall = Privileges(ownToken);
+                bool restored = afterCall.Count == parentPrivileges.Count;
+                foreach (var privilege in afterCall)
+                    restored = restored && parentPrivileges.TryGetValue(privilege.Key, out uint attributes) && attributes == privilege.Value;
+                report["parentPrivilegeAttributesRestoredAtApiReturn"] = restored;
+                Require(restored, "Parent privilege attributes were not restored at API return; root must remain suspended.");
+            }
+            if (!started) throw new Win32Exception(startError, "Start own medium caret fixture");
             Win32(AssignProcessToJobObject(job, child.process), "Assign suspended caret root to its owned Job");
             attached = true;
             Win32(IsProcessInJob(child.process, job, out bool member), "Verify caret specific Job membership");
@@ -1225,6 +1254,7 @@ public static partial class ViCiDesktop
             report["executionSeconds"] = clock.Elapsed.TotalSeconds;
             report["errors"] = errors;
             report["passed"] = result == 0 && errors.Count == 0;
+            if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
             Write(directory, "caret-launch.json", report);
         }
         return result == 0 && errors.Count == 0 ? 0 : 1;

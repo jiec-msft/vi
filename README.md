@@ -156,19 +156,26 @@ This deliberate opt-in behavior does not alter delivery when the setting is off.
 `Windows caret integration` is a separate, standard Windows x64 hosted check
 with a 10-minute whole-job limit and an internal 180-second GUI watchdog. Its
 synthetic native editor exercises the actual application, not the presentation
-prototype. The hosted launcher uses the runner's own existing medium/linked
-token or, only for an absent linked token (Win32 1312), derives a restricted
-medium primary token from its own token. This disables maximum privileges and
+prototype. Its explicit `CreateProcessAsUserW` launcher derives a restricted
+medium primary token from the runner's own primary token. This disables maximum privileges and
 makes existing administrator/owner groups deny-only; it is not a UAC linked token.
 The launcher verifies user/logon/session identity, medium integrity, primary type,
 filtered provenance, admin deny-only, privilege subset and UIAccess. It checks
 the exact suspended root binary and birth identity, attaches
 an owned kill-on-close Job before resuming, and preserves nonzero exits and
-cleanup receipts. `CreateProcessWithTokenW` is permitted only when the required
-parent `SeImpersonatePrivilege` is already enabled; missing privileges (1314)
-block the job. Parent privilege state is compared before/after. The launcher
-never enables privileges, changes UAC/desktop ACLs, or weakens product integrity
-checks. The additional quiet-exit fixture must fail with its exact raw code.
+cleanup receipts. The existing parent Quota privilege must be present; absence
+blocks the job (1314). As documented by
+[CreateProcessAsUserW](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
+the API may temporarily enable this existing privilege during its call and
+restore it afterward. This is not a claim that privilege state is unchanged
+**during** the call. Full parent privilege attributes are checked immediately
+at API return; a mismatch terminates the owned root without resuming it.
+No manual privilege adjustment, new credentials or launch-API fallback chain is
+used. Only the fresh canonical synthetic profile/evidence tree receives an
+inheritable current-user Modify entry; original ACL entries are preserved and
+actual medium-token access is checked. Workspace and desktop ACLs, UAC and
+product integrity checks remain unchanged. The quiet-exit fixture must fail
+with its exact raw code and the same cleanup/state-restoration checks.
 
 Microsoft's [CreateRestrictedToken guidance](https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
 warns against placing untrusted restricted applications on Default, where they
