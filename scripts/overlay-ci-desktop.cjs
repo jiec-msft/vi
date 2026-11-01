@@ -1,4 +1,102 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { createHash, randomUUID } = require('node:crypto');
+const { execFile } = require('node:child_process');
+
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+function nodeEvent(report, kind, extra = {}) {
+  report.nodeEvents ||= [];
+  assert.ok(report.nodeEvents.length < 4096, 'Owned causal event inventory exceeded its bound.');
+  const request = report.causalRequests?.find((value) => value.requestId === extra.requestId);
+  const identity = request ? Object.fromEntries(['sourceHead','runId','attempt','caseId','callerPid','role','generation',
+    'requestId','requestNonce','requestSequence'].map((key) => [key, request[key]])) : report.causalContext;
+  const event = { ...identity, eventId: report.nodeEvents.length + 1, kind, at: Date.now(),
+    ticks: process.hrtime.bigint().toString(), clock: 'Node-process-hrtime', ...extra };
+  report.nodeEvents.push(event);
+  return event;
+}
+function createRequest(report, role, generation, caseId) {
+  report.causalRequests ||= [];
+  const sequence = report.causalRequests.length + 1;
+  const value = { sourceHead: process.env.VI_PROBE_HEAD, runId: process.env.GITHUB_RUN_ID,
+    attempt: process.env.GITHUB_RUN_ATTEMPT, caseId, callerPid: process.pid, role, generation,
+    requestSequence: sequence, requestId: `${process.pid}-${sequence}-${role}-${generation}`, requestNonce: randomUUID() };
+  value.begin = nodeEvent(report, 'request-begin', { ...value });
+  report.causalRequests.push(value);
+  return value;
+}
+function requestEnvironment(request, base = process.env) {
+  return { ...base, VI_CI_NATIVE_GENERATION: String(request.generation),
+    VI_CI_NATIVE_SPAWN_REQUEST: request.requestId, VI_CI_NATIVE_REQUEST_SEQUENCE: String(request.requestSequence),
+    VI_CI_NATIVE_REQUEST_NONCE: request.requestNonce, VI_CI_NATIVE_CALLER_PID: String(request.callerPid) };
+}
+function assertRequest(value, request) {
+  for (const key of ['sourceHead', 'runId', 'attempt', 'caseId', 'callerPid', 'role', 'generation',
+    'requestId', 'requestNonce', 'requestSequence']) assert.equal(value[key], request[key], `Causal ${key} mismatch.`);
+}
+async function consumeCommitted(directory, stem, request, report) {
+  const bytes = await fs.readFile(path.join(directory, `${stem}.json`));
+  const commitBytes = await fs.readFile(path.join(directory, `${stem}.commit.json`));
+  const value = JSON.parse(bytes), commit = JSON.parse(commitBytes);
+  assertRequest(value, request); assertRequest(commit, request);
+  assert.equal(commit.fileName, `${stem}.json`);
+  assert.equal(commit.commitComplete, true);
+  assert.equal(commit.sha256, sha256(bytes));
+  assert.equal(commit.pid, request.returnedPid);
+  assert.equal(commit.creationFileTime, value.creationFileTime);
+  assert.equal(commit.executionThread, value.executionThread);
+  const jobBytes = await fs.readFile(path.join(request.jobDirectory, value.jobReceipt.fileName));
+  const job = JSON.parse(jobBytes);
+  assert.equal(sha256(jobBytes), value.jobReceipt.sha256);
+  assert.equal(job.pid, request.returnedPid);
+  assert.equal(job.creationFileTime, value.creationFileTime);
+  assert.equal(job.specificJobMember, true);
+  assert.equal(job.status, 'verified-specific-job-process-identity');
+  assert.equal(job.caseId, request.caseId);
+  const consumed = nodeEvent(report, 'committed-receipt-consumed', { requestId: request.requestId,
+    requestNonce: request.requestNonce, fileName: commit.fileName });
+  return { value, commit, sha256: sha256(bytes), commitSHA256: sha256(commitBytes),
+    bytesBase64: bytes.toString('base64'), commitBytesBase64: commitBytes.toString('base64'),
+    jobBytesBase64: jobBytes.toString('base64'), consumed };
+}
+async function executeOwnedDriver(report, request, args, outputDirectory) {
+  const resultPromise = new Promise((resolve) => {
+    const child = execFile('powershell.exe', args, { timeout: 15000, windowsHide: true, env: requestEnvironment(request) },
+      (error, stdout, stderr) => {
+        request.callback = nodeEvent(report, 'driver-callback', { requestId: request.requestId });
+        resolve({ error, stdout, stderr });
+      });
+    request.returnedPid = child.pid;
+    request.returned = nodeEvent(report, 'request-return', { requestId: request.requestId, pid: child.pid });
+    child.once('spawn', () => { request.spawn = nodeEvent(report, 'process-spawn', { requestId: request.requestId, pid: child.pid }); });
+    child.once('exit', (code, signal) => { request.exit = nodeEvent(report, 'process-exit', { requestId: request.requestId, code, signal }); });
+    request.closed = new Promise((done) => child.once('close', (code, signal) => {
+      request.close = nodeEvent(report, 'process-close', { requestId: request.requestId, code, signal }); done();
+    }));
+  });
+  const result = await resultPromise;
+  await request.closed;
+  delete request.closed;
+  if (!result.stdout.trim()) {
+    throw result.error || new Error('Owned driver produced no complete final response.');
+  }
+  const value = JSON.parse(result.stdout);
+  request.response = nodeEvent(report, 'driver-response-consumed', { requestId: request.requestId });
+  const ack = await consumeCommitted(outputDirectory, `driver-response-${request.requestNonce}`, request, report);
+  assert.equal(JSON.stringify(ack.value), JSON.stringify(value), 'Pipe response differs from committed native response.');
+  const receipt = { ...value, processExitObservedAt: request.exit.at, processExitObservedTicks: request.exit.ticks,
+    causalRequest: request, committedAck: ack };
+  if (result.error) { result.error.nativeReceipt = receipt; throw result.error; }
+  assert.equal(value.responseOutcome, 'success');
+  return receipt;
+}
+function downAuthority(value) {
+  return { ownedDownInjected: value.ownedDownInjected, ownerVerified: value.ownerVerified, leftHeldAfter: value.leftHeldAfter,
+    mode: value.mode, input: value.input, ownedOwnerPid: value.ownedOwnerPid, ownedWindow: value.ownedWindow,
+    threadDesktop: value.threadDesktop, inputDesktop: value.inputDesktop, requestNonce: value.requestNonce,
+    responseSHA256: value.committedAck.sha256 };
+}
 
 function finiteTime(value) {
   assert.ok(Number.isFinite(value) && value > 0, 'A completed proof lacks its actual timestamp.');
@@ -17,7 +115,17 @@ function assertSelfThread(receipt, desktop) {
   assert.equal(receipt.threadDesktop, desktop.ownedDesktop);
   assert.equal(receipt.inputDesktop, desktop.ownedDesktop);
   assertCoverage(receipt, 'self-execution-thread-not-all-process-threads');
-  assert.ok(finiteTime(receipt.queryStartedAt) <= finiteTime(receipt.queryCompletedAt));
+  finiteTime(receipt.queryStartedAt); finiteTime(receipt.queryCompletedAt);
+  assert.ok(finiteTime(receipt.nativeQueryStartedAt) <= finiteTime(receipt.nativeQueryCompletedAt));
+  assert.equal(receipt.selfLiveApi, 'WaitForSingleObject');
+  assert.equal(receipt.selfLiveWaitState, 258);
+  assert.equal(receipt.selfLiveWin32Error, 0);
+  assert.ok(finiteTime(receipt.selfLiveCheckedAt) >= receipt.nativeQueryCompletedAt);
+  assert.equal(receipt.jobReceipt.consumptionComplete, true);
+  assert.equal(receipt.jobReceipt.consumptionThread, receipt.executionThread);
+  assert.ok(ticks(receipt.jobReceipt.consumedTicks) <= ticks(receipt.queryStartedTicks) &&
+    ticks(receipt.queryStartedTicks) <= ticks(receipt.queryCompletedTicks) &&
+    ticks(receipt.queryCompletedTicks) <= ticks(receipt.selfLiveCheckedTicks));
 }
 function ticks(value) {
   assert.match(value, /^[1-9][0-9]*$/, 'A native readiness diagnostic lacks its monotonic sample.');
@@ -30,7 +138,6 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
   assert.equal(receipt.monotonicClock, 'native-process-Stopwatch');
   assert.ok(ticks(receipt.monotonicFrequency) > 0n);
   assert.ok(ticks(receipt.queryStartedTicks) <= ticks(receipt.queryCompletedTicks));
-  if (helper.role !== 'overlay-pointer') return;
   const readyEvents = helper.events.filter(({ type }) => type === 'ready');
   const matched = emissions.filter((value) => value.pid === helper.pid && value.role === helper.role);
   assert.equal(matched.length, readyEvents.length, 'Each exact pointer READY needs its own native write diagnostic.');
@@ -38,7 +145,8 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
   for (const [index, event] of readyEvents.entries()) {
     const sequence = index + 1;
     assert.equal(event.readySequence, sequence);
-    assert.equal(event.message, '{"type":"ready"}');
+    if (helper.role === 'overlay-pointer') assert.equal(event.message, '{"type":"ready"}');
+    else assert.equal(JSON.parse(event.message).value.ready, true);
     assert.equal(event.monotonicClock, 'Node-process-hrtime-not-native-stopwatch');
     assert.ok(Number.isInteger(event.receiveOrder) && event.receiveOrder > previousReceiveOrder);
     assert.ok(ticks(event.receivedTicks) > previousReceiveTicks);
@@ -47,6 +155,9 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
     const matches = matched.filter((value) => value.readySequence === sequence);
     assert.equal(matches.length, 1, 'READY sequence must match one immutable native emission.');
     const emission = matches[0];
+    for (const key of ['queryStartedAt', 'queryCompletedAt', 'queryStartedTicks', 'queryCompletedTicks',
+      'selfLiveCheckedAt', 'selfLiveCheckedTicks', 'selfLiveWaitState', 'jobReceipt'])
+      assert.deepEqual(emission[key], receipt[key], 'READY emission changed the completed native query proof.');
     assert.equal(emission.creationFileTime, receipt.creationFileTime);
     assert.equal(emission.generation, helper.generation);
     assert.equal(emission.requestId, helper.requestId);
@@ -59,11 +170,66 @@ function assertReadyDiagnostics(helper, receipt, emissions) {
     assert.equal(emission.monotonicFrequency, receipt.monotonicFrequency);
     finiteTime(emission.writeStartedAt);
     finiteTime(emission.writeCompletedAt);
-    assert.ok(ticks(receipt.queryCompletedTicks) <= ticks(emission.writeStartedTicks) &&
+    assert.ok(ticks(receipt.selfLiveCheckedTicks) <= ticks(emission.writeStartedTicks) &&
       previousWriteTicks <= ticks(emission.writeStartedTicks) &&
       ticks(emission.writeStartedTicks) <= ticks(emission.writeCompletedTicks),
     `Native query/READY monotonic ordering failed: ${JSON.stringify({ receipt, emission, event })}`);
     previousWriteTicks = ticks(emission.writeCompletedTicks);
+  }
+  function assertNodeEvent(event, report, request) {
+    assert.equal(event.clock, 'Node-process-hrtime');
+    assert.equal(event.requestId, request.requestId);
+    assertRequest(event, request);
+    assert.ok(Number.isInteger(event.eventId) && event.eventId > 0);
+    assert.deepEqual(report.nodeEvents[event.eventId - 1], event, 'Causal event is not the actually retained event.');
+    ticks(event.ticks);
+  }
+  function assertCausalRequest(request, report, desktop) {
+    assert.ok(Number.isInteger(request.generation) && request.generation > 0);
+    assert.ok(Number.isInteger(request.requestSequence) && request.requestSequence > 0);
+    for (const key of ['sourceHead', 'runId', 'attempt', 'caseId'])
+      assert.equal(request[key], report.causalContext[key]);
+    assert.equal(request.caseId, desktop.ownedDesktop);
+    assert.equal(request.callerPid, desktop.ownedPid);
+    assert.match(request.requestNonce, /^[a-f0-9-]{36}$/);
+    assert.equal(request.requestId, `${request.callerPid}-${request.requestSequence}-${request.role}-${request.generation}`);
+    assertNodeEvent(request.begin, report, request);
+    assertNodeEvent(request.returned, report, request);
+    assertNodeEvent(request.spawn, report, request);
+    assert.equal(request.returned.pid, request.returnedPid);
+    assert.equal(request.spawn.pid, request.returnedPid);
+    assert.ok(ticks(request.begin.ticks) <= ticks(request.returned.ticks) &&
+      ticks(request.returned.ticks) <= ticks(request.spawn.ticks));
+  }
+  function assertCommitted(ack, request, report, observation) {
+    const value = JSON.parse(Buffer.from(ack.bytesBase64, 'base64'));
+    const commit = JSON.parse(Buffer.from(ack.commitBytesBase64, 'base64'));
+    assert.deepEqual(ack.value, value);
+    assert.deepEqual(ack.commit, commit);
+    assertRequest(value, request); assertRequest(commit, request);
+    assert.equal(sha256(Buffer.from(ack.bytesBase64, 'base64')), ack.sha256);
+    assert.equal(sha256(Buffer.from(ack.commitBytesBase64, 'base64')), ack.commitSHA256);
+    assert.equal(commit.sha256, ack.sha256);
+    assert.equal(commit.commitComplete, true);
+    assert.equal(commit.pid, request.returnedPid);
+    assert.equal(value.pid, request.returnedPid);
+    assert.equal(commit.creationFileTime, observation.creationFileTime);
+    assert.equal(value.creationFileTime, observation.creationFileTime);
+    assert.equal(commit.executionThread, value.executionThread);
+    assert.equal(commit.monotonicClock, 'native-process-Stopwatch');
+    assert.equal(commit.monotonicFrequency, value.monotonicFrequency);
+    const job = JSON.parse(Buffer.from(ack.jobBytesBase64, 'base64'));
+    assert.deepEqual(job, observation, 'Consumed immutable Job bytes differ from the independent observation.');
+    assert.equal(value.jobReceipt.sha256, sha256(Buffer.from(ack.jobBytesBase64, 'base64')));
+    assert.equal(value.jobReceipt.fileName, `job-${request.returnedPid}-${observation.creationFileTime}.json`);
+    assert.equal(value.jobReceipt.pid, observation.pid);
+    assert.equal(value.jobReceipt.creationFileTime, observation.creationFileTime);
+    assert.equal(value.jobReceipt.snapshotCompletedAt, observation.snapshotCompletedAt);
+    assert.equal(value.jobReceipt.liveCheckedAt, observation.liveCheckedAt);
+    assert.ok(ticks(value.selfLiveCheckedTicks) <= ticks(commit.committedTicks));
+    if (value.writeComplete) assert.ok(ticks(value.writeCompletedTicks) <= ticks(commit.committedTicks));
+    if (value.responseComplete) assert.ok(ticks(value.responseReadyTicks) <= ticks(commit.committedTicks));
+    assertNodeEvent(ack.consumed, report, request);
   }
 }
 function assertSpawnDiagnostics(helper, owner) {
@@ -90,6 +256,11 @@ function assertWrapperOutcome(desktop, expectedErrors = []) {
       childExitCode: desktop.childExitCode, errors: desktop.errors, defaultHeartbeatCheck: desktop.defaultHeartbeatCheck })}`);
 }
 function assertDesktopChain(report, desktop) {
+  assert.equal(report.causalContext.sourceHead, desktop.headSha);
+  assert.equal(report.causalContext.runId, desktop.runId);
+  assert.equal(report.causalContext.attempt, desktop.attempt);
+  assert.equal(report.causalContext.caseId, desktop.ownedDesktop);
+  assert.equal(report.causalContext.callerPid, desktop.ownedPid);
   assert.equal(report.windowIds.owner, desktop.ownedPid);
   assert.equal(desktop.initialControllerThreadDesktop, 'Default');
   assert.equal(desktop.controllerThreadDesktop, 'Default');
@@ -178,6 +349,10 @@ function assertDesktopChain(report, desktop) {
     assert.equal(observation.liveCheckWin32Error, 0);
     assert.equal(observation.processCreationApi, 'GetProcessTimes');
     assert.equal(observation.processCreationClock, 'Win32-FILETIME-not-Node-Date.now');
+    assert.equal(observation.sourceHead, desktop.headSha);
+    assert.equal(observation.runId, desktop.runId);
+    assert.equal(observation.attempt, desktop.attempt);
+    assert.equal(observation.caseId, desktop.ownedDesktop);
     assertCoverage(observation, 'specific-job-process-identity-not-thread-desktop');
     assert.ok(finiteTime(observation.processCreatedAt) <= finiteTime(observation.observedAt) &&
       observation.observedAt <= finiteTime(observation.snapshotCompletedAt) &&
@@ -249,6 +424,14 @@ function assertDesktopChain(report, desktop) {
 
   const receipts = report.nativeDesktopReceipts || [];
   const helpers = report.helpers || [];
+  const requests = report.causalRequests || [];
+  for (const [index, event] of (report.nodeEvents || []).entries()) {
+    assert.equal(event.eventId, index + 1); assert.equal(event.clock, 'Node-process-hrtime');
+    if (index) assert.ok(ticks(report.nodeEvents[index - 1].ticks) <= ticks(event.ticks), 'Node event order regressed.');
+  }
+  assert.equal(new Set(requests.map(({ requestNonce }) => requestNonce)).size, requests.length, 'Request nonce reused.');
+  assert.equal(new Set(requests.map(({ requestId }) => requestId)).size, requests.length, 'Request identity reused.');
+  report.foreignChronologyDiagnostics = [];
   let previousRequestSequence = 0;
   for (const helper of helpers) {
     assertSpawnDiagnostics(helper, desktop.ownedPid);
@@ -259,10 +442,20 @@ function assertDesktopChain(report, desktop) {
     const receipt = matching[0];
     assertSelfThread(receipt, desktop);
     const job = member(helper.pid, receipt.creationFileTime);
+    const request = helper.causalRequest;
+    assertCausalRequest(request, report, desktop);
+    assert.equal(request.returnedPid, helper.pid);
     assert.ok(Number.isInteger(helper.generation) && helper.generation > 0);
+    assert.ok(helper.generation <= 4, 'Native helper lifetime generation cap exceeded.');
     assert.ok(helpers.filter((value) => value.role === helper.role && value.generation === helper.generation).length === 1);
     const next = helpers.find((value) => value.role === helper.role && value.generation === helper.generation + 1);
-    if (next) assert.ok(helper.closedAt <= next.startedAt, 'Helper generations must not overlap.');
+    if (next) {
+      assertNodeEvent(helper.exit.causal, report, request); assertNodeEvent(helper.close, report, request);
+      assert.ok(ticks(helper.exit.causal.ticks) <= ticks(helper.close.ticks) &&
+        ticks(helper.close.ticks) <= ticks(next.causalRequest.begin.ticks), 'Replacement precedes actual exit and close.');
+      assert.equal(helper.close.code, helper.exit.code);
+      assert.equal(helper.close.signal, helper.exit.signal);
+    }
     const ready = helper.events.find(({ type }) => type === 'ready');
     assert.ok(ready, 'Required helper never reached readiness.');
     assertReadyDiagnostics(helper, receipt, report.nativeReadyReceipts || []);
@@ -279,26 +472,72 @@ function assertDesktopChain(report, desktop) {
       queryCompletedAt: receipt.queryCompletedAt, queryCompletedTicks: receipt.queryCompletedTicks,
       ready, nativeReady: (report.nativeReadyReceipts || []).filter((value) =>
         value.pid === helper.pid && value.role === helper.role) });
-    assert.ok(job.processCreatedAt <= helper.startedAt, `Native birth/Node original helper start comparison failed: ${chronology}`);
-    assert.ok(job.liveCheckedAt <= receipt.queryStartedAt, `Native self-query predates completed Job/live proof: ${chronology}`);
-    assert.ok(finiteTime(helper.startedAt) <= receipt.queryCompletedAt);
-    assert.ok(receipt.queryCompletedAt <= finiteTime(ready.at), `Native self-query completed after observed readiness: ${chronology}`);
-    if (helper.exit) assert.ok(job.liveCheckedAt <= helper.exit.at && receipt.queryCompletedAt <= helper.exit.at);
+    finiteTime(helper.startedAt); finiteTime(ready.at);
+    report.foreignChronologyDiagnostics.push({ kind: 'helper', chronology: JSON.parse(chronology),
+      bornBeforeNodeStart: job.processCreatedAt <= helper.startedAt, nodeStartBeforeNativeQuery: helper.startedAt <= receipt.queryCompletedAt,
+      jobLiveBeforeForeignQuery: job.liveCheckedAt <= receipt.queryStartedAt, nativeQueryBeforeNodeReady: receipt.queryCompletedAt <= ready.at,
+      nativeQueryBeforeNodeExit: !helper.exit || receipt.queryCompletedAt <= helper.exit.at });
+    assert.ok(job.processCreatedAt <= receipt.queryStartedAt, 'Native-only birth interval invalid.');
+    assert.equal(helper.readyAcks.length, helper.events.filter(({ type }) => type === 'ready').length);
+    for (const ack of helper.readyAcks) {
+      assertCommitted(ack.self, request, report, job); assertCommitted(ack.ready, request, report, job);
+      assert.deepEqual(ack.self.value, receipt);
+      const event = helper.events.find((value) => value.readySequence === ack.readySequence);
+      assertNodeEvent(event.causal, report, request); assertNodeEvent(ack.acknowledged, report, request);
+      assert.ok(ticks(request.spawn.ticks) <= ticks(event.causal.ticks) &&
+        ticks(event.causal.ticks) <= ticks(ack.self.consumed.ticks) &&
+        ticks(ack.self.consumed.ticks) <= ticks(ack.ready.consumed.ticks) &&
+        ticks(ack.ready.consumed.ticks) <= ticks(ack.acknowledged.ticks));
+      assert.equal(ack.ready.commit.readySequence, event.readySequence);
+      if (helper.exit) assert.ok(ticks(event.causal.ticks) <= ticks(helper.exit.causal.ticks), 'Late READY event after exit.');
+    }
   }
   assert.equal(receipts.length, helpers.length, 'Unjoined native receipts cannot stand in for required roles.');
   assert.equal((report.nativeReadyReceipts || []).length,
-    helpers.filter(({ role }) => role === 'overlay-pointer')
-      .reduce((count, helper) => count + helper.events.filter(({ type }) => type === 'ready').length, 0),
+    helpers.reduce((count, helper) => count + helper.events.filter(({ type }) => type === 'ready').length, 0),
     'Unjoined READY diagnostics cannot stand in for required generations.');
   for (const receipt of [...report.osInputs, ...(report.cleanupRelease ? [report.cleanupRelease] : [])]) {
     assert.equal(receipt.role, 'os-mouse-driver');
     assertSelfThread(receipt, desktop);
     const job = member(receipt.driverPid, receipt.creationFileTime);
-    assert.ok(job.liveCheckedAt <= receipt.queryStartedAt &&
-      receipt.queryCompletedAt <= finiteTime(receipt.processExitObservedAt),
-    `Driver proof chronology failed: ${JSON.stringify({ pid: receipt.driverPid, creationFileTime: receipt.creationFileTime,
-      jobCompletedAt: job.snapshotCompletedAt, liveCheckedAt: job.liveCheckedAt, queryStartedAt: receipt.queryStartedAt,
-      queryCompletedAt: receipt.queryCompletedAt, processExitObservedAt: receipt.processExitObservedAt })}`);
+    const request = receipt.causalRequest;
+    assertCausalRequest(request, report, desktop);
+    assert.equal(request.returnedPid, receipt.driverPid);
+    assertCommitted(receipt.committedAck, request, report, job);
+    assert.deepEqual(receipt.committedAck.value, Object.fromEntries(Object.entries(receipt)
+      .filter(([key]) => !['causalRequest', 'committedAck', 'processExitObservedAt', 'processExitObservedTicks', 'at', 'stage'].includes(key))));
+    assert.equal(receipt.responseComplete, true);
+    assert.equal(receipt.inputExecutionThread, receipt.executionThread);
+    assert.ok(ticks(receipt.selfLiveCheckedTicks) <= ticks(receipt.guardStartedTicks) &&
+      ticks(receipt.guardStartedTicks) <= ticks(receipt.guardCompletedTicks) &&
+      ticks(receipt.guardCompletedTicks) <= ticks(receipt.inputCompletedTicks) &&
+      ticks(receipt.inputCompletedTicks) <= ticks(receipt.responseReadyTicks));
+    if (receipt.inputAttempted) {
+      assert.equal(receipt.guardOutcome, 'passed');
+      assert.ok(ticks(receipt.guardCompletedTicks) <= ticks(receipt.inputStartedTicks) &&
+        ticks(receipt.inputStartedTicks) <= ticks(receipt.inputCompletedTicks));
+    }
+    else assert.equal(receipt.inputPerformed, false);
+    for (const event of [request.exit, request.callback, request.close, request.response]) assertNodeEvent(event, report, request);
+    assert.ok(ticks(request.spawn.ticks) <= ticks(request.exit.ticks) && ticks(request.exit.ticks) <= ticks(request.callback.ticks) &&
+      ticks(request.callback.ticks) <= ticks(request.close.ticks) && ticks(request.close.ticks) <= ticks(request.response.ticks) &&
+      ticks(request.response.ticks) <= ticks(receipt.committedAck.consumed.ticks));
+    assert.equal(receipt.responseOutcome, request.exit.code === 0 ? 'success' : 'error');
+    if (receipt.cleanupUpOnly && receipt.releaseSent) {
+      const authority = receipt.authorityReceipt;
+      assert.equal(authority.consumptionComplete, true);
+      assert.equal(authority.consumptionThread, receipt.executionThread);
+      assert.ok(ticks(authority.consumedTicks) <= ticks(receipt.guardStartedTicks));
+      const down = report.osInputs.find((value) => value.requestNonce === authority.requestNonce);
+      assert.ok(down && down.ownedDownInjected && down.ownerVerified && down.leftHeldAfter);
+      assert.equal(authority.sha256, down.committedAck.sha256);
+      assert.equal(authority.pid, down.driverPid);
+      assert.equal(authority.creationFileTime, down.creationFileTime);
+    }
+    report.foreignChronologyDiagnostics.push({ kind: 'driver', pid: receipt.driverPid,
+      jobLiveBeforeForeignQuery: job.liveCheckedAt <= receipt.queryStartedAt,
+      nativeQueryBeforeNodeExit: receipt.queryCompletedAt <= receipt.processExitObservedAt,
+      queryCompletedAt: receipt.queryCompletedAt, processExitObservedAt: receipt.processExitObservedAt });
     assert.ok(job.processCreatedAt <= receipt.queryStartedAt);
     assert.equal(receipt.targetEnumerationApi, 'EnumDesktopWindows');
     assert.equal(receipt.targetEnumeratedOnOwnedDesktop, true);
@@ -317,12 +556,23 @@ function assertDesktopChain(report, desktop) {
     assert.equal(report.initialPointerRestarts, 1);
     const receipt = receipts.find(({ pid }) => pid === failed.pid);
     const job = member(failed.pid, receipt.creationFileTime);
-    assert.ok(job.liveCheckedAt < finiteTime(recovery.injectedAt) &&
-      receipt.queryCompletedAt < recovery.injectedAt, 'Both completed startup proofs must precede the injected exit.');
-    assert.ok(recovery.injectedAt <= recovery.failedExitAt &&
-      recovery.failedExitAt <= finiteTime(recovery.recoveredReadyAt) &&
-      recovery.recoveredReadyAt <= finiteTime(report.rootReadyAt));
+    finiteTime(recovery.injectedAt); finiteTime(recovery.failedExitAt); finiteTime(recovery.recoveredReadyAt); finiteTime(report.rootReadyAt);
+    const ack = failed.readyAcks.find(({ readySequence }) => readySequence === 1);
+    assert.equal(failed.startupFailureDelayMs, 300);
+    assertNodeEvent(recovery.injection, report, failed.causalRequest);
+    assert.ok(ticks(ack.acknowledged.ticks) < ticks(recovery.injection.ticks), 'Actual committed receipt ACK must precede injection.');
+    assert.ok(ticks(recovery.injection.ticks) <= ticks(failed.exit.causal.ticks) &&
+      ticks(failed.exit.causal.ticks) <= ticks(failed.close.ticks) &&
+      ticks(failed.close.ticks) <= ticks(recovered.causalRequest.begin.ticks) &&
+      ticks(recovered.events[0].causal.ticks) <= ticks(report.rootReadyEvent.ticks));
+    report.foreignChronologyDiagnostics.push({ kind: 'startup-injection', pid: failed.pid,
+      jobLiveBeforeForeignInjection: job.liveCheckedAt < recovery.injectedAt,
+      nativeQueryBeforeForeignInjection: receipt.queryCompletedAt < recovery.injectedAt,
+      injectedAt: recovery.injectedAt, queryCompletedAt: receipt.queryCompletedAt });
   }
+  assert.equal(requests.length, helpers.length + report.osInputs.length + (report.cleanupRelease ? 1 : 0), 'Unjoined causal request.');
+  report.clockProofContract = 'per-clock-causal-identity-v1';
 }
 
-module.exports = { assertDesktopChain, assertWrapperOutcome };
+module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
+  consumeCommitted, executeOwnedDriver, downAuthority };

@@ -760,6 +760,10 @@ public static class ViCiDesktop
         public long processCreatedAt { get; set; }
         public string processCreationApi { get; set; } = "GetProcessTimes";
         public string processCreationClock { get; set; } = "Win32-FILETIME-not-Node-Date.now";
+        public string sourceHead { get; set; } = Environment.GetEnvironmentVariable("VI_PROBE_HEAD");
+        public string runId { get; set; } = Environment.GetEnvironmentVariable("GITHUB_RUN_ID");
+        public string attempt { get; set; } = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT");
+        public string caseId { get; set; }
         public string creationFileTime { get; set; }
         public bool specificJobMember { get; set; }
         public bool liveAtCompletion { get; set; }
@@ -795,6 +799,7 @@ public static class ViCiDesktop
                     string identity = pid + "-" + created;
                     if (!observations.TryGetValue(identity, out var observation)) {
                         observation = new DesktopObservation { pid = pid, creationFileTime = created.ToString(),
+                            caseId = desktop,
                             processCreatedAt = new DateTimeOffset(DateTime.FromFileTimeUtc(created)).ToUnixTimeMilliseconds(),
                             firstJobObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
                         observations.Add(identity, observation);

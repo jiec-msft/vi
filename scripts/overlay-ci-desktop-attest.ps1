@@ -2,15 +2,16 @@ param(
     [Parameter(Mandatory = $true)][string] $DesktopName,
     [Parameter(Mandatory = $true)][string] $Output,
     [Parameter(Mandatory = $true)][string] $JobOutput,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 4)][int] $Generation,
-    [ValidateSet('overlay-pointer', 'desktop-delivery')][string] $Role
+    [Parameter(Mandatory = $true)][ValidateRange(1, 256)][int] $Generation,
+    [ValidateSet('overlay-pointer', 'desktop-delivery', 'os-mouse-driver')][string] $Role
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $DesktopName -notmatch '^vi-ci-[0-9]+-[0-9]+-[a-f0-9]{32}$') {
     throw 'Desktop attestation requires the current isolated owned CI desktop.'
 }
-Add-Type -TypeDefinition @'
+if ($Role -ne 'os-mouse-driver' -and $Generation -gt 4) { throw 'Native helper lifetime generation cap exceeded.' }
+Add-Type -ReferencedAssemblies 'System', 'System.Runtime.Serialization', 'System.Core' -TypeDefinition @'
 using System;
 using System.Text;
 using System.Diagnostics;
@@ -18,125 +19,207 @@ using System.IO;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Security.Cryptography;
+[DataContract] public sealed class OverlayJobReceipt {
+    [DataMember] public int pid;
+    [DataMember] public string creationFileTime, status, membershipApi, liveCheckApi, sourceHead, runId, attempt, caseId;
+    [DataMember] public bool specificJobMember, liveAtCompletion;
+    [DataMember] public long snapshotCompletedAt, liveCheckedAt, processCreatedAt;
+    [DataMember] public uint liveCheckWaitState;
+    [DataMember] public int liveCheckWin32Error;
+}
 public static class OverlayDesktopAttestor {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetThreadDesktop(uint thread);
     [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
-    [DllImport("user32.dll")] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
-    [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool CloseDesktop(IntPtr desktop);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder value, uint bytes, out uint needed);
+    static string expected, output, role, request, nonce, head, run, attempt;
+    static int generation, requestSequence, caller, readySequence;
+    static uint executionThread;
+    static Dictionary<string, object> consumed, self, authorityReceipt;
+    static string readyMessage;
+    static long readyStartedAt, readyStartedTicks;
+    static void Require(bool condition, string error) { if (!condition) throw new InvalidOperationException(error); }
     static string Name(IntPtr handle) {
-        var value = new StringBuilder(512);
-        uint needed;
-        if (handle == IntPtr.Zero || !GetUserObjectInformation(handle, 2, value, 1024, out needed))
-            throw new InvalidOperationException("Self desktop identity unavailable PID/TID " +
-                Process.GetCurrentProcess().Id + "/" + GetCurrentThreadId() + " error " + Marshal.GetLastWin32Error());
+        var value = new StringBuilder(512); uint needed;
+        Require(handle != IntPtr.Zero && GetUserObjectInformation(handle, 2, value, 1024, out needed),
+            "Self desktop identity unavailable error " + Marshal.GetLastWin32Error());
         return value.ToString();
     }
-    static string expected, output, role, spawnRequest;
-    static int requestSequence;
-    static uint initialThread;
-    static int generation, readySequence;
-    static long readyWriteStartedAt, readyWriteStartedTicks;
-    static string readyMessage;
-    static bool recorded;
-    public static Dictionary<string, object> Read() {
-        long startedTicks = Stopwatch.GetTimestamp();
-        long started = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        uint thread = GetCurrentThreadId();
-        IntPtr input = OpenInputDesktop(0, false, 0x0141);
-        string station, desktop, active;
-        try { station = Name(GetProcessWindowStation()); desktop = Name(GetThreadDesktop(thread)); active = Name(input); }
-        finally { if (input != IntPtr.Zero && !CloseDesktop(input)) throw new InvalidOperationException("Input desktop handle cleanup failed."); }
+    public static string Json(Dictionary<string, object> value) {
+        var serializer = new DataContractJsonSerializer(typeof(Dictionary<string, object>),
+            new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true,
+                KnownTypes = new [] { typeof(Dictionary<string, object>) } });
+        using (var stream = new MemoryStream()) {
+            serializer.WriteObject(stream, value);
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+    }
+    public static string Hash(byte[] bytes) {
+        using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+    }
+    static byte[] Bytes(string file) {
+        using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var memory = new MemoryStream()) { stream.CopyTo(memory); return memory.ToArray(); }
+    }
+    static Dictionary<string, object> Context() {
+        return new Dictionary<string, object> { {"sourceHead",head}, {"runId",run}, {"attempt",attempt}, {"caseId",expected},
+            {"requestId",request}, {"requestNonce",nonce}, {"requestSequence",requestSequence}, {"callerPid",caller},
+            {"pid",Process.GetCurrentProcess().Id}, {"role",role}, {"generation",generation},
+            {"executionThread",executionThread}, {"monotonicClock","native-process-Stopwatch"},
+            {"monotonicFrequency",Stopwatch.Frequency.ToString()} };
+    }
+    public static void Configure(string desktop, string directory, string jobDirectory, string kind, int sequence) {
+        expected = desktop; output = directory; role = kind; generation = sequence;
+        executionThread = GetCurrentThreadId();
+        request = Environment.GetEnvironmentVariable("VI_CI_NATIVE_SPAWN_REQUEST");
+        nonce = Environment.GetEnvironmentVariable("VI_CI_NATIVE_REQUEST_NONCE");
+        head = Environment.GetEnvironmentVariable("VI_PROBE_HEAD");
+        run = Environment.GetEnvironmentVariable("GITHUB_RUN_ID"); attempt = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT");
+        Require(Int32.TryParse(Environment.GetEnvironmentVariable("VI_CI_NATIVE_REQUEST_SEQUENCE"),out requestSequence) &&
+            Int32.TryParse(Environment.GetEnvironmentVariable("VI_CI_NATIVE_CALLER_PID"),out caller) && caller > 0 &&
+            requestSequence > 0 && generation > 0 && generation <= 256 &&
+            Regex.IsMatch(nonce ?? "", "^[a-f0-9-]{36}$") &&
+            request == caller + "-" + requestSequence + "-" + role + "-" + generation,
+            "Native request identity unavailable.");
+        string birth;
+        using (var process = Process.GetCurrentProcess()) birth = process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString();
+        string name = "job-" + Process.GetCurrentProcess().Id + "-" + birth + ".json";
+        var deadline = Stopwatch.StartNew();
+        string file = Path.Combine(jobDirectory, name);
+        while (!File.Exists(file) && deadline.Elapsed.TotalSeconds < 2) System.Threading.Thread.Sleep(25);
+        Require(File.Exists(file), "External committed Job receipt missing.");
+        byte[] bytes = Bytes(file);
+        OverlayJobReceipt job;
+        using (var memory = new MemoryStream(bytes))
+            job = (OverlayJobReceipt)new DataContractJsonSerializer(typeof(OverlayJobReceipt)).ReadObject(memory);
+        Require(job.pid == Process.GetCurrentProcess().Id && job.creationFileTime == birth &&
+            job.sourceHead == head && job.runId == run && job.attempt == attempt && job.caseId == expected &&
+            job.status == "verified-specific-job-process-identity" && job.membershipApi == "IsProcessInJob" &&
+            job.specificJobMember && job.liveAtCompletion && job.liveCheckApi == "WaitForSingleObject" &&
+            job.liveCheckWaitState == 258 && job.liveCheckWin32Error == 0 &&
+            job.snapshotCompletedAt > 0 && job.liveCheckedAt >= job.snapshotCompletedAt,
+            "Consumed independent Job receipt identity/lifetime mismatch.");
+        consumed = new Dictionary<string, object> { {"fileName",name}, {"sha256",Hash(bytes)}, {"pid",job.pid},
+            {"creationFileTime",birth}, {"snapshotCompletedAt",job.snapshotCompletedAt}, {"liveCheckedAt",job.liveCheckedAt},
+            {"consumptionThread",GetCurrentThreadId()}, {"consumptionComplete",true},
+            {"consumedAt",DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}, {"consumedTicks",Stopwatch.GetTimestamp().ToString()} };
+        Require(GetCurrentThreadId() == executionThread, "Job receipt consumption thread changed.");
+    }
+    public static void ConfirmExecution() {
+        Require(consumed != null && GetCurrentThreadId() == executionThread, "Execution/receipt thread changed.");
+        if (self != null) return;
+        long startedTicks = Stopwatch.GetTimestamp(), startedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        IntPtr input = OpenInputDesktop(0,false,0x0141);
+        string station, thread, active;
+        try { station = Name(GetProcessWindowStation()); thread = Name(GetThreadDesktop(executionThread)); active = Name(input); }
+        finally { if (input != IntPtr.Zero) Require(CloseDesktop(input), "Input desktop handle cleanup failed."); }
+        Require(station == "WinSta0" && thread == expected && active == expected, "Native execution desktop changed.");
         using (var process = Process.GetCurrentProcess()) {
             string birth = process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString();
-            long completed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            long completedTicks = Stopwatch.GetTimestamp();
-            return new Dictionary<string, object> { { "pid", process.Id }, { "thread", thread },
-                { "creationFileTime", birth },
-                { "station", station }, { "threadDesktop", desktop }, { "inputDesktop", active },
-                { "selfQueryComplete", true }, { "queryStartedAt", started },
-                { "queryCompletedAt", completed }, { "queryStartedTicks", startedTicks.ToString() },
-                { "queryCompletedTicks", completedTicks.ToString() } };
+            long completeAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), completeTicks = Stopwatch.GetTimestamp();
+            uint state = WaitForSingleObject(process.Handle,0);
+            int error = state == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
+            long liveAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), liveTicks = Stopwatch.GetTimestamp();
+            Require(state == 258 && error == 0 && liveAt >= completeAt && liveTicks >= completeTicks,
+                "Native post-query stable-handle live check failed: " + state + "/" + error);
+            self = Context();
+            self["creationFileTime"] = birth; self["thread"] = executionThread;
+            self["station"] = station; self["threadDesktop"] = thread; self["inputDesktop"] = active;
+            self["coverage"] = "self-execution-thread-not-all-process-threads"; self["selfQueryComplete"] = true;
+            self["jobReceipt"] = consumed; self["queryStartedAt"] = startedAt; self["queryCompletedAt"] = completeAt;
+            self["nativeQueryStartedAt"] = startedAt; self["nativeQueryCompletedAt"] = completeAt;
+            self["queryStartedTicks"] = startedTicks.ToString(); self["queryCompletedTicks"] = completeTicks.ToString();
+            self["selfLiveCheckedAt"] = liveAt; self["selfLiveCheckedTicks"] = liveTicks.ToString();
+            self["selfLiveWaitState"] = state; self["selfLiveWin32Error"] = error;
+            self["selfLiveApi"] = "WaitForSingleObject";
+            Publish(self, "desktop-" + role + "-" + process.Id);
         }
     }
-    public static void Configure(string desktop, string file, string kind, uint thread, int sequence,
-        string request, int requestNumber) {
-        if (requestNumber <= 0 || !Regex.IsMatch(request, "^[1-9][0-9]*-" + requestNumber + "-" + kind + "-" + sequence + "$"))
-            throw new InvalidOperationException("Native spawn request identity unavailable.");
-        expected = desktop; output = file; role = kind; initialThread = thread; generation = sequence;
-        spawnRequest = request; requestSequence = requestNumber;
-    }
-    // Called inside the generated sampler, or immediately before the delivery protocol on its execution thread.
-    public static void ConfirmExecution() {
-        if (GetCurrentThreadId() != initialThread) throw new InvalidOperationException("Native execution thread changed.");
-        if (recorded) return;
-        var sample = Read();
-        if ((string)sample["station"] != "WinSta0" || (string)sample["threadDesktop"] != expected ||
-            (string)sample["inputDesktop"] != expected) throw new InvalidOperationException("Native execution desktop changed.");
-        string json = "{\"pid\":" + sample["pid"] + ",\"thread\":" + sample["thread"] +
-            ",\"executionThread\":" + GetCurrentThreadId() + ",\"role\":\"" + role +
-            "\",\"generation\":" + generation +
-            ",\"requestId\":\"" + spawnRequest + "\",\"requestSequence\":" + requestSequence +
-            ",\"creationFileTime\":\"" + sample["creationFileTime"] +
-            "\",\"station\":\"WinSta0\",\"threadDesktop\":\"" + expected + "\",\"inputDesktop\":\"" + expected +
-            "\",\"coverage\":\"self-execution-thread-not-all-process-threads\",\"selfQueryComplete\":true," +
-            "\"queryStartedAt\":" + sample["queryStartedAt"] + ",\"queryCompletedAt\":" + sample["queryCompletedAt"] +
-            ",\"queryStartedTicks\":\"" + sample["queryStartedTicks"] + "\",\"queryCompletedTicks\":\"" + sample["queryCompletedTicks"] +
-            "\",\"monotonicFrequency\":\"" + Stopwatch.Frequency + "\",\"monotonicClock\":\"native-process-Stopwatch\"}";
-        File.WriteAllText(output, json, new UTF8Encoding(false));
-        recorded = true;
+    public static Dictionary<string, object> Self() { ConfirmExecution(); return new Dictionary<string, object>(self); }
+    public static long Ticks() { Require(GetCurrentThreadId() == executionThread, "Native response thread changed."); return Stopwatch.GetTimestamp(); }
+    static void Publish(Dictionary<string, object> value, string stem) {
+        byte[] bytes = Encoding.UTF8.GetBytes(Json(value));
+        string file = Path.Combine(output,stem);
+        File.WriteAllBytes(file + ".tmp",bytes);
+        File.Move(file + ".tmp",file + ".json");
+        long committedTicks = Stopwatch.GetTimestamp(), committedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var commit = Context();
+        commit["creationFileTime"] = value["creationFileTime"]; commit["fileName"] = stem + ".json";
+        commit["sha256"] = Hash(bytes); commit["commitComplete"] = true; commit["committedAt"] = committedAt;
+        commit["committedTicks"] = committedTicks.ToString();
+        if (value.ContainsKey("readySequence")) commit["readySequence"] = value["readySequence"];
+        File.WriteAllText(file + ".commit.tmp",Json(commit),new UTF8Encoding(false));
+        File.Move(file + ".commit.tmp",file + ".commit.json");
     }
     public static void BeginReadyWrite(string message) {
-        if (!recorded || role != "overlay-pointer" || GetCurrentThreadId() != initialThread ||
-            message != "{\"type\":\"ready\"}" || readyMessage != null || readySequence >= 64)
-            throw new InvalidOperationException("Native READY write identity unavailable or inconsistent.");
-        readyMessage = message;
-        readySequence++;
-        readyWriteStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        readyWriteStartedTicks = Stopwatch.GetTimestamp();
+        ConfirmExecution();
+        Require(GetCurrentThreadId() == executionThread && readyMessage == null && readySequence < 64 &&
+            ((role == "overlay-pointer" && message == "{\"type\":\"ready\"}") ||
+             (role == "desktop-delivery" && message.Contains("\"ready\":true"))), "Native READY identity unavailable.");
+        readyMessage = message; readySequence++;
+        readyStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); readyStartedTicks = Stopwatch.GetTimestamp();
     }
     public static void EndReadyWrite(string message) {
-        long completedTicks = Stopwatch.GetTimestamp();
-        long completedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        uint thread = GetCurrentThreadId();
-        if (thread != initialThread || message != readyMessage)
-            throw new InvalidOperationException("Native READY write execution identity changed.");
-        using (var process = Process.GetCurrentProcess()) {
-            string json = "{\"pid\":" + process.Id + ",\"creationFileTime\":\"" +
-                process.StartTime.ToUniversalTime().ToFileTimeUtc() + "\",\"role\":\"" + role +
-                "\",\"generation\":" + generation + ",\"executionThread\":" + thread +
-                ",\"requestId\":\"" + spawnRequest + "\",\"requestSequence\":" + requestSequence +
-                ",\"readySequence\":" + readySequence + ",\"messageBase64\":\"" +
-                Convert.ToBase64String(Encoding.UTF8.GetBytes(message)) + "\",\"writeApi\":\"Console.WriteLine\"" +
-                ",\"writeComplete\":true,\"writeStartedAt\":" + readyWriteStartedAt + ",\"writeCompletedAt\":" + completedAt +
-                ",\"writeStartedTicks\":\"" + readyWriteStartedTicks + "\",\"writeCompletedTicks\":\"" + completedTicks +
-                "\",\"monotonicFrequency\":\"" + Stopwatch.Frequency + "\",\"monotonicClock\":\"native-process-Stopwatch\"}";
-            string file = Path.Combine(Path.GetDirectoryName(output),
-                "desktop-ready-" + role + "-" + process.Id + "-" + readySequence);
-            File.WriteAllText(file + ".tmp", json, new UTF8Encoding(false));
-            File.Move(file + ".tmp", file + ".json");
-        }
+        long endedTicks = Ticks(), endedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        Require(message == readyMessage, "Exact READY message changed.");
+        var value = Self();
+        value["readySequence"] = readySequence; value["messageBase64"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(message));
+        value["writeApi"] = "Console.WriteLine"; value["writeComplete"] = true;
+        value["writeStartedAt"] = readyStartedAt; value["writeCompletedAt"] = endedAt;
+        value["writeStartedTicks"] = readyStartedTicks.ToString(); value["writeCompletedTicks"] = endedTicks.ToString();
+        Publish(value,"desktop-ready-" + role + "-" + Process.GetCurrentProcess().Id + "-" + readySequence);
         readyMessage = null;
+    }
+    public static string CommitResponse(string json) {
+        var serializer = new DataContractJsonSerializer(typeof(Dictionary<string, object>),
+            new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true,
+                KnownTypes = new [] { typeof(Dictionary<string, object>) } });
+        Dictionary<string,object> action;
+        using (var memory = new MemoryStream(Encoding.UTF8.GetBytes(json)))
+            action = (Dictionary<string,object>)serializer.ReadObject(memory);
+        var value = Self();
+        foreach (var pair in action) value[pair.Key] = pair.Value;
+        if (authorityReceipt != null) value["authorityReceipt"] = authorityReceipt;
+        Require(GetCurrentThreadId() == executionThread && Convert.ToUInt32(action["inputExecutionThread"]) == executionThread,
+            "Input/response execution thread changed.");
+        value["responseReadyTicks"] = Ticks().ToString(); value["responseComplete"] = true;
+        value["driverPid"] = Process.GetCurrentProcess().Id; value["driverThread"] = executionThread;
+        Publish(value,"driver-response-" + nonce);
+        return Json(value);
+    }
+    public static void ValidateAuthority(string json, long window, int owner) {
+        var serializer = new DataContractJsonSerializer(typeof(Dictionary<string,object>),
+            new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true });
+        Dictionary<string,object> authority;
+        using (var memory = new MemoryStream(Encoding.UTF8.GetBytes(json)))
+            authority = (Dictionary<string,object>)serializer.ReadObject(memory);
+        string oldNonce = (string)authority["requestNonce"];
+        Require(Regex.IsMatch(oldNonce,"^[a-f0-9-]{36}$"), "Owned down authority nonce invalid.");
+        string stem = "driver-response-" + oldNonce;
+        byte[] bytes = Bytes(Path.Combine(output,stem + ".json"));
+        Dictionary<string,object> down, commit;
+        using (var memory = new MemoryStream(bytes)) down = (Dictionary<string,object>)serializer.ReadObject(memory);
+        using (var memory = new MemoryStream(Bytes(Path.Combine(output,stem + ".commit.json"))))
+            commit = (Dictionary<string,object>)serializer.ReadObject(memory);
+        Require(Hash(bytes) == (string)authority["responseSHA256"] && (string)commit["sha256"] == Hash(bytes) &&
+            Convert.ToBoolean(commit["commitComplete"]) && (string)down["requestNonce"] == oldNonce &&
+            (string)down["sourceHead"] == head && (string)down["runId"] == run && (string)down["attempt"] == attempt &&
+            (string)down["caseId"] == expected && (string)down["mode"] == "down" &&
+            Convert.ToBoolean(down["ownerVerified"]) && Convert.ToBoolean(down["ownedDownInjected"]) &&
+            Convert.ToBoolean(down["leftHeldAfter"]) && (string)down["ownedWindow"] == window.ToString() &&
+            Convert.ToInt32(down["ownedOwnerPid"]) == owner, "Committed owned native down receipt mismatch.");
+        Require(GetCurrentThreadId() == executionThread, "Down authority consumption thread changed.");
+        authorityReceipt = new Dictionary<string, object> { {"requestNonce",oldNonce}, {"sha256",Hash(bytes)},
+            {"pid",down["driverPid"]}, {"creationFileTime",down["creationFileTime"]},
+            {"consumptionThread",GetCurrentThreadId()}, {"consumedTicks",Ticks().ToString()}, {"consumptionComplete",true} };
     }
 }
 '@
-$sample = [OverlayDesktopAttestor]::Read()
-if ($sample.station -ne 'WinSta0' -or $sample.threadDesktop -ne $DesktopName -or $sample.inputDesktop -ne $DesktopName) {
-    throw 'Owned PS5 helper did not inherit the active ordinary desktop.'
-}
-$jobPath = Join-Path $JobOutput "job-$PID-$($sample.creationFileTime).json"
-$deadline = [DateTime]::UtcNow.AddSeconds(2)
-while (!(Test-Path -LiteralPath $jobPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 25 }
-if (!(Test-Path -LiteralPath $jobPath)) { throw "External specific Job proof missing for native PID $PID." }
-$job = [IO.File]::ReadAllText($jobPath) | ConvertFrom-Json
-if ($job.pid -ne $PID -or $job.creationFileTime -ne $sample.creationFileTime -or !$job.specificJobMember -or
-    !$job.liveAtCompletion -or $job.status -ne 'verified-specific-job-process-identity' -or
-    $job.liveCheckApi -ne 'WaitForSingleObject' -or $job.liveCheckWaitState -ne 258 -or
-    $job.liveCheckWin32Error -ne 0 -or !$job.snapshotCompletedAt -or
-    $job.liveCheckedAt -lt $job.snapshotCompletedAt) {
-    throw "External native process generation/Job proof mismatch for PID $PID."
-}
-[OverlayDesktopAttestor]::Configure($DesktopName, (Join-Path $Output "desktop-$Role-$PID.json"), $Role, $sample.thread, $Generation,
-    $env:VI_CI_NATIVE_SPAWN_REQUEST, [int]$env:VI_CI_NATIVE_REQUEST_SEQUENCE)
+[OverlayDesktopAttestor]::Configure($DesktopName, $Output, $JobOutput, $Role, $Generation)

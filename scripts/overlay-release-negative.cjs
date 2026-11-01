@@ -1,36 +1,38 @@
 const { app, BrowserWindow, screen, nativeImage } = require('electron');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { recordDesktop } = require('./desktop-evidence.cjs');
+const { createRequest, executeOwnedDriver, downAuthority } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'win32' ||
     process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.VI_OUTPUT) {
   throw new Error('Failure-release checks require an isolated GitHub-hosted Windows runner.');
 }
-const execute = promisify(execFile), directory = path.resolve(process.env.VI_OUTPUT);
+const directory = path.resolve(process.env.VI_OUTPUT);
 const expectedDesktop = process.argv.find((arg) => arg.startsWith('--ci-owned-desktop='))?.slice('--ci-owned-desktop='.length);
 const desktopReceipt = process.argv.find((arg) => arg.startsWith('--ci-desktop-receipt='))?.slice('--ci-desktop-receipt='.length);
 const report = { scope: 'two owned fixture windows; normal failure remains nonzero', checks: [], osInputs: [] };
+report.causalContext = { sourceHead: process.env.VI_PROBE_HEAD, runId: process.env.GITHUB_RUN_ID,
+  attempt: process.env.GITHUB_RUN_ATTEMPT, caseId: expectedDesktop, callerPid: process.pid };
 let main, overlay, other, ownedDown;
 const handle = (window) => window.getNativeWindowHandle().readBigUInt64LE().toString();
 async function input(mode, cleanup = false, receipt = undefined) {
   const bounds = overlay.getBounds();
   const point = screen.dipToScreenPoint({ x: bounds.x + 30, y: bounds.y + 25 });
+  const request = createRequest(report, 'os-mouse-driver', (report.causalRequests || []).length + 1, expectedDesktop);
+  request.jobDirectory = desktopReceipt;
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
     '-Window', handle(overlay), '-Foreground', handle(main), '-Owner', String(process.pid),
     '-Mode', mode, '-X', String(point.x), '-Y', String(point.y),
-    ...(expectedDesktop ? ['-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt] : [])];
+    '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt, '-ProofOutput', directory];
   if (cleanup) {
     args.push('-CleanupOwnedDown');
-    if (receipt) args.push('-OwnedDownReceipt', JSON.stringify(receipt));
+    if (receipt) args.push('-OwnedDownReceipt', JSON.stringify(downAuthority(receipt)));
   }
   try {
-    const result = await execute('powershell.exe', args, { timeout: 15000, windowsHide: true });
-    const value = JSON.parse(result.stdout.trim());
+    const value = await executeOwnedDriver(report, request, args, directory);
     report.osInputs.push({ mode, ...value, processExitObservedAt: Date.now() });
     if (expectedDesktop) {
       assert.equal(value.station, 'WinSta0');
@@ -41,8 +43,8 @@ async function input(mode, cleanup = false, receipt = undefined) {
     if (mode === 'up' && value.leftHeldAfter === false) ownedDown = undefined;
     return value;
   } catch (error) {
-    if (error.stdout?.trim()) {
-      const value = JSON.parse(error.stdout.trim());
+    if (error.nativeReceipt) {
+      const value = error.nativeReceipt;
       report.osInputs.push({ mode, ...value, processExitObservedAt: Date.now() });
       if (value.ownedDownInjected && value.ownerVerified && value.leftHeldAfter) ownedDown = value;
     }

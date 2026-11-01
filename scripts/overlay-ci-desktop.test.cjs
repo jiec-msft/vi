@@ -1,5 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { assertDesktopChain, assertWrapperOutcome } = require('./overlay-ci-desktop.cjs');
 
 test('accepts only the exact expected raw wrapper outcome', () => {
@@ -25,6 +26,8 @@ test('rejects a missing wrapper outcome instead of inventing success', () => {
 });
 
 const birth = (pid) => `13300000000000000${pid}`;
+const context = { sourceHead: 'a'.repeat(40), runId: '1', attempt: '1', caseId: 'vi-ci-test', callerPid: 1 };
+const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const unknownThread = { pid: 1, tid: 101, api: 'GetThreadDesktop', rawHandle: '0',
   win32Error: 5, status: 'unobserved-not-desktop-proof', threadDesktop: null };
 function member(pid) {
@@ -65,6 +68,103 @@ function spawnDiagnostics(generation = 1) {
     helperStartedTicks: generation === 1 ? '10015' : '25015',
     spawnClock: 'Node-process-hrtime', startedAtClock: 'Node-Date.now-not-native-FILETIME',
     startedAtMeaning: 'observer-after-synchronous-spawn-return-before-spawn-event' };
+}
+function causalFixture(report, desktop) {
+  report.causalContext = { ...context };
+  Object.assign(desktop, { headSha: context.sourceHead, runId: '1', attempt: '1' });
+  for (const member of desktop.descendantDesktopObservations)
+    Object.assign(member, { sourceHead: context.sourceHead, runId: '1', attempt: '1', caseId: desktop.ownedDesktop });
+  report.nodeEvents = []; report.causalRequests = [];
+  const event = (request, kind, tick, extra = {}) => {
+    const value = { ...request, kind, ticks: String(tick), clock: 'Node-process-hrtime', at: 1200, ...extra };
+    delete value.begin; delete value.returned; delete value.spawn;
+    report.nodeEvents.push(value);
+    return value;
+  };
+  const request = (role, generation, pid, base) => {
+    const sequence = report.causalRequests.length + 1;
+    const value = { ...context, role, generation, returnedPid: pid, requestSequence: sequence,
+      requestId: `1-${sequence}-${role}-${generation}`, requestNonce: `${String(sequence).padStart(8, '0')}-aaaa-aaaa-aaaa-aaaaaaaaaaaa` };
+    value.begin = event(value, 'request-begin', base);
+    value.returned = event(value, 'request-return', base + 1, { pid });
+    value.spawn = event(value, 'process-spawn', base + 2, { pid });
+    report.causalRequests.push(value);
+    return value;
+  };
+  const bindSelf = (receipt, req, job) => {
+    Object.assign(receipt, context, { pid: req.returnedPid, role: req.role, generation: req.generation,
+      requestId: req.requestId, requestNonce: req.requestNonce, requestSequence: req.requestSequence,
+      selfLiveApi: 'WaitForSingleObject', selfLiveWaitState: 258, selfLiveWin32Error: 0,
+      selfLiveCheckedAt: receipt.queryCompletedAt + 1, selfLiveCheckedTicks: String(BigInt(receipt.queryCompletedTicks) + 1n),
+      nativeQueryStartedAt: receipt.queryStartedAt, nativeQueryCompletedAt: receipt.queryCompletedAt,
+      jobReceipt: { fileName: `job-${job.pid}-${job.creationFileTime}.json`, sha256: hash(Buffer.from(JSON.stringify(job))),
+        pid: job.pid, creationFileTime: job.creationFileTime, snapshotCompletedAt: job.snapshotCompletedAt,
+        liveCheckedAt: job.liveCheckedAt, consumptionComplete: true, consumptionThread: receipt.executionThread,
+        consumedTicks: String(BigInt(receipt.queryStartedTicks) - 1n) } });
+  };
+  const ack = (value, req, job, stem, tick) => {
+    const bytes = Buffer.from(JSON.stringify(value));
+    const commit = { ...context, pid: req.returnedPid, role: req.role, generation: req.generation,
+      requestId: req.requestId, requestNonce: req.requestNonce, requestSequence: req.requestSequence,
+      creationFileTime: value.creationFileTime, executionThread: value.executionThread, fileName: `${stem}.json`,
+      commitComplete: true, sha256: hash(bytes), monotonicClock: value.monotonicClock, monotonicFrequency: value.monotonicFrequency,
+      committedTicks: String(BigInt(value.writeCompletedTicks || value.responseReadyTicks || value.selfLiveCheckedTicks) + 1n),
+      ...(value.readySequence ? { readySequence: value.readySequence } : {}) };
+    const commitBytes = Buffer.from(JSON.stringify(commit)), jobBytes = Buffer.from(JSON.stringify(job));
+    return { value, commit, sha256: hash(bytes), commitSHA256: hash(commitBytes),
+      bytesBase64: bytes.toString('base64'), commitBytesBase64: commitBytes.toString('base64'),
+      jobBytesBase64: jobBytes.toString('base64'), consumed: event(req, 'committed-receipt-consumed', tick) };
+  };
+  report.nativeReadyReceipts = report.nativeReadyReceipts.slice(0, report.helpers.length);
+  for (const [index, helper] of report.helpers.entries()) {
+    const req = request(helper.role, helper.generation, helper.pid, index ? 25000 : 10000);
+    helper.causalRequest = req; helper.requestId = req.requestId; helper.requestSequence = req.requestSequence;
+    helper.requestNonce = req.requestNonce;
+    const receipt = report.nativeDesktopReceipts[index], job = desktop.descendantDesktopObservations.find((v) => v.pid === helper.pid);
+    bindSelf(receipt, req, job);
+    const ready = helper.events[0];
+    ready.causal = event(req, 'helper-line', Number(ready.receivedTicks));
+    const oldEmission = report.nativeReadyReceipts[index];
+    const readyFields = Object.fromEntries(['readySequence', 'messageBase64', 'writeApi', 'writeComplete',
+      'writeStartedAt', 'writeCompletedAt', 'writeStartedTicks', 'writeCompletedTicks'].map((key) => [key, oldEmission[key]]));
+    const emissionValue = { ...receipt, ...readyFields,
+      ...context, requestId: req.requestId, requestNonce: req.requestNonce, requestSequence: req.requestSequence };
+    report.nativeReadyReceipts[index] = emissionValue;
+    helper.readyAcks = [{ readySequence: 1, self: ack(receipt, req, job, `desktop-${helper.role}-${helper.pid}`, Number(ready.receivedTicks) + 1),
+      ready: ack(emissionValue, req, job, `desktop-ready-${helper.role}-${helper.pid}-1`, Number(ready.receivedTicks) + 2),
+      acknowledged: event(req, 'helper-ready-ack', Number(ready.receivedTicks) + 3) }];
+    if (helper.exit) {
+      helper.exit.code = 0; helper.exit.signal = null;
+      helper.exit.causal = event(req, 'process-exit', 24000, { code: 0, signal: null });
+      helper.close = event(req, 'process-close', 24001, { code: 0, signal: null });
+    }
+  }
+  for (const [index, receipt] of report.osInputs.entries()) {
+    const req = request('os-mouse-driver', index + 1, receipt.driverPid, report.helpers.length > 1 ? 35000 : 21000);
+    const job = desktop.descendantDesktopObservations.find((v) => v.pid === receipt.driverPid);
+    bindSelf(receipt, req, job);
+    Object.assign(receipt, { mode: 'hover', responseOutcome: 'success', responseComplete: true,
+      guardStartedTicks: '11100', guardCompletedTicks: '11101', inputStartedTicks: '11102',
+      inputCompletedTicks: '11103', responseReadyTicks: '11104', inputAttempted: true, inputPerformed: true,
+      inputExecutionThread: receipt.executionThread, guardOutcome: 'passed' });
+    req.exit = event(req, 'process-exit', 45000, { code: 0 });
+    req.callback = event(req, 'driver-callback', 45001);
+    req.close = event(req, 'process-close', 45002, { code: 0 });
+    req.response = event(req, 'driver-response-consumed', 45003);
+    const value = Object.fromEntries(Object.entries(receipt).filter(([key]) =>
+      !['processExitObservedAt', 'processExitObservedTicks', 'causalRequest', 'committedAck'].includes(key)));
+    receipt.committedAck = ack(value, req, job, `driver-response-${req.requestNonce}`, 45004);
+    receipt.causalRequest = req;
+  }
+  if (report.startupRecovery) {
+    const failed = report.helpers[0];
+    failed.startupFailureDelayMs = 300;
+    report.startupRecovery.injection = event(failed.causalRequest, 'owned-injection-requested', 23000);
+    report.rootReadyEvent = { kind: 'root-ready', ticks: '31000', clock: 'Node-process-hrtime' };
+    report.nodeEvents.push(report.rootReadyEvent);
+  }
+  report.nodeEvents.sort((a, b) => Number(BigInt(a.ticks) - BigInt(b.ticks)));
+  report.nodeEvents.forEach((value, index) => { value.eventId = index + 1; });
 }
 function fixture() {
   const name = 'vi-ci-test';
@@ -115,18 +215,29 @@ function fixture() {
   desktop.defaultHeartbeatCheck = desktop.defaultHeartbeatSamples[1];
   desktop.defaultFixtureExit = { pid: 8, creationFileTime: birth(8), processTimesRead: true,
     processTimesError: 0, exitedAt: 1900 };
+  causalFixture(report, desktop);
   return { report, desktop };
 }
 test('accepts explicit role-specific proof while retaining inaccessible remote threads as nonproof', () => {
   const { report, desktop } = fixture();
   assertDesktopChain(report, desktop);
 });
-test('native monotonic diagnostics do not bypass the original Node UTC readiness gate', () => {
+test('valid identity and causal order accept retained foreign UTC inversion as diagnostic', () => {
   const { report, desktop } = fixture();
   report.nativeDesktopReceipts[0].queryCompletedAt = 1126;
+  report.nativeDesktopReceipts[0].selfLiveCheckedAt = 1127;
   report.nativeReadyReceipts[0].writeStartedAt = 1127;
   report.nativeReadyReceipts[0].writeCompletedAt = 1128;
-  assert.throws(() => assertDesktopChain(report, desktop), /completed after observed readiness/);
+  causalFixture(report, desktop);
+  assertDesktopChain(report, desktop);
+  assert.equal(report.foreignChronologyDiagnostics[0].nativeQueryBeforeNodeReady, false);
+});
+test('kernel birth versus Node observer inversion remains diagnostic with real identity and causal witnesses', () => {
+  const { report, desktop } = fixture();
+  desktop.descendantDesktopObservations[4].processCreatedAt = 1002;
+  causalFixture(report, desktop);
+  assertDesktopChain(report, desktop);
+  assert.equal(report.foreignChronologyDiagnostics[0].bornBeforeNodeStart, false);
 });
 for (const [label, change] of [
   ['unrelated root PID', (r) => { r.windowIds.owner = 99; }],
@@ -156,7 +267,6 @@ for (const [label, change] of [
   ['render evidence missing', (r) => { r.renderEvidence.overlayMarkerVisible = false; }],
   ['unjoined native receipt', (r) => { r.nativeDesktopReceipts[0].pid = 99; }],
   ['native process birth mismatch', (r) => { r.nativeDesktopReceipts[0].creationFileTime = birth(99); }],
-  ['native generation predates external birth', (r) => { r.helpers[0].startedAt = 900; }],
   ['missing actual spawn request', (r) => { delete r.helpers[0].requestId; }],
   ['returned spawn PID mismatched', (r) => { r.helpers[0].returnedPid = 99; }],
   ['spawn return precedes request ticks', (r) => { r.helpers[0].spawnReturnedTicks = '9999'; }],
@@ -165,10 +275,23 @@ for (const [label, change] of [
   ['native request sequence mismatched', (r) => { r.nativeDesktopReceipts[0].requestSequence = 99; }],
   ['native READY spawn request mismatched', (r) => { r.nativeReadyReceipts[0].requestId = 'other'; }],
   ['birth clock relabeled as Node', (r, d) => { d.descendantDesktopObservations[4].processCreationClock = 'Node-Date.now'; }],
+  ['missing causal context', (r) => { delete r.causalContext.sourceHead; }],
+  ['reused request nonce', (r) => { r.causalRequests[1].requestNonce = r.causalRequests[0].requestNonce; }],
+  ['wrong consumed Job hash', (r) => { r.nativeDesktopReceipts[0].jobReceipt.sha256 = '0'.repeat(64); }],
+  ['wrong receipt consumption thread', (r) => { r.nativeDesktopReceipts[0].jobReceipt.consumptionThread = 999; }],
+  ['query before actual receipt consumption', (r) => { r.nativeDesktopReceipts[0].jobReceipt.consumedTicks = '11001'; }],
+  ['post-query live check reports exit', (r) => { r.nativeDesktopReceipts[0].selfLiveWaitState = 0; }],
+  ['post-query live check precedes completion', (r) => { r.nativeDesktopReceipts[0].selfLiveCheckedTicks = '11009'; }],
+  ['native sidecar commit incomplete', (r) => { r.helpers[0].readyAcks[0].ready.commit.commitComplete = false; }],
+  ['native sidecar hash forged', (r) => { r.helpers[0].readyAcks[0].ready.sha256 = '0'.repeat(64); }],
+  ['Node ACK precedes sidecar consumption', (r) => { r.helpers[0].readyAcks[0].acknowledged.ticks = '20000'; }],
+  ['driver final response incomplete', (r) => { r.osInputs[0].responseComplete = false; }],
+  ['driver response input thread wrong', (r) => { r.osInputs[0].inputExecutionThread = 999; }],
+  ['driver query precedes consumed Job receipt', (r) => { r.osInputs[0].jobReceipt.consumedTicks = '11001'; }],
+  ['driver response belongs to another nonce', (r) => { r.osInputs[0].requestNonce = 'ffffffff-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; }],
   ['partial self-query', (r) => { r.nativeDesktopReceipts[0].selfQueryComplete = false; }],
   ['wrong native execution thread', (r) => { r.nativeDesktopReceipts[0].executionThread = 999; }],
   ['default native thread', (r) => { r.nativeDesktopReceipts[0].threadDesktop = 'Default'; }],
-  ['native query after observed readiness', (r) => { r.nativeDesktopReceipts[0].queryCompletedAt = 1121; }],
   ['missing native READY diagnostic', (r) => { r.nativeReadyReceipts = []; }],
   ['unjoined native READY diagnostic', (r) => { r.nativeReadyReceipts.push(emission(99)); }],
   ['duplicate native READY diagnostic', (r) => { r.nativeReadyReceipts.push(emission(5)); }],
@@ -189,7 +312,6 @@ for (const [label, change] of [
   ['Node clock mislabeled native', (r) => { r.helpers[0].events[0].monotonicClock = 'native-process-Stopwatch'; }],
   ['changed active input desktop', (r) => { r.osInputs[0].inputDesktop = 'Default'; }],
   ['driver birth mismatch', (r) => { r.osInputs[0].creationFileTime = birth(99); }],
-  ['driver query after observed exit', (r) => { r.osInputs[0].queryCompletedAt = 1300; }],
   ['wrong driver execution thread', (r) => { r.osInputs[0].executionThread = 999; }],
   ['wrong driver target window', (r) => { r.osInputs[0].targetWindow = '999'; }],
   ['driver target absent from owned enumeration', (r) => { r.osInputs[0].targetEnumeratedOnOwnedDesktop = false; }],
@@ -234,6 +356,7 @@ function startupFixture() {
   report.nativeDesktopReceipts.push({ ...self(7, 'overlay-pointer', desktop.ownedDesktop),
     generation: 2, requestId: '1-2-overlay-pointer-2', requestSequence: 2, queryStartedAt: 1572, queryCompletedAt: 1573 });
   report.nativeReadyReceipts.push({ ...emission(7, 2), writeStartedAt: 1574, writeCompletedAt: 1575 });
+  causalFixture(report, desktop);
   return { report, desktop };
 }
 test('requires both completed generation proofs before the injected startup exit', () => {
@@ -252,7 +375,10 @@ for (const [label, change] of [
   ['post-exit self completion', (r) => { r.nativeDesktopReceipts[0].queryCompletedAt = 1501; }],
   ['stale self generation', (r) => { r.nativeDesktopReceipts[1].creationFileTime = birth(5); }],
   ['overlapping generations', (r) => { r.helpers[1].startedAt = 1500; }],
-  ['recovery after root readiness', (r) => { r.startupRecovery.recoveredReadyAt = 1601; }],
+  ['recovery after root readiness', (r) => { r.helpers[1].events[0].causal.ticks = '32000'; }],
+  ['injection before actual committed ACK', (r) => { r.startupRecovery.injection.ticks = '20000'; }],
+  ['missing pre-injection completed ACK', (r) => { r.helpers[0].readyAcks = []; }],
+  ['replacement before actual close', (r) => { r.helpers[0].close.ticks = '26000'; }],
 ]) {
   test(`rejects startup proof with ${label}`, () => {
     const { report, desktop } = startupFixture();

@@ -1,36 +1,9 @@
 param([long] $Window, [long] $Foreground, [int] $Owner, [string] $Mode, [int] $X, [int] $Y,
-    [switch] $CleanupOwnedDown, [string] $OwnedDownReceipt, [string] $DesktopName, [string] $JobOutput)
+    [switch] $CleanupOwnedDown, [string] $OwnedDownReceipt, [string] $DesktopName, [string] $JobOutput, [string] $ProofOutput)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'OS input is restricted to an isolated GitHub-hosted Windows runner.' }
-if ($CleanupOwnedDown) {
-    if ($Mode -ne 'up' -or !$OwnedDownReceipt -or $OwnedDownReceipt.Length -gt 2048) {
-        throw 'Cleanup requires an owned native down receipt and permits only mouse-up.'
-    }
-    $receipt = $OwnedDownReceipt | ConvertFrom-Json
-    if (!$receipt.ownedDownInjected -or !$receipt.ownerVerified -or !$receipt.leftHeldAfter -or $receipt.mode -ne 'down' -or
-        $receipt.input -ne 'win32-SendInput/SetCursorPos' -or
-        $receipt.ownedOwnerPid -ne $Owner -or $receipt.ownedWindow -ne [string] $Window) {
-        throw 'Cleanup receipt does not confirm this owned window and injected mouse-down.'
-    }
-    if ($DesktopName -and ($receipt.threadDesktop -ne $DesktopName -or $receipt.inputDesktop -ne $DesktopName)) {
-        throw 'Cleanup receipt belongs to a different input desktop.'
-    }
-}
 if ($DesktopName -and $DesktopName -notmatch '^vi-ci-[0-9]+-[0-9]+-[a-f0-9]{32}$') { throw 'Invalid owned desktop name.' }
-if ($DesktopName) {
-    if (!$JobOutput) { throw 'OS driver requires independent Job observation output.' }
-    $birth = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
-    $jobPath = Join-Path $JobOutput "job-$PID-$birth.json"
-    $deadline = [DateTime]::UtcNow.AddSeconds(2)
-    while (!(Test-Path -LiteralPath $jobPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 25 }
-    if (!(Test-Path -LiteralPath $jobPath)) { throw "External specific Job proof missing for OS driver PID $PID." }
-    $job = [IO.File]::ReadAllText($jobPath) | ConvertFrom-Json
-    if ($job.pid -ne $PID -or $job.creationFileTime -ne $birth -or !$job.specificJobMember -or
-        !$job.liveAtCompletion -or $job.status -ne 'verified-specific-job-process-identity') {
-        throw "External OS driver process generation/Job proof mismatch for PID $PID."
-    }
-}
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -38,6 +11,10 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Diagnostics;
 public static class OverlayCiMouse {
+    static string result, context;
+    static bool ownerVerified, inputPerformed, guardPassed;
+    static long guardStarted, guardCompleted, inputStarted, inputCompleted;
+    static uint inputThread;
     [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT {
         public int X, Y; public uint Data, Flags, Time; public UIntPtr Extra;
@@ -103,39 +80,42 @@ public static class OverlayCiMouse {
         if (!found || windowThread == 0 || !IsWindow(window)) throw new InvalidOperationException("Target HWND not associated with owned desktop.");
         string birth;
         using (var process = Process.GetCurrentProcess()) birth = process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString();
-        return ",\"driverPid\":" + GetCurrentProcessId() + ",\"driverThread\":" + GetCurrentThreadId() +
-            ",\"executionThread\":" + executionThread + ",\"role\":\"os-mouse-driver\",\"creationFileTime\":\"" + birth +
-            "\",\"selfQueryComplete\":true,\"coverage\":\"self-execution-thread-not-all-process-threads\",\"queryStartedAt\":" + started +
-            ",\"queryCompletedAt\":" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
+        return ",\"queryStartedAt\":" + started + ",\"queryCompletedAt\":" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
             ",\"targetWindow\":\"" + window.ToInt64() + "\",\"targetPid\":" + owner + ",\"targetThread\":" + windowThread +
-            ",\"targetEnumerationApi\":\"EnumDesktopWindows\",\"targetEnumeratedOnOwnedDesktop\":true" +
-            ",\"station\":\"" + station + "\",\"threadDesktop\":\"" + thread + "\",\"inputDesktop\":\"" + active + "\"";
+            ",\"targetEnumerationApi\":\"EnumDesktopWindows\",\"targetEnumeratedOnOwnedDesktop\":true";
     }
     static void Button(uint flags) {
         var inputs = new[] { new INPUT { Mouse = new MOUSEINPUT { Flags = flags } } };
         if (SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT))) != 1)
             throw new InvalidOperationException("OS mouse injection denied.");
+        inputPerformed = true;
     }
     static bool Held() { return (GetAsyncKeyState(1) & 0x8000) != 0; }
-    public static void Run(long handle, long expected, int owner, string mode, int x, int y, bool cleanup, string desktop) {
+    static void Run(long handle, long expected, int owner, string mode, int x, int y, bool cleanup, string desktop, string precondition) {
+        guardStarted = Stopwatch.GetTimestamp();
+        inputThread = GetCurrentThreadId();
         SetThreadDpiAwarenessContext(new IntPtr(-4));
         IntPtr window = new IntPtr(handle);
         uint pid;
         GetWindowThreadProcessId(window, out pid);
         if (!IsWindow(window) || pid != owner) throw new InvalidOperationException("Owned window unavailable.");
-        string desktopFields = Desktop(desktop, window);
+        ownerVerified = true;
+        string desktopFields = context = Desktop(desktop, window);
+        if (!String.IsNullOrEmpty(precondition)) throw new InvalidOperationException(precondition);
         if (cleanup || mode == "status") {
             if (cleanup && mode != "up") throw new InvalidOperationException("Cleanup permits only mouse-up.");
             IntPtr before = GetForegroundWindow();
             bool heldBefore = Held();
             bool sent = cleanup && heldBefore;
+            guardCompleted = Stopwatch.GetTimestamp(); inputStarted = Stopwatch.GetTimestamp();
+            guardPassed = true;
             if (sent) { Desktop(desktop, window); Button(4); }
             Thread.Sleep(100);
             bool heldAfter = Held();
-            Console.WriteLine("{\"ownerVerified\":true,\"cleanupUpOnly\":" + (cleanup ? "true" : "false") +
+            result = "{\"ownerVerified\":true,\"cleanupUpOnly\":" + (cleanup ? "true" : "false") +
                 ",\"releaseSent\":" + (sent ? "true" : "false") + ",\"leftHeldBefore\":" + (heldBefore ? "true" : "false") +
                 ",\"leftHeldAfter\":" + (heldAfter ? "true" : "false") + ",\"foregroundUnchanged\":" +
-                (GetForegroundWindow() == before ? "true" : "false") + desktopFields + "}");
+                (GetForegroundWindow() == before ? "true" : "false") + desktopFields + "}";
             Desktop(desktop, window);
             if (cleanup && heldAfter) throw new InvalidOperationException("Owned injected mouse button remained held after cleanup.");
             return;
@@ -152,7 +132,10 @@ public static class OverlayCiMouse {
         if ((mode == "down" || mode == "click") && Held())
             throw new InvalidOperationException("Existing held mouse input is not owned by this new press.");
         Desktop(desktop, window);
+        guardCompleted = Stopwatch.GetTimestamp(); inputStarted = Stopwatch.GetTimestamp();
+        guardPassed = true;
         if (mode != "up" && !SetCursorPos(x, y)) throw new InvalidOperationException("OS cursor unavailable.");
+        if (mode != "up") inputPerformed = true;
         Thread.Sleep(100);
         POINT point;
         if (!GetCursorPos(out point)) throw new InvalidOperationException("OS cursor unavailable.");
@@ -170,17 +153,59 @@ public static class OverlayCiMouse {
         GetWindowThreadProcessId(after, out afterPid);
         bool unchanged = after == foreground;
         bool noActivateAfter = (GetWindowLongPtr(window, -20).ToInt64() & 0x08000000L) != 0;
-        Console.WriteLine("{\"input\":\"win32-SendInput/SetCursorPos\",\"ownerVerified\":true,\"mode\":\"" + mode +
+        result = "{\"input\":\"win32-SendInput/SetCursorPos\",\"ownerVerified\":true,\"mode\":\"" + mode +
             "\",\"ownedDownInjected\":" + (downSent ? "true" : "false") + ",\"ownedOwnerPid\":" + owner +
             ",\"ownedWindow\":\"" + handle + "\",\"leftHeldAfter\":" + (Held() ? "true" : "false") + ",\"foregroundUnchanged\":" +
             (unchanged ? "true" : "false") + ",\"foregroundBefore\":{\"window\":\"" + foreground.ToInt64() +
             "\",\"pid\":" + foregroundPid + "},\"foregroundAfter\":{\"window\":\"" + after.ToInt64() +
             "\",\"pid\":" + afterPid + "},\"overlayNoActivate\":" + (noActivate ? "true" : "false") +
-            ",\"overlayNoActivateAfter\":" + (noActivateAfter ? "true" : "false") + desktopFields + "}");
+            ",\"overlayNoActivateAfter\":" + (noActivateAfter ? "true" : "false") + desktopFields + "}";
         Desktop(desktop, window);
         if (!unchanged || after != main || !noActivateAfter)
             throw new InvalidOperationException("Owned foreground or no-activate baseline changed after input.");
     }
+    static string Escape(string value) { return value.Replace("\\","\\\\").Replace("\"","\\\"").Replace("\r","\\r").Replace("\n","\\n"); }
+    public static string Execute(long handle, long expected, int owner, string mode, int x, int y, bool cleanup, string desktop, string precondition) {
+        string error = null;
+        try { Run(handle,expected,owner,mode,x,y,cleanup,desktop,precondition); }
+        catch (Exception failure) { error = failure.Message; }
+        inputCompleted = Stopwatch.GetTimestamp();
+        if (guardCompleted == 0) guardCompleted = inputCompleted;
+        if (result == null) result = "{\"ownerVerified\":" + (ownerVerified ? "true" : "false") +
+            ",\"leftHeldAfter\":" + (Held() ? "true" : "false") + (context ?? "") + "}";
+        return result.Substring(0,result.Length-1) + (result.Contains("\"mode\":") ? "" : ",\"mode\":\"" + Escape(mode) + "\"") +
+            ",\"responseOutcome\":\"" + (error == null ? "success" : "error") +
+            "\",\"error\":" + (error == null ? "null" : "\"" + Escape(error) + "\"") +
+            ",\"guardStartedTicks\":\"" + guardStarted + "\",\"guardCompletedTicks\":\"" + guardCompleted +
+            "\",\"inputStartedTicks\":\"" + inputStarted + "\",\"inputCompletedTicks\":\"" + inputCompleted +
+            "\",\"inputAttempted\":" + (inputStarted > 0 ? "true" : "false") +
+            ",\"inputPerformed\":" + (inputPerformed ? "true" : "false") +
+            ",\"guardOutcome\":\"" + (guardPassed ? "passed" : "rejected") +
+            "\",\"inputExecutionThread\":" + inputThread + "}";
+    }
 }
 '@
-[OverlayCiMouse]::Run($Window, $Foreground, $Owner, $Mode, $X, $Y, [bool] $CleanupOwnedDown, $DesktopName)
+if ($DesktopName) {
+    if (!$JobOutput -or !$ProofOutput) { throw 'Driver committed Job/response output is required.' }
+    & (Join-Path $PSScriptRoot '..\..\..\scripts\overlay-ci-desktop-attest.ps1') `
+        -DesktopName $DesktopName -Output $ProofOutput -JobOutput $JobOutput -Role os-mouse-driver -Generation $env:VI_CI_NATIVE_GENERATION
+    [OverlayDesktopAttestor]::ConfirmExecution()
+}
+$precondition = ''
+if ($CleanupOwnedDown) {
+    try {
+        if ($Mode -ne 'up' -or !$OwnedDownReceipt -or $OwnedDownReceipt.Length -gt 2048) {
+            throw 'Cleanup requires an owned native down receipt and permits only mouse-up.'
+        }
+        $receipt = $OwnedDownReceipt | ConvertFrom-Json
+        if (!$receipt.ownedDownInjected -or !$receipt.ownerVerified -or !$receipt.leftHeldAfter -or $receipt.mode -ne 'down' -or
+            $receipt.input -ne 'win32-SendInput/SetCursorPos' -or $receipt.ownedOwnerPid -ne $Owner -or
+            $receipt.ownedWindow -ne [string] $Window) { throw 'Cleanup receipt does not confirm this owned window and injected mouse-down.' }
+        if ($DesktopName) { [OverlayDesktopAttestor]::ValidateAuthority($OwnedDownReceipt,$Window,$Owner) }
+    } catch { $precondition = $_.Exception.Message }
+}
+$json = [OverlayCiMouse]::Execute($Window,$Foreground,$Owner,$Mode,$X,$Y,[bool]$CleanupOwnedDown,$DesktopName,$precondition)
+if ($DesktopName) { $json = [OverlayDesktopAttestor]::CommitResponse($json) }
+$value = $json | ConvertFrom-Json
+[Console]::WriteLine($json)
+if ($value.responseOutcome -eq 'error') { throw $value.error }

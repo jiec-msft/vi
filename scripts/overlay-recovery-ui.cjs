@@ -7,6 +7,7 @@ const childProcess = require('node:child_process');
 const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
+const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
     !process.env.VI_PROVIDER_DIR || !process.argv.includes('--ci-mode=overlay-recovery')) {
@@ -34,9 +35,12 @@ const report = { platform: process.platform, arch: process.arch, checks: [], hel
   cursorFailureScope: 'Windows native sampler seam; not a real desktop/RDP transition',
   controlScope: 'physical Stop/Cancel on preview recordings; Ready Start requires an external input target and is not asserted',
   microphoneScope: 'synthetic-input; no service credentials' };
+report.causalContext = { sourceHead: process.env.VI_PROBE_HEAD, runId: process.env.GITHUB_RUN_ID,
+  attempt: process.env.GITHUB_RUN_ATTEMPT, caseId: expectedDesktop, callerPid: process.pid };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const execFile = promisify(childProcess.execFile);
 const helpers = [];
+const pendingHelperAcks = new WeakMap();
 report.helpers = [];
 report.pointerStates = [];
 report.controlActions = [];
@@ -58,7 +62,9 @@ async function collectNativeDesktopReceipts() {
   report.nativeDesktopReceipts = [];
   report.nativeReadyReceipts = [];
   for (const helper of report.helpers) {
-    const receipt = JSON.parse(await fs.readFile(path.join(directory, `desktop-${helper.role}-${helper.pid}.json`), 'utf8'));
+    if (helper.proofError) throw new Error(helper.proofError);
+    await Promise.all(pendingHelperAcks.get(helper));
+    const receipt = helper.readyAcks[0].self.value;
     assert.equal(receipt.pid, helper.pid);
     assert.equal(receipt.role, helper.role);
     assert.equal(receipt.selfQueryComplete, true);
@@ -66,17 +72,12 @@ async function collectNativeDesktopReceipts() {
     assert.equal(receipt.threadDesktop, expectedDesktop);
     assert.equal(receipt.inputDesktop, expectedDesktop);
     report.nativeDesktopReceipts.push(receipt);
-    if (helper.role === 'overlay-pointer') {
-      for (const event of helper.events.filter(({ type }) => type === 'ready')) {
-        const emission = JSON.parse(await fs.readFile(path.join(directory,
-          `desktop-ready-${helper.role}-${helper.pid}-${event.readySequence}.json`), 'utf8'));
-        report.nativeReadyReceipts.push(emission);
-      }
-    }
+    for (const ack of helper.readyAcks) report.nativeReadyReceipts.push(ack.ready.value);
   }
 }
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
 const status = async () => {
+  for (const helper of report.helpers) if (helper.proofError) throw new Error(helper.proofError);
   const value = await evaluate('window.voice.status()');
   const previous = report.pointerStates.at(-1);
   if (previous?.state !== value.nativePointerState || previous?.restarts !== value.nativePointerRestarts) {
@@ -89,9 +90,9 @@ async function mouse(mode, point) {
   const location = process.platform === 'win32' ? screen.dipToScreenPoint(point) : point;
   let result;
   if (process.platform === 'darwin' && mode === 'down') held = true;
-  const recordInput = (stdout) => {
-    const input = JSON.parse(stdout.trim());
-    report.osInputs.push({ at: Date.now(), processExitObservedAt: Date.now(), stage, mode, ...input });
+  const recordInput = (value) => {
+    const input = typeof value === 'string' ? JSON.parse(value.trim()) : value;
+    report.osInputs.push({ at: Date.now(), stage, mode, ...input, processExitObservedAt: Date.now() });
     if (input.ownedDownInjected && input.ownerVerified && input.leftHeldAfter) {
       held = true;
       ownedDownReceipt = input;
@@ -103,21 +104,24 @@ async function mouse(mode, point) {
     if (process.platform === 'win32') {
       const handle = overlay.getNativeWindowHandle();
       const id = handle.readBigUInt64LE().toString();
-      result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      const request = createRequest(report, 'os-mouse-driver',
+        (report.causalRequests || []).filter(({ role }) => role === 'os-mouse-driver').length + 1, expectedDesktop);
+      request.jobDirectory = desktopReceipt;
+      result = await executeOwnedDriver(report, request, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
         '-Window', id, '-Foreground', report.windowIds.main, '-Owner', String(process.pid),
         '-Mode', mode, '-X', String(location.x), '-Y', String(location.y),
-        ...(expectedDesktop ? ['-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt] : [])],
-      { timeout: 15000, windowsHide: true });
+        '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt, '-ProofOutput', directory], directory);
     } else {
       result = await execFile(path.resolve('test', 'framework', 'fixtures', 'overlay-mouse'),
         [String(process.pid), mode, String(location.x), String(location.y)], { timeout: 10000 });
     }
   } catch (error) {
-    if (error.stdout?.trim()) recordInput(error.stdout);
+    if (error.nativeReceipt) recordInput(error.nativeReceipt);
+    else if (error.stdout?.trim()) recordInput(error.stdout);
     throw error;
   }
-  const input = recordInput(result.stdout);
+  const input = recordInput(process.platform === 'win32' ? result : result.stdout);
   assert.equal(input.ownerVerified, true);
   assert.equal(input.foregroundUnchanged, true);
   if (process.platform === 'win32') {
@@ -298,13 +302,19 @@ async function run() {
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
         .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
         .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
-          '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))'));
+          '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))')
+        .replace('@{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5',
+          `$ciReply = @{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5
+        if ($request.action -eq 'ready') {
+            [OverlayDesktopAttestor]::BeginReadyWrite($ciReply)
+            [Console]::WriteLine($ciReply)
+            [OverlayDesktopAttestor]::EndReadyWrite($ciReply)
+        } else { $ciReply }`));
     }
     helperFile = path.join(directory, 'windows-overlay-ci.ps1');
     await fs.writeFile(helperFile, injected);
   }
   const spawn = childProcess.spawn;
-  let spawnRequestSequence = 0;
   childProcess.spawn = (file, args, options) => {
     const pointer = args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-overlay.ps1'));
     const delivery = file.endsWith('macos-delivery') ||
@@ -313,13 +323,16 @@ async function run() {
       : delivery && deliveryFile ? args.map((arg) => arg.endsWith('windows-delivery.ps1') ? deliveryFile : arg) : args;
     const role = pointer ? 'overlay-pointer' : 'desktop-delivery';
     const generation = report.helpers.filter((value) => value.role === role).length + 1;
-    const requestSequence = pointer || delivery ? ++spawnRequestSequence : undefined;
-    const requestId = pointer || delivery ? `${process.pid}-${requestSequence}-${role}-${generation}` : undefined;
+    const request = pointer || delivery ? createRequest(report, role, generation, expectedDesktop) : undefined;
+    const requestSequence = request?.requestSequence, requestId = request?.requestId;
     const spawnStartedAt = Date.now(), spawnStartedTicks = process.hrtime.bigint().toString();
     const child = spawn(file, actual, expectedDesktop && (pointer || delivery)
-      ? { ...options, env: { ...(options?.env || process.env), VI_CI_NATIVE_GENERATION: String(generation),
-        VI_CI_NATIVE_SPAWN_REQUEST: requestId, VI_CI_NATIVE_REQUEST_SEQUENCE: String(requestSequence) } } : options);
+      ? { ...options, env: requestEnvironment(request, options?.env || process.env) } : options);
     const spawnReturnedAt = Date.now(), spawnReturnedTicks = process.hrtime.bigint().toString();
+    if (request) {
+      request.returnedPid = child.pid; request.jobDirectory = desktopReceipt;
+      request.returned = nodeEvent(report, 'request-return', { requestId, pid: child.pid });
+    }
     if (pointer) {
       helpers.push(child);
       report.helperPids.push(child.pid);
@@ -327,14 +340,17 @@ async function run() {
     if (pointer || delivery) {
       const helper = { role, pid: child.pid, generation,
         startedAt: Date.now(), helperStartedTicks: process.hrtime.bigint().toString(), stage, events: [], stderrBytes: 0,
-        requestId, requestSequence, callerPid: process.pid, spawnStartedAt, spawnStartedTicks,
+        requestId, requestSequence, callerPid: process.pid, requestNonce: request.requestNonce, causalRequest: request,
+        readyAcks: [], spawnStartedAt, spawnStartedTicks,
         spawnReturnedAt, spawnReturnedTicks, returnedPid: child.pid,
         spawnClock: 'Node-process-hrtime', startedAtClock: 'Node-Date.now-not-native-FILETIME',
         startedAtMeaning: 'observer-after-synchronous-spawn-return-before-spawn-event' };
       report.helpers.push(helper);
+      pendingHelperAcks.set(helper, []);
       child.once('spawn', () => {
         helper.spawnObservedAt = Date.now();
         helper.spawnObservedTicks = process.hrtime.bigint().toString();
+        request.spawn = nodeEvent(report, 'process-spawn', { requestId, pid: child.pid });
       });
       const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
       let receiveOrder = 0, readySequence = 0;
@@ -343,16 +359,45 @@ async function run() {
         const type = line.match(/"type":"(ready|cancel|suspended)"/)?.[1];
         if (type || line.includes('"ready":true')) {
           const eventType = type || 'ready';
-          helper.events.push({ type: eventType, at: Date.now(), stage, message: line, receiveOrder,
+          const causal = nodeEvent(report, 'helper-line', { requestId, type: eventType, receiveOrder });
+          const event = { type: eventType, at: Date.now(), stage, message: line, receiveOrder, causal,
             receivedTicks: process.hrtime.bigint().toString(), monotonicClock: 'Node-process-hrtime-not-native-stopwatch',
-            ...(eventType === 'ready' ? { readySequence: ++readySequence } : {}) });
+            ...(eventType === 'ready' ? { readySequence: ++readySequence } : {}) };
+          helper.events.push(event);
+          if (eventType === 'ready' && expectedDesktop) {
+            const deadlineTicks = BigInt(causal.ticks) + 300000000n;
+            const ackPromise = (async () => {
+              while (true) {
+                try {
+                  const self = await consumeCommitted(directory, `desktop-${role}-${child.pid}`, request, report);
+                  const ready = await consumeCommitted(directory, `desktop-ready-${role}-${child.pid}-${event.readySequence}`, request, report);
+                  const acknowledged = nodeEvent(report, 'helper-ready-ack', { requestId, readySequence: event.readySequence });
+                  assert.ok(BigInt(acknowledged.ticks) < deadlineTicks, 'Completed READY sidecar ACK missed the original deadline.');
+                  const ack = { self, ready, acknowledged, readySequence: event.readySequence };
+                  helper.readyAcks.push(ack);
+                  return ack;
+                } catch (error) {
+                  if (error.code !== 'ENOENT' || process.hrtime.bigint() >= deadlineTicks) throw error;
+                  await pause(5);
+                }
+              }
+            })();
+            pendingHelperAcks.get(helper).push(ackPromise);
+            ackPromise.catch((error) => { helper.proofError = error.message; });
+          }
         }
         if (line.includes('"ok":false')) helper.events.push({ type: 'request-failed', at: Date.now(), stage });
         if (pointer && type === 'ready' && earlyRecovery) {
           if (helpers.length === 1 && !helper.startupFailureScheduled) {
             helper.startupFailureScheduled = true;
+            helper.startupFailureDelayMs = 300;
             setTimeout(() => {
               helper.startupFailureRequestedAt = Date.now();
+              helper.injection = nodeEvent(report, 'owned-injection-requested', { requestId, pid: child.pid });
+              if (!helper.readyAcks.some((ack) => ack.readySequence === 1 &&
+                  BigInt(ack.acknowledged.ticks) < BigInt(helper.injection.ticks))) {
+                helper.proofError = 'Original 300ms injection lacked a completed matching pre-injection receipt ACK.';
+              }
               helper.ownedStartupFailureInjected = child.kill();
             }, 300);
           } else if (helpers.length === 2) startupRecoveryCompleted = true;
@@ -360,8 +405,12 @@ async function run() {
       });
       child.stderr.on('data', (bytes) => { helper.stderrBytes += bytes.length; });
       child.once('error', () => { helper.errorAt = Date.now(); });
-      child.once('exit', (code, signal) => { helper.exit = { at: Date.now(), code, signal, stage }; });
-      child.once('close', () => { helper.closedAt = Date.now(); lines.close(); });
+      child.once('exit', (code, signal) => {
+        helper.exit = { at: Date.now(), code, signal, stage, causal: nodeEvent(report, 'process-exit', { requestId, code, signal }) };
+      });
+      child.once('close', (code, signal) => {
+        helper.closedAt = Date.now(); helper.close = nodeEvent(report, 'process-close', { requestId, code, signal }); lines.close();
+      });
     }
     return child;
   };
@@ -391,7 +440,9 @@ async function run() {
     assert.ok(recovered.events.some((event) => event.type === 'ready'));
     report.startupRecovery = { failedPid: helpers[0].pid, recoveredPid: helpers[1].pid,
       injectedAt: failed.startupFailureRequestedAt, failedExitAt: failed.exit.at,
-      recoveredReadyAt: recovered.events.find((event) => event.type === 'ready').at };
+      recoveredReadyAt: recovered.events.find((event) => event.type === 'ready').at,
+      injection: failed.injection, failedExit: failed.exit.causal, failedClose: failed.close,
+      recoveredReady: recovered.events.find((event) => event.type === 'ready').causal };
     report.checks.push('early-owned-helper-exit-recovery-before-root-readiness');
   }
   if (process.platform === 'win32') {
@@ -433,6 +484,7 @@ async function run() {
     await fs.writeFile(path.join(directory, 'overlay-render.png'), overlayCapture);
     assert.ok(desktopReceipt);
     report.rootReadyAt = Date.now();
+    report.rootReadyEvent = nodeEvent(report, 'root-ready');
     await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
       mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
     await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
@@ -454,11 +506,15 @@ async function run() {
   if (process.argv.includes('--ci-desktop-timeout-probe')) {
     assert.ok(expectedDesktop && desktopReceipt);
     await mouse('hover', await pointFor('#drag-handle'));
-    const witness = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    const witnessRequest = createRequest(report, 'os-mouse-driver',
+      report.causalRequests.filter(({ role }) => role === 'os-mouse-driver').length + 1, expectedDesktop);
+    witnessRequest.jobDirectory = desktopReceipt;
+    const witness = await executeOwnedDriver(report, witnessRequest, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
       '-Window', report.windowIds.overlay, '-Owner', String(process.pid), '-Mode', 'status',
-      '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt], { timeout: 15000, windowsHide: true });
-    report.timeoutWitness = JSON.parse(witness.stdout.trim());
+      '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt, '-ProofOutput', directory], directory);
+    report.timeoutWitness = witness;
+    report.osInputs.push(witness);
     report.osInputs.push({ mode: 'status', ...report.timeoutWitness, processExitObservedAt: Date.now() });
     assert.equal(report.timeoutWitness.leftHeldBefore, false);
     assert.equal(report.timeoutWitness.leftHeldAfter, false);
@@ -565,17 +621,20 @@ run().catch((error) => {
         if (!ownedDownReceipt) throw new Error('Owned down receipt missing; mouse cleanup authority cannot be verified.');
         let result;
         try {
-          result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+          const request = createRequest(report, 'os-mouse-driver',
+            report.causalRequests.filter(({ role }) => role === 'os-mouse-driver').length + 1, expectedDesktop);
+          request.jobDirectory = desktopReceipt;
+          result = await executeOwnedDriver(report, request, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', path.resolve('test', 'framework', 'fixtures', 'overlay-mouse.ps1'),
             '-Window', ownedDownReceipt.ownedWindow, '-Owner', String(process.pid), '-Mode', 'up',
-            '-CleanupOwnedDown', '-OwnedDownReceipt', JSON.stringify(ownedDownReceipt),
-            ...(expectedDesktop ? ['-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt] : [])], { timeout: 15000, windowsHide: true });
+            '-CleanupOwnedDown', '-OwnedDownReceipt', JSON.stringify(downAuthority(ownedDownReceipt)),
+            '-DesktopName', expectedDesktop, '-JobOutput', desktopReceipt, '-ProofOutput', directory], directory);
         } catch (error) {
-          if (error.stdout?.trim()) report.cleanupRelease = JSON.parse(error.stdout.trim());
+          if (error.nativeReceipt) report.cleanupRelease = error.nativeReceipt;
           report.cleanupBlocked = { reason: error.message, remainingHeld: report.cleanupRelease?.leftHeldAfter ?? 'unknown' };
           throw error;
         }
-        report.cleanupRelease = JSON.parse(result.stdout.trim());
+        report.cleanupRelease = result;
         report.cleanupRelease.processExitObservedAt = Date.now();
         assert.equal(report.cleanupRelease.cleanupUpOnly, true);
         assert.equal(report.cleanupRelease.leftHeldAfter, false);
