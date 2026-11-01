@@ -72,6 +72,17 @@ public final class KeyboardProbeTest {
         consentAndStart();
         waitState("RECORDING:");
         click("Stop / final");
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+                context.getSystemService(android.view.inputmethod.InputMethodManager.class)
+                        .restartInput(OwnedEditorActivity.current.other));
+        waitState("CANCELLED:");
+        assertReleased();
+        assertEquals("", text(R.id.owned_other));
+        screenshot("06-restart-cancelled.png");
+
+        consentAndStart();
+        waitState("RECORDING:");
+        click("Stop / final");
         device.pressBack();
         assertTrue(device.wait(Until.gone(By.text("Stop / final")), 5_000));
         assertReleased();
@@ -106,7 +117,7 @@ public final class KeyboardProbeTest {
         report.put("openCaptures", CaptureFactory.OPEN_CAPTURES.get());
         report.put("openProviders", FakeProvider.OPEN_SESSIONS.get());
         report.put("lastSessionState", device.findObject(By.textStartsWith("CANCELLED:")).getText());
-        report.put("cases", "visible IME; consent; selection replacement; duplicate final; cancel; target switch; hide; password; keyboard switch; permission denied");
+        report.put("cases", "visible IME; consent; selection replacement; duplicate final; cancel; target switch; same-editor restart; hide; password; keyboard switch; permission denied");
         try (FileWriter writer = new FileWriter(new File(evidence, "probe.json"))) {
             writer.write(report.toString(2));
         }

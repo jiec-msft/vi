@@ -39,6 +39,10 @@ public final class VoiceIme extends InputMethodService {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(12, 8, 12, 8);
+        layout.setOnApplyWindowInsetsListener((view, insets) -> {
+            view.setPadding(12, 8, 12, 8 + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
         TextView warning = new TextView(this);
         warning.setText(R.string.prototype_warning);
         layout.addView(warning);

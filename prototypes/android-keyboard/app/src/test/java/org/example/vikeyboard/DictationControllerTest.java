@@ -186,6 +186,7 @@ public final class DictationControllerTest {
         session().events.complete("once");
         assertEquals(List.of("once"), inserted);
         assertEquals(DictationController.State.ERROR, controller.state());
+        assertTrue(messages.get(messages.size() - 1).contains("Editor rejected final"));
     }
 
     @Test public void releaseFailureDoesNotCommitOrSkipCaptureCleanup() {

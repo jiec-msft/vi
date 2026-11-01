@@ -85,10 +85,12 @@ jobs:
           script: bash prototypes/android-keyboard/ci/probe.sh
       - name: Prepare actual emulator preview
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          fi
           ffprobe -v error -show_entries stream=width,height -of json prototypes/android-keyboard/evidence/keyboard.mp4
-          ffmpeg -hide_banner -loglevel error -i prototypes/android-keyboard/evidence/keyboard.mp4 -t 12 \
+          ffmpeg -hide_banner -loglevel error -i prototypes/android-keyboard/evidence/keyboard.mp4 -t 24 \
             -filter_complex 'fps=4,scale=360:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse' \
             -y prototypes/android-keyboard/evidence/keyboard.gif
           test -s prototypes/android-keyboard/evidence/probe.json

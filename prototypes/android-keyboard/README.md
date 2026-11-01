@@ -64,7 +64,7 @@ JUnit 覆盖 permission/consent/capture unavailable、final-only、重复/旧回
 目标丢失、cancel、deadline、PCM/provider/capture/cleanup/commit failure。
 instrumentation 使用 debug-only owned `EditText` 的真实 connection wrapper，
 通过系统启用 IME 和 UiAutomator 点击键盘，检查 selection replacement、
-只 commit 一次、无 send action、cancel/换 editor/隐藏/换键盘释放、
+只 commit 一次、无 send action、cancel/换 editor/同 editor restart/隐藏/换键盘释放、
 password block、permission denied。debug editor 不是生产 integration。
 `probe.json` 含 PID、API、合成输入、commit/action/resource counts；
 截图中的 state 带 session generation，receipt 关联 exact head/run/attempt。

@@ -158,8 +158,10 @@ final class DictationController {
             return;
         }
         try {
-            publish(editor.commit(text) ? State.COMMITTED : State.ERROR,
-                    "Final-only commit; resources released (no retry)");
+            boolean accepted = editor.commit(text);
+            publish(accepted ? State.COMMITTED : State.ERROR, accepted
+                    ? "Final-only commit; resources released (no retry)"
+                    : "Editor rejected final; resources released (no retry)");
         } catch (RuntimeException error) {
             publish(State.ERROR, "Editor commit failed; no retry");
         }
