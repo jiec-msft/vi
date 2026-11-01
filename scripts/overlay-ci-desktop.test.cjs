@@ -1,7 +1,38 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
-const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent } = require('./overlay-ci-desktop.cjs');
+const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent,
+  assertJobReceiptPath } = require('./overlay-ci-desktop.cjs');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+test('actual PS5 Json producer preserves the committed nested receipt object schema', {
+  skip: process.platform !== 'win32', timeout: 20000,
+}, async () => {
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  const directory = path.resolve('artifacts-ci', 'overlay-recovery', 'serialization-probe');
+  await fs.mkdir(directory, { recursive: true });
+  const result = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive',
+    '-File', path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'),
+    '-DesktopName', `vi-ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${'a'.repeat(32)}`,
+    '-Output', directory, '-JobOutput', directory, '-Generation', '1', '-Role', 'overlay-pointer', '-SerializationProbe'],
+  { windowsHide: true, timeout: 15000 });
+  const value = JSON.parse(result.stdout.trim());
+  assert.equal(value.scope, 'serialization-only-not-job-membership');
+  assert.equal(value.complete, true);
+  assert.equal(typeof value.pid, 'number');
+  assertJobReceiptPath(value, { returnedPid: value.pid });
+  assert.equal(value.jobReceipt.pid, value.pid);
+  assert.equal(value.jobReceipt.sha256, createHash('sha256').update('serialization-only-not-job-proof').digest('hex'));
+  assert.equal(JSON.stringify(value).includes('__type'), false);
+});
+for (const [label, jobReceipt] of [['key/value array', [{ key: 'fileName', value: 'job-1-2.json' }]], ['missing filename', {}]]) {
+  test(`production consumer rejects ${label} before filesystem lookup`, () => {
+    assert.throws(() => assertJobReceiptPath({ creationFileTime: '2', jobReceipt }, { returnedPid: 1 }),
+      { name: 'AssertionError' });
+  });
+}
 
 test('accepts only the exact expected raw wrapper outcome', () => {
   for (const errors of [[], ['Owned child timed out.'], ['Owned child failed with exit code 1.']]) {
@@ -206,6 +237,9 @@ function causalFixture(report, desktop) {
     report.rootReadyEvent = { ...context, kind: 'root-ready', ticks: '3100000000', clock: 'Node-process-hrtime' };
     report.nodeEvents.push(report.rootReadyEvent);
   }
+  reindexNodeEvents(report);
+}
+function reindexNodeEvents(report) {
   report.nodeEvents.sort((a, b) => Number(BigInt(a.ticks) - BigInt(b.ticks)));
   report.nodeEvents.forEach((value, index) => { value.eventId = index + 1; });
 }
@@ -428,7 +462,7 @@ test('requires both completed generation proofs before the injected startup exit
   const { report, desktop } = startupFixture();
   assertDesktopChain(report, desktop);
 });
-for (const [label, change] of [
+for (const [label, change, reason] of [
   ['lost first generation', (r) => { r.helpers.shift(); }],
   ['post-injection external completion', (r, d) => { d.descendantDesktopObservations[4].snapshotCompletedAt = 1401; }],
   ['post-injection external live check', (r, d) => { d.descendantDesktopObservations[4].liveCheckedAt = 1401; }],
@@ -439,11 +473,20 @@ for (const [label, change] of [
   ['post-injection self completion', (r) => { r.nativeDesktopReceipts[0].queryCompletedAt = 1401; }],
   ['post-exit self completion', (r) => { r.nativeDesktopReceipts[0].queryCompletedAt = 1501; }],
   ['stale self generation', (r) => { r.nativeDesktopReceipts[1].creationFileTime = birth(5); }],
-  ['overlapping generations', (r) => { r.helpers[1].causalRequest.begin.ticks = '23000'; }],
-  ['recovery after root readiness', (r) => { r.helpers[1].events[0].causal.ticks = '32000'; }],
-  ['injection before actual committed ACK', (r) => { r.startupRecovery.injection.ticks = '20000'; }],
+  ['overlapping generations', (r) => { r.helpers[1].causalRequest.begin.ticks = '2300000000'; reindexNodeEvents(r); },
+    /Replacement precedes actual exit and close/],
+  ['recovery after root readiness', (r) => {
+    const helper = r.helpers[1], ack = helper.readyAcks[0];
+    helper.events[0].causal.ticks = '3200000000';
+    ack.self.consumed.ticks = '3200100000'; ack.ready.consumed.ticks = '3200200000';
+    ack.acknowledged.ticks = '3200300000'; reindexNodeEvents(r);
+  }, /Recovered READY occurs after/],
+  ['injection before actual committed ACK', (r) => {
+    r.helpers[0].readyAcks[0].acknowledged.ticks = '2310000000'; reindexNodeEvents(r);
+  }, /Actual committed receipt ACK must precede/],
   ['missing pre-injection completed ACK', (r) => { r.helpers[0].readyAcks = []; }],
-  ['replacement before actual close', (r) => { r.helpers[0].close.ticks = '26000'; }],
+  ['replacement before actual close', (r) => { r.helpers[0].close.ticks = '2600000000'; reindexNodeEvents(r); },
+    /Replacement precedes actual exit and close/],
   ['detached root ready event', (r) => { r.rootReadyEvent = { ...r.rootReadyEvent, ticks: '999999999999' }; }],
   ['wrong root ready clock domain', (r) => { r.rootReadyEvent.clock = 'native-process-Stopwatch'; }],
   ['wrong root ready context', (r) => { r.rootReadyEvent.caseId = 'other'; }],
@@ -452,6 +495,6 @@ for (const [label, change] of [
   test(`rejects startup proof with ${label}`, () => {
     const { report, desktop } = startupFixture();
     change(report, desktop);
-    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError' });
+    assert.throws(() => assertDesktopChain(report, desktop), { name: 'AssertionError', ...(reason ? { message: reason } : {}) });
   });
 }

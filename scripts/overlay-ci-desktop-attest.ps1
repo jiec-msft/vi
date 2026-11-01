@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string] $Output,
     [Parameter(Mandatory = $true)][string] $JobOutput,
     [Parameter(Mandatory = $true)][ValidateRange(1, 256)][int] $Generation,
-    [ValidateSet('overlay-pointer', 'desktop-delivery', 'os-mouse-driver')][string] $Role
+    [ValidateSet('overlay-pointer', 'desktop-delivery', 'os-mouse-driver')][string] $Role,
+    [switch] $SerializationProbe
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
@@ -16,7 +17,7 @@ if ($Role -ne 'os-mouse-driver' -and $Generation -gt 4) { throw 'Native helper l
     requestId = $env:VI_CI_NATIVE_SPAWN_REQUEST; requestNonce = $env:VI_CI_NATIVE_REQUEST_NONCE;
     at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 } | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-Add-Type -ReferencedAssemblies 'System', 'System.Xml', 'System.Runtime.Serialization', 'System.Core' -TypeDefinition @'
+Add-Type -ReferencedAssemblies 'System', 'System.Xml', 'System.Runtime.Serialization', 'System.Core', 'System.Web.Extensions' -TypeDefinition @'
 using System;
 using System.Text;
 using System.Diagnostics;
@@ -27,6 +28,7 @@ using System.Text.RegularExpressions;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
+using System.Web.Script.Serialization;
 [DataContract] public sealed class OverlayJobReceipt {
     [DataMember] public int pid;
     [DataMember] public string creationFileTime, status, membershipApi, liveCheckApi, sourceHead, runId, attempt, caseId;
@@ -58,13 +60,7 @@ public static class OverlayDesktopAttestor {
         return value.ToString();
     }
     public static string Json(Dictionary<string, object> value) {
-        var serializer = new DataContractJsonSerializer(typeof(Dictionary<string, object>),
-            new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true,
-                KnownTypes = new [] { typeof(Dictionary<string, object>) } });
-        using (var stream = new MemoryStream()) {
-            serializer.WriteObject(stream, value);
-            return Encoding.UTF8.GetString(stream.ToArray());
-        }
+        return new JavaScriptSerializer().Serialize(value);
     }
     public static string Hash(byte[] bytes) {
         using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
@@ -183,12 +179,7 @@ public static class OverlayDesktopAttestor {
         readyMessage = null;
     }
     public static string CommitResponse(string json) {
-        var serializer = new DataContractJsonSerializer(typeof(Dictionary<string, object>),
-            new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true,
-                KnownTypes = new [] { typeof(Dictionary<string, object>) } });
-        Dictionary<string,object> action;
-        using (var memory = new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            action = (Dictionary<string,object>)serializer.ReadObject(memory);
+        var action = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
         var value = Self();
         foreach (var pair in action) value[pair.Key] = pair.Value;
         if (authorityReceipt != null) value["authorityReceipt"] = authorityReceipt;
@@ -200,19 +191,15 @@ public static class OverlayDesktopAttestor {
         return Json(value);
     }
     public static void ValidateAuthority(string json, long window, int owner) {
-        var serializer = new DataContractJsonSerializer(typeof(Dictionary<string,object>),
-            new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true });
-        Dictionary<string,object> authority;
-        using (var memory = new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            authority = (Dictionary<string,object>)serializer.ReadObject(memory);
+        var serializer = new JavaScriptSerializer();
+        var authority = serializer.Deserialize<Dictionary<string, object>>(json);
         string oldNonce = (string)authority["requestNonce"];
         Require(Regex.IsMatch(oldNonce,"^[a-f0-9-]{36}$"), "Owned down authority nonce invalid.");
         string stem = "driver-response-" + oldNonce;
         byte[] bytes = Bytes(Path.Combine(output,stem + ".json"));
-        Dictionary<string,object> down, commit;
-        using (var memory = new MemoryStream(bytes)) down = (Dictionary<string,object>)serializer.ReadObject(memory);
-        using (var memory = new MemoryStream(Bytes(Path.Combine(output,stem + ".commit.json"))))
-            commit = (Dictionary<string,object>)serializer.ReadObject(memory);
+        var down = serializer.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(bytes));
+        var commit = serializer.Deserialize<Dictionary<string, object>>(
+            Encoding.UTF8.GetString(Bytes(Path.Combine(output,stem + ".commit.json"))));
         Require(Hash(bytes) == (string)authority["responseSHA256"] && (string)commit["sha256"] == Hash(bytes) &&
             Convert.ToBoolean(commit["commitComplete"]) && (string)down["requestNonce"] == oldNonce &&
             (string)down["sourceHead"] == head && (string)down["runId"] == run && (string)down["attempt"] == attempt &&
@@ -227,6 +214,17 @@ public static class OverlayDesktopAttestor {
     }
 }
 '@
+if ($SerializationProbe) {
+    $birth = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
+    $job = [Collections.Generic.Dictionary[string,object]]::new()
+    $job['fileName'] = "job-$PID-$birth.json"; $job['pid'] = $PID; $job['creationFileTime'] = $birth
+    $job['sha256'] = [OverlayDesktopAttestor]::Hash([Text.Encoding]::UTF8.GetBytes('serialization-only-not-job-proof'))
+    $probe = [Collections.Generic.Dictionary[string,object]]::new()
+    $probe['pid'] = $PID; $probe['creationFileTime'] = $birth; $probe['jobReceipt'] = $job
+    $probe['scope'] = 'serialization-only-not-job-membership'; $probe['complete'] = $true
+    [Console]::WriteLine([OverlayDesktopAttestor]::Json($probe))
+    exit 0
+}
 [OverlayDesktopAttestor]::Configure($DesktopName, $Output, $JobOutput, $Role, $Generation)
 [IO.File]::WriteAllText((Join-Path $Output "native-consumed-$Role-$PID.json"), (@{
     phase = 'committed-job-consumed'; pid = $PID; role = $Role; generation = $Generation;

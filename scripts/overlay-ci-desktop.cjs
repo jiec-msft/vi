@@ -35,6 +35,13 @@ function assertRequest(value, request) {
   for (const key of ['sourceHead', 'runId', 'attempt', 'caseId', 'callerPid', 'role', 'generation',
     'requestId', 'requestNonce', 'requestSequence']) assert.equal(value[key], request[key], `Causal ${key} mismatch.`);
 }
+function assertJobReceiptPath(value, request) {
+  assert.ok(value.jobReceipt && typeof value.jobReceipt === 'object' && !Array.isArray(value.jobReceipt),
+    'Native Job receipt must use the committed object schema, not key/value-pair arrays.');
+  assert.equal(typeof value.jobReceipt.fileName, 'string', 'Committed native Job receipt filename is missing.');
+  assert.equal(value.jobReceipt.fileName, `job-${request.returnedPid}-${value.creationFileTime}.json`,
+    'Committed native Job receipt filename/identity mismatch.');
+}
 async function consumeCommitted(directory, stem, request, report) {
   const bytes = await fs.readFile(path.join(directory, `${stem}.json`));
   const commitBytes = await fs.readFile(path.join(directory, `${stem}.commit.json`));
@@ -46,6 +53,7 @@ async function consumeCommitted(directory, stem, request, report) {
   assert.equal(commit.pid, request.returnedPid);
   assert.equal(commit.creationFileTime, value.creationFileTime);
   assert.equal(commit.executionThread, value.executionThread);
+  assertJobReceiptPath(value, request);
   const jobBytes = await fs.readFile(path.join(request.jobDirectory, value.jobReceipt.fileName));
   const job = JSON.parse(jobBytes);
   assert.equal(sha256(jobBytes), value.jobReceipt.sha256);
@@ -629,8 +637,9 @@ function assertDesktopChain(report, desktop) {
       ticks(ack.acknowledged.ticks) < ticks(recovery.injection.ticks), 'Actual committed receipt ACK must precede the fixed injection deadline.');
     assert.ok(ticks(recovery.injection.ticks) <= ticks(failed.exit.causal.ticks) &&
       ticks(failed.exit.causal.ticks) <= ticks(failed.close.ticks) &&
-      ticks(failed.close.ticks) <= ticks(recovered.causalRequest.begin.ticks) &&
-      ticks(recovered.events[0].causal.ticks) <= ticks(report.rootReadyEvent.ticks));
+      ticks(failed.close.ticks) <= ticks(recovered.causalRequest.begin.ticks));
+    assert.ok(ticks(recovered.events[0].causal.ticks) <= ticks(report.rootReadyEvent.ticks),
+      'Recovered READY occurs after the actual retained root readiness event.');
     report.foreignChronologyDiagnostics.push({ kind: 'startup-injection', pid: failed.pid,
       jobLiveBeforeForeignInjection: job.liveCheckedAt < recovery.injectedAt,
       nativeQueryBeforeForeignInjection: receipt.queryCompletedAt < recovery.injectedAt,
@@ -641,4 +650,4 @@ function assertDesktopChain(report, desktop) {
 }
 
 module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
-  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue };
+  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath };
