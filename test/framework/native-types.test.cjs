@@ -5,6 +5,19 @@ const { readFileSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { NativeDelivery } = require('../../app/native-delivery.cjs');
 
+test('caret marker, field lease and owned fixture types compile without opening native windows',
+  { skip: process.platform !== 'win32' }, () => {
+    const script = `$ErrorActionPreference='Stop'\n` +
+      `Add-Type -AssemblyName System.Windows.Forms,System.Drawing,UIAutomationClient,UIAutomationTypes\n` +
+      `Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing,UIAutomationClient,UIAutomationTypes,WindowsBase ` +
+      `-Path '${path.resolve('native', 'windows-caret.cs').replaceAll("'", "''")}'\n` +
+      `Add-Type -ReferencedAssemblies System.Windows.Forms -Path '${path.resolve('native', 'windows-caret-lease.cs').replaceAll("'", "''")}'\n` +
+      `Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -Path '${path.resolve('scripts', 'windows-caret-fixture.cs').replaceAll("'", "''")}'\n` +
+      `if([ViCaret].FullName -ne 'ViCaret' -or [ViCaretLease].FullName -ne 'ViCaretLease' -or [ViCaretFixture].FullName -ne 'ViCaretFixture'){throw 'Caret native type missing.'}\n`;
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')], { timeout: 20000, stdio: 'pipe' });
+  });
+
 test('Windows delivery helper compiles and answers readiness without desktop or clipboard access',
   { skip: process.platform !== 'win32' }, async () => {
     const driver = new NativeDelivery('win32', path.resolve('native'));

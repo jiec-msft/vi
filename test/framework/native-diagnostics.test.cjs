@@ -8,6 +8,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { performance } = require('node:perf_hooks');
 
 test('native diagnostics retain correlation and safe categories, never raw stderr or payload', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-native-log-'));
@@ -38,10 +39,27 @@ test('native sampler independently persists a host pulse gap without a main time
   const script = `$ErrorActionPreference='Stop'\n. '${path.resolve('native', 'windows-diagnostics.ps1').replaceAll("'", "''")}'\n` +
     `[ViNativeDiagnostics]::Configure('${root.replaceAll("'", "''")}','12345678-1234-1234-1234-123456789abc','pointer',1,$PID,$false)\n` +
     `Start-Sleep -Milliseconds 5200\n[ViNativeDiagnostics]::Sample()\n[ViNativeDiagnostics]::Sample()\n[ViNativeDiagnostics]::Close()\n`;
+  const started = performance.now();
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from(script, 'utf16le').toString('base64')], { timeout: 15000, stdio: 'pipe' });
   const rows = (await fs.readFile(path.join(root, 'native-pointer.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(rows.filter((row) => row.state === 'host-gap').length, 1);
+  const gapRows = rows.filter((row) => row.state === 'host-gap');
+  if (gapRows.length !== 1) {
+    const safeRows = rows.map((row) => ({
+      pid: row.pid, parentPid: row.parentPid, generation: row.generation,
+      birthFileTime: /^\d{15,20}$/.test(row.birthFileTime || '') ? row.birthFileTime : undefined,
+      clock: row.clock === 'helper-stopwatch' ? row.clock : 'unknown',
+      state: ['host-gap', 'host-resumed', 'native-start'].includes(row.state) ? row.state : 'other',
+      monoMs: row.monoMs, hostGapMs: row.hostGapMs,
+    }));
+    const packet = { elapsedMs: performance.now() - started, count: gapRows.length, expected: 1, rows: safeRows };
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      const output = path.resolve('artifacts-ci', 'caret-arm');
+      await fs.mkdir(output, { recursive: true });
+      await fs.writeFile(path.join(output, 'host-gap-failure.json'), JSON.stringify(packet));
+    }
+    assert.equal(gapRows.length, 1, JSON.stringify(packet));
+  }
   assert.ok(rows.at(-1).hostGapMs >= 5000);
   assert.ok(rows.every((row) => row.pid > 0 && row.generation === 1 && row.birthFileTime && row.monoMs >= 0));
   assert.doesNotMatch(JSON.stringify(rows), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));

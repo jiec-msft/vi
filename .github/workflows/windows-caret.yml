@@ -1,0 +1,130 @@
+name: Windows caret integration
+on:
+  pull_request:
+    paths:
+      - app/**
+      - native/windows-caret*
+      - native/windows-delivery.ps1
+      - scripts/windows-caret*
+      - test/framework/caret-indicator.test.cjs
+      - prototypes/desktop-presentation/presentation.cjs
+      - .github/workflows/windows-caret.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: caret-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit:
+    name: Root diagnostics and timing integration (required)
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Root diagnostics and timing without native compilation
+        run: node --test --test-concurrency=1 test/framework/diagnostics.test.cjs
+      - name: Root native diagnostics after timing tests
+        if: always()
+        run: node --test --test-concurrency=1 test/framework/native-diagnostics.test.cjs
+  contract:
+    name: Current caret contract and native syntax
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Caret, lease, bootstrap, delivery and native syntax
+        run: >-
+          node --test --test-concurrency=1 test/framework/caret-indicator.test.cjs
+          test/framework/desktop.test.cjs test/framework/native-delivery.test.cjs
+          test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
+          scripts/windows-ci-desktop-probe.test.cjs test/framework/caret-bootstrap.test.cjs
+          test/framework/caret-fixture-files.test.cjs
+          test/framework/caret-until.test.cjs
+      - name: Live append, rotation and bounded partial diagnostic snapshot
+        shell: pwsh
+        run: .\scripts\caret-diagnostic-reader.ps1
+  native:
+    name: Caret App integration (Windows x64)
+    needs: contract
+    # App launch is paused while the generated token OBJECT diagnostic is reviewed.
+    if: false
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      VI_EXPECTED_ARCH: x64
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      VI_PROVIDER_DIR: ${{ github.workspace }}/artifacts-ci/provider
+      VI_CARET_TRUSTED_HEAD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install bounded fixture dependencies
+        shell: pwsh
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Caret fixture dependencies failed.' }
+          node -e "console.log(require('electron'))"
+          if ($LASTEXITCODE -ne 0) { throw 'Electron fixture binary preparation failed.' }
+      - name: Prepare CI-owned provider
+        run: node scripts/prepare-provider.cjs
+      - name: Pure caret lifecycle and lease
+        run: node --test test/framework/caret-indicator.test.cjs prototypes/desktop-presentation/presentation.test.cjs
+      - name: Verify own source head
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:VI_PROBE_HEAD) { throw 'Caret source checkout differs from the trusted current head.' }
+      - name: Prepare hosted desktop
+        shell: pwsh
+        run: .\scripts\prepare-desktop.ps1
+      - name: Actual application and owned native editor
+        run: node scripts/caret-parent.cjs
+      - name: Convert controlled desktop recording to GIF
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+            $env:Path += ';C:\ProgramData\chocolatey\bin'
+          }
+          ffmpeg -hide_banner -loglevel error -i artifacts-ci\caret\desktop.webm -t 8 `
+            -filter_complex 'fps=8,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse' `
+            -y artifacts-ci\caret\caret.gif
+          if ($LASTEXITCODE -ne 0) { throw 'Caret GIF conversion failed.' }
+      - name: Preserve controlled native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-caret-native
+          path: |
+            artifacts-ci/caret/caret-report.json
+            artifacts-ci/caret/caret-launch.json
+            artifacts-ci/caret/bootstrap.jsonl
+            artifacts-ci/caret/parent-preparation.json
+            artifacts-ci/caret/app-diagnostics.json
+            artifacts-ci/caret/quiet-exit/caret-launch.json
+            artifacts-ci/caret/caret-visible.png
+            artifacts-ci/caret/caret.gif
+            artifacts-ci/caret/desktop.png
+            artifacts-ci/caret/desktop.webm
+          retention-days: 3
+          if-no-files-found: error

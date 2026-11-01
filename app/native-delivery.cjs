@@ -6,11 +6,12 @@ const { NativeTrace } = require('./native-diagnostics.cjs');
 let generation = 0;
 
 class NativeDelivery {
-  constructor(platform, resources, diagnostics) {
-    this.trace = new NativeTrace(diagnostics, 'delivery', ++generation);
+  constructor(platform, resources, diagnostics, script = 'windows-delivery.ps1') {
+    this.trace = new NativeTrace(diagnostics, script === 'windows-caret.ps1' ? 'caret' : 'delivery', ++generation);
     const executable = platform === 'win32' ? 'powershell.exe' : path.join(resources, 'macos-delivery');
     const args = platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
-      '-File', path.join(resources, 'windows-delivery.ps1'), ...this.trace.arguments(process.pid)] : [];
+      '-File', path.join(resources, script),
+      ...(script === 'windows-delivery.ps1' ? this.trace.arguments(process.pid) : [])] : [];
     this.trace.emit('spawn', {}, true);
     try { this.process = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch (error) { this.trace.emit('failure', { fault: 'spawn' }, true); throw error; }
@@ -33,7 +34,7 @@ class NativeDelivery {
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
-        if (pending.action !== 'held' || !reply.ok || performance.now() - pending.started > 250) {
+        if (!['held', 'sample', 'show', 'caret-lease'].includes(pending.action) || !reply.ok || performance.now() - pending.started > 250) {
           this.trace.emit('reply', { action: pending.action, requestId: pending.id,
             spanMs: Math.round(performance.now() - pending.started), ...(reply.ok ? {} : { fault: 'native-error' }) });
         }
@@ -67,7 +68,7 @@ class NativeDelivery {
       if (this.closed) throw new Error('Desktop input helper is closed.');
       const id = ++this.sequence;
       const started = performance.now();
-      if (action !== 'held') this.trace.emit('request', { action, requestId: id,
+      if (!['held', 'sample', 'show', 'caret-lease'].includes(action)) this.trace.emit('request', { action, requestId: id,
         spanMs: Math.round(started - queued) }, true);
       return new Promise((resolve, reject) => {
         const initialization = action === 'ready';
@@ -80,7 +81,7 @@ class NativeDelivery {
         initialization ? 20000 : 8000);
         this.pending = { id, action, started, resolve, reject, timer };
         this.process.stdin.write(`${JSON.stringify({ id, action, ...data })}\n`, (error) => {
-          if (action !== 'held' || error) this.trace.emit(error ? 'failure' : 'write', { action, requestId: id,
+          if (!['held', 'sample', 'show', 'caret-lease'].includes(action) || error) this.trace.emit(error ? 'failure' : 'write', { action, requestId: id,
             ...(error ? { fault: 'pipe' } : {}) });
         });
       });

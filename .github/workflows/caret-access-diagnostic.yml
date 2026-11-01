@@ -1,0 +1,48 @@
+name: Caret controlled access diagnostic
+on:
+  pull_request:
+    paths:
+      - scripts/caret-access-diagnostic.*
+      - .github/workflows/caret-access-diagnostic.yml
+permissions:
+  contents: read
+concurrency:
+  group: caret-access-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  diagnostic:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-2025
+    timeout-minutes: 3
+    env:
+      VI_EXPECTED_ARCH: x64
+      VI_CARET_TRUSTED_HEAD: 'true'
+      VI_PROBE_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare controlled official runtime path
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:VI_PROBE_HEAD) { throw 'Own source head mismatch.' }
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled runtime dependencies failed.' }
+          node -e "console.log(require('electron'))"
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled official runtime preparation failed.' }
+      - name: Qualify only the fresh owned synthetic layout without launching
+        shell: pwsh
+        run: .\scripts\caret-access-diagnostic.ps1
+      - name: Preserve sanitized read-only facts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caret-controlled-access
+          path: artifacts-ci/caret-access/access-report.json
+          retention-days: 3
+          if-no-files-found: error

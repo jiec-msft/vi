@@ -32,16 +32,34 @@ class DesktopInput {
     return value.placedBehind;
   }
 
-  async capture(signal) {
+  async capture(signal, caretLease = false) {
     if (signal?.aborted) throw new Error('Input target capture was cancelled.');
     await this.warmup();
-    const target = await this.driver.request('capture');
-    if (signal?.aborted) throw new Error('Input target capture was cancelled.');
+    const target = await this.driver.request('capture', this.platform === 'win32' && caretLease ? { caretLease: true } : {});
+    if (signal?.aborted) {
+      if (target?.caretLease) await this.releaseCaretLease(target);
+      throw new Error('Input target capture was cancelled.');
+    }
     if (!Number.isSafeInteger(target?.pid) || target.pid < 1 ||
-        this.platform === 'win32' && !/^[1-9]\d*$/.test(target.window)) {
+        this.platform === 'win32' && (!/^[1-9]\d*$/.test(target.window) ||
+          caretLease && (target.caretLease !== true || !Number.isSafeInteger(target.caretLeaseId) || target.caretLeaseId < 1))) {
       throw new Error('Desktop input target capture returned invalid data.');
     }
     return target;
+  }
+
+  async validCaretLease(target) {
+    if (!target?.caretLease) return false;
+    if (!Number.isSafeInteger(target.caretLeaseId) || target.caretLeaseId < 1) throw new Error('Invalid caret delivery lease.');
+    const value = await this.driver.request('caret-lease', { target });
+    if (typeof value?.valid !== 'boolean') throw new Error('Caret delivery lease could not be verified.');
+    return value.valid;
+  }
+
+  async releaseCaretLease(target) {
+    if (!target?.caretLease) return;
+    const value = await this.driver.request('caret-release', { target });
+    if (value?.released !== true) throw new Error('Caret delivery lease could not be released.');
   }
 
   async held(keys) {
@@ -54,6 +72,7 @@ class DesktopInput {
   async paste(text, target, signal, onSkipped = () => {}) {
     if (!text.trim()) throw new Error('No speech was recognized.');
     if (!target || signal?.aborted) { onSkipped(target ? 'cancelled' : 'no-target'); return false; }
+    if (target.caretLease && target.caretInvalidated) { onSkipped('target-changed', 'native-focus'); return false; }
     await this.warmup();
     if (signal?.aborted) { onSkipped('cancelled'); return false; }
     try {

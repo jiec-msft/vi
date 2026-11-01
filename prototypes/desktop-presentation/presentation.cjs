@@ -1,4 +1,5 @@
 'use strict';
+const { contains, overlaps, markerPlacement } = require('../../app/caret-placement.cjs');
 
 const MAX_SAMPLE_AGE_MS = 250;
 const WINDOW_POLICY = Object.freeze({
@@ -19,17 +20,6 @@ function validRect(rect, caret = false) {
     ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(rect[key])) &&
     (caret ? rect.width >= 0 : rect.width > 0) && rect.height > 0 &&
     Number.isFinite(rect.x + rect.width) && Number.isFinite(rect.y + rect.height);
-}
-
-function contains(outer, inner) {
-  return inner.x >= outer.x && inner.y >= outer.y &&
-    inner.x + inner.width <= outer.x + outer.width &&
-    inner.y + inner.height <= outer.y + outer.height;
-}
-
-function overlaps(a, b) {
-  return a.x < b.x + b.width && a.x + a.width > b.x &&
-    a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
 function fresh(observedAt, now) {
@@ -78,24 +68,6 @@ function axCaretRect(rect, display) {
     height: rect.height * display.scale,
     space: 'screen-physical',
   });
-}
-
-function markerPlacement(caret, monitor) {
-  const width = Math.ceil(24 * monitor.scale);
-  const height = Math.ceil(28 * monitor.scale);
-  const gap = Math.ceil(6 * monitor.scale);
-  const center = caret.x + caret.width / 2;
-  const candidates = [
-    { x: center - width / 2, y: caret.y + caret.height + gap },
-    { x: center - width / 2, y: caret.y - gap - height },
-    { x: caret.x + caret.width + gap, y: caret.y },
-    { x: caret.x - gap - width, y: caret.y },
-  ];
-  for (const position of candidates) {
-    const rect = { x: Math.floor(position.x), y: Math.floor(position.y), width, height };
-    if (contains(monitor.workArea, rect) && !overlaps(rect, caret)) return rect;
-  }
-  return null;
 }
 
 function planCaret(sample, context) {
@@ -260,5 +232,5 @@ function planDock(input) {
 
 module.exports = {
   MAX_SAMPLE_AGE_MS, WINDOW_POLICY, physicalRect, uiaCaretRect, axCaretRect,
-  planCaret, CaretPresentation, planDock,
+  planCaret, CaretPresentation, planDock, markerPlacement,
 };

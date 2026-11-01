@@ -202,9 +202,14 @@ function Capture-Target {
     @{ window = $target[0].ToString(); focus = $target[1].ToString(); pid = $owner }
 }
 function Assert-Target($target) {
+    if ($target.caretLease -and ($target.caretInvalidated -or
+        -not [ViCaretLease]::Valid([long]$target.caretLeaseId))) { throw 'target-changed' }
     $current = Capture-Target
     if ($current.window -ne $target.window) { $script:failureCheck = 'foreground-window'; throw 'target-changed' }
     if ($current.pid -ne $target.pid) { $script:failureCheck = 'foreground-process'; throw 'target-changed' }
+    if ($target.caretLease -and $current.focus -ne $target.focus) {
+        $script:failureCheck = 'native-focus'; throw 'target-changed'
+    }
     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
     Start-Sleep -Milliseconds 50
     $settled = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -230,10 +235,23 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         if ($line.Length -gt 1600000) { throw 'invalid-request' }
         $request = $line | ConvertFrom-Json
         [ViNativeDiagnostics]::Request([long]$request.id)
-        if ($request.action -ne 'held') { [ViNativeDiagnostics]::Record([string]$request.action, 'begin', 0) }
+        if ($request.action -notin @('held', 'caret-lease')) { [ViNativeDiagnostics]::Record([string]$request.action, 'begin', 0) }
         $value = switch ($request.action) {
             'ready' { @{ ready = $true } }
-            'capture' { Capture-Target }
+            'capture' {
+                if ($request.caretLease -and -not $script:caretLeaseLoaded) {
+                    Add-Type -ReferencedAssemblies System.Windows.Forms -Path (Join-Path $PSScriptRoot 'windows-caret-lease.cs')
+                    $script:caretLeaseLoaded = $true
+                }
+                $target = Capture-Target
+                if ($request.caretLease) {
+                    $target.caretLease = $true
+                    $target.caretLeaseId = [ViCaretLease]::Begin([long]$target.window, [long]$target.focus, [uint32]$target.pid)
+                }
+                $target
+            }
+            'caret-lease' { @{ valid = [ViCaretLease]::Valid([long]$request.target.caretLeaseId) } }
+            'caret-release' { [ViCaretLease]::Release([long]$request.target.caretLeaseId); @{ released = $true } }
             'settle-window' {
                 try {
                     @{ placedBehind = [VoiceInput]::SettleWindowOrder([long]$request.window,[int]$request.owner) }
@@ -266,7 +284,7 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
             }
             default { throw 'invalid-request' }
         }
-        if ($request.action -ne 'held') { [ViNativeDiagnostics]::Record([string]$request.action, 'end', 0) }
+        if ($request.action -notin @('held', 'caret-lease')) { [ViNativeDiagnostics]::Record([string]$request.action, 'end', 0) }
         @{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5
     } catch {
         [ViNativeDiagnostics]::Record([string]$request.action, 'failure', 0)

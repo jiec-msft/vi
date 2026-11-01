@@ -90,8 +90,12 @@ window.cueProbeDiagnostics = () => observedContexts.map((context) => {
     peak: samples.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0),
     tones: context.tones.map((tone) => ({ frequency: tone.frequency.value, start: tone.scheduledStart,
       stop: tone.scheduledStop, disconnectCalls: tone.disconnectCalls })),
-    gainsDisconnected: context.gains.map((gain) => gain.disconnectCalls) };
+    gainsDisconnected: context.gains.map((gain) => gain.disconnectCalls),
+    quietFailure: context.quietFailure };
 });
+window.cueProbeFailureRecordings = () => observedContexts.filter((context) => context.quietFailure)
+  .map((context) => ({ sampleRate: context.sampleRate, measurement: context.quietFailure,
+    samples: Array.from(pcm(context).samples) }));
 
 function probeAssert(condition, message) {
   if (!condition) throw new Error(message);
@@ -133,9 +137,19 @@ function verifyPcm(context, expected) {
     const other = Math.max(...[165, 220, 330, 440, 660, 880].filter((value) => value !== expected[index])
       .map((value) => magnitude(window, value, context.sampleRate)));
     probeAssert(strength > 0.015 && strength > other * 1.5, 'PCM does not contain the expected dominant sine frequency.');
-    const quiet = samples.slice(Math.round((at + 0.077) * context.sampleRate) - first,
-      Math.round((at + 0.08) * context.sampleRate) - first);
-    probeAssert(quiet.length > 0 && quiet.every((sample) => Math.abs(sample) < 0.001), 'Cue envelope did not fade to silence.');
+    const quietStartFrame = Math.round((at + 0.077) * context.sampleRate), quietEndFrame = Math.round((at + 0.08) * context.sampleRate);
+    const quiet = samples.slice(quietStartFrame - first, quietEndFrame - first);
+    const quietMax = quiet.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0);
+    if (!(quiet.length > 0 && quiet.every((sample) => Math.abs(sample) < 0.001))) {
+      const blocks = context.frames.map((block) => ({ frame: block.frame, count: block.samples.length }));
+      context.quietFailure = { noteIndex: index, frequency: expected[index], threshold: 0.001,
+        quietStartFrame, quietEndFrame, firstFrame: first, endFrame: first + samples.length,
+        quietCount: quiet.length, quietMax, maxIndex: quiet.findIndex((sample) => Math.abs(sample) === quietMax),
+        sampleRate: context.sampleRate, scheduledStart: at, scheduledStop: tone.scheduledStop,
+        contextTime: context.currentTime, blocks,
+        gapFrames: blocks.reduce((sum, block, i) => sum + (i ? Math.max(0, block.frame - blocks[i - 1].frame - blocks[i - 1].count) : 0), 0) };
+      probeAssert(false, 'Cue envelope did not fade to silence.');
+    }
     return { frequency: expected[index], strength, other, start: at, stop: tone.scheduledStop };
   });
   return { sampleRate: context.sampleRate, sampleCount: samples.length, peak, notes, closeCalls: context.closeCalls };

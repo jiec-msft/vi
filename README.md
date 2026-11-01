@@ -129,6 +129,68 @@ record the desktop. The framework suite uses synthetic microphone permission;
 TCC/hardware permissions, physical shortcut/PTT dispatch, dragging and
 cross-application accessibility remain separate acceptance gates.
 
+### Windows caret indicator (experimental)
+
+Settings includes an explicit, off-by-default **Windows caret indicator**.
+During shortcut recording/finalization it adds a blue caret-side line and a
+small rounded microphone badge. These are separate, owned, nonactivating,
+pointer-transparent native windows; the application never changes the editor's
+caret or adds a dictation control. The existing floating controls are unchanged.
+Preview recordings and other platforms do not start the helper.
+
+The initial native adapter supports only per-monitor-DPI-aware Windows `Edit`
+controls with a verified collapsed selection, matching foreground HWND/PID/focus,
+UIA password/read-only/focus checks, and the same medium integrity/session.
+UIA-only editors, selected text, elevated/unknown/secure fields, inaccessible
+Default input desktops and unverified geometry remain hidden. It does not read
+target text or window titles. UIA runs on one bounded background worker in an
+isolated helper; a native message-pump timer expires geometry after 250 ms.
+Late completions cannot revive an invalidated turn.
+
+Opt-in recordings use a stricter field lease: loss of focus, an unavailable
+caret or expired query hides the indicator and suppresses automatic paste for
+that turn, even if focus later returns. The final transcript remains available
+for Copy. Cancellation/completion/quit destroy the helper and its marker windows.
+This deliberate opt-in behavior does not alter delivery when the setting is off.
+
+`Windows caret integration` is a separate, standard Windows x64 hosted check
+with a 10-minute whole-job limit and an internal 180-second GUI watchdog. Its
+synthetic native editor exercises the actual application, not the presentation
+prototype. Its explicit `CreateProcessAsUserW` launcher derives a restricted
+medium primary token from the runner's own primary token. This disables maximum privileges and
+makes existing administrator/owner groups deny-only; it is not a UAC linked token.
+The launcher verifies user/logon/session identity, medium integrity, primary type,
+filtered provenance, admin deny-only, privilege subset and UIAccess. It checks
+the exact suspended root binary and birth identity, attaches
+an owned kill-on-close Job before resuming, and preserves nonzero exits and
+cleanup receipts. The existing parent Quota privilege must be present; absence
+blocks the job (1314). As documented by
+[CreateProcessAsUserW](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
+the API may temporarily enable this existing privilege during its call and
+restore it afterward. This is not a claim that privilege state is unchanged
+**during** the call. Full parent privilege attributes are checked immediately
+at API return; a mismatch terminates the owned root without resuming it.
+No manual privilege adjustment, new credentials or launch-API fallback chain is
+used. Only the fresh canonical synthetic profile/evidence tree receives an
+inheritable current-user Modify entry; original ACL entries are preserved and
+actual medium-token access is checked. Workspace and desktop ACLs, UAC and
+product integrity checks remain unchanged. The quiet-exit fixture must fail
+with its exact raw code and the same cleanup/state-restoration checks.
+
+Microsoft's [CreateRestrictedToken guidance](https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
+warns against placing untrusted restricted applications on Default, where they
+could message unrestricted applications. This CI makes a narrow exception only
+for trusted own-repository/current-head App and native-editor fixtures with
+synthetic inputs and exact owned HWND/PID/Job checks, because the product requires
+actual Default-desktop validation. Fork/arbitrary payloads are excluded. This
+is not a sandbox/security-isolation claim or permission to launch this restricted
+fixture on a user's desktop. CI-only launch code is not part of the application.
+Current-head GIF/PNG and native receipts are required before claiming
+CI qualification. CI does not establish real-device, UIA-only editor, secure
+desktop, mixed-monitor or application-package acceptance.
+
+### Diagnostics
+
 Diagnostics are enabled by default in `<userData>/logs`: on Windows,
 `%APPDATA%\VI\logs`; on macOS, `~/Library/Application Support/VI/logs`.
 After an incident, quit VI if it responds and compress **the entire logs folder**

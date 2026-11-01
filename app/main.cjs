@@ -17,6 +17,7 @@ const { Registry } = require('./plugins/registry.cjs');
 const { PluginRuntime } = require('./plugins/pipeline.cjs');
 const { pluginPreferences, failure } = require('./plugins/manifest.cjs');
 const { TranscriptOutput } = require('./transcript-output.cjs');
+const { CaretIndicator } = require('./caret-indicator.cjs');
 
 const uiUrl = pathToFileURL(path.join(__dirname, 'index.html')).href;
 const overlayUrl = pathToFileURL(path.join(__dirname, 'overlay.html')).href;
@@ -49,6 +50,8 @@ let retainedOutput;
 let pluginWarnings = [];
 let pluginChanging = false;
 let pluginLoading;
+let caretIndicator;
+let caretDeliveryTarget;
 
 function startupStage(stage, state) {
   diagnostics.stage?.(stage, state);
@@ -122,6 +125,7 @@ function snapshot() {
     nativePointer: Boolean(overlayPointer?.ready),
     nativePointerState: overlayPointer?.state || 'fallback',
     nativePointerRestarts: overlayPointer?.restarts || 0,
+    caretIndicatorState: caretIndicator?.state || 'hidden',
     overlayControlError, diagnosticsError };
 }
 
@@ -295,6 +299,14 @@ function publish(phase, message, text = status.text, details = {}) {
   const changed = phase !== status.phase;
   status = { ...(changed ? {} : status), phase, message, text,
     stopReason: active?.stopReason ?? (changed ? undefined : status.stopReason), ...details };
+  caretIndicator?.update(active, phase, settings.caretIndicator);
+  if (caretDeliveryTarget && ['idle', 'done', 'error', 'cancelling'].includes(phase)) {
+    const target = caretDeliveryTarget;
+    caretDeliveryTarget = undefined;
+    void desktop.releaseCaretLease(target).catch(() => {
+      console.error('Caret delivery lease cleanup failed.');
+    });
+  }
   for (const target of [window, overlay]) {
     if (target && !target.isDestroyed()) target.webContents.send('status', snapshot());
   }
@@ -393,7 +405,7 @@ async function begin(fromShortcut) {
     const loading = new AbortController();
     pluginLoading = { controller: loading, fromShortcut };
     if (fromShortcut) {
-      targetCapture = desktop.capture(loading.signal);
+      targetCapture = desktop.capture(loading.signal, settings.caretIndicator);
       void targetCapture.catch((error) => {
         if (!loading.signal.aborted) logEvent('input-error', undefined, { reason: error.code || 'native-error', check: error.check });
       });
@@ -473,13 +485,18 @@ async function startMicrophone(run) {
 
 async function prepareInput(run, fromShortcut, targetCapture) {
   if (fromShortcut) {
-    const target = await (targetCapture || desktop.capture(run.controller.signal));
-    if (active !== run || run.cancelled) return;
+    const target = await (targetCapture || desktop.capture(run.controller.signal, settings.caretIndicator));
+    if (active !== run || run.cancelled) {
+      await desktop.releaseCaretLease(target);
+      return;
+    }
     if (target.pid === process.pid) {
+      await desktop.releaseCaretLease(target);
       logEvent('input-skipped', run, { reason: 'app-focused' });
       throw new Error('Focus a text field in another app before using the dictation shortcut. Record preview does not type into other apps.');
     }
     run.target = target;
+    if (run.target.caretLease) caretDeliveryTarget = run.target;
     run.inputState = 'ready';
     logEvent('input-target', run);
     logEvent('input-ready', run);
@@ -758,7 +775,7 @@ function installIpc() {
     if (active || testingMic || checkingAuth || pluginChanging) throw new Error('Stop dictation, microphone tests and access checks before changing preferences.');
     if (!patch || typeof patch !== 'object') throw new Error('Invalid preferences.');
     const changes = {};
-    for (const key of ['autoCopy', 'sounds', 'openAtLogin', 'shortcut', 'cancelShortcut', 'deviceId', 'triggerMode']) {
+    for (const key of ['autoCopy', 'sounds', 'openAtLogin', 'shortcut', 'cancelShortcut', 'deviceId', 'triggerMode', 'caretIndicator']) {
       if (patch[key] !== undefined) changes[key] = patch[key];
     }
     const next = preferences({ ...settings, ...changes });
@@ -921,6 +938,9 @@ function keepWindowInTray(target) {
 async function launch() {
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Windows and macOS only.');
   desktop = new DesktopInput({ diagnostics });
+  caretIndicator = new CaretIndicator({ diagnostics, validateLease: (target) => desktop.validCaretLease(target), onState: () => {
+    if (window && !window.isDestroyed()) window.webContents.send('status', snapshot());
+  } });
   diagnostics.checkpoint('app-start', { version: app.getVersion() });
   if (process.platform === 'darwin') app.dock?.hide();
   powerMonitor.on('lock-screen', () => {
@@ -1143,6 +1163,7 @@ else {
     clearTimeout(overlayMoveTimer);
     clearTimeout(micTestTimer);
     shortcutPress?.close();
+    caretIndicator?.close();
     overlayPointer?.close();
     overlayMoveTimer = undefined;
     authProbe?.cancel();

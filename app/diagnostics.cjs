@@ -20,13 +20,13 @@ for (const fault of ['spawn', 'exit', 'timeout', 'stream', 'protocol', 'dispatch
 const startupStages = new Set(['preferences', 'login', 'plugins', 'windows', 'renderers', 'desktop',
   'controls', 'window-show', 'window-focus', 'window-order', 'build-info', 'pointer', 'tray', 'shortcuts',
   'settings-renderer', 'overlay-renderer', 'quit']);
-const components = new Set(['main', 'settings', 'overlay', 'delivery', 'pointer', 'gpu', 'utility', 'network']);
+const components = new Set(['main', 'settings', 'overlay', 'delivery', 'caret', 'pointer', 'gpu', 'utility', 'network']);
 const states = new Set(['begin', 'end', 'failure', 'spawn', 'spawned', 'request', 'write', 'reply', 'timeout',
   'ready', 'suspended', 'resumed', 'restart', 'close', 'exit', 'visible', 'unresponsive', 'responding',
   'load-failed', 'process-gone', 'startup-failed', 'uncaught-exception', 'unhandled-rejection', 'quit-complete',
   'stderr', 'native-start', 'compile', 'call', 'host-gap', 'host-resumed', 'context', 'log-write-failed']);
 for (const state of ['boot', 'app-ready', 'lock', 'unlock', 'suspend', 'resume', 'metadata']) states.add(state);
-const actions = new Set(['ready', 'capture', 'held', 'paste', 'settle-window']);
+const actions = new Set(['ready', 'capture', 'held', 'paste', 'settle-window', 'bind', 'sample', 'show', 'caret-lease', 'caret-release']);
 const faults = new Set(['spawn', 'exit', 'timeout', 'stream', 'protocol', 'dispatch', 'termination', 'pipe',
   'compilation', 'assembly-load', 'access-denied', 'powershell-error', 'unknown', 'invalid-settings',
   'shortcut-conflict', 'load-failed', 'native-error', 'log-write-failed', 'startup-failed',

@@ -84,6 +84,15 @@ run().catch((error) => {
     if (window && !window.isDestroyed()) {
       report.contexts = await window.webContents.executeJavaScript(
         'typeof window.cueProbeDiagnostics === "function" ? window.cueProbeDiagnostics() : []');
+      const failedRecordings = await window.webContents.executeJavaScript(
+        'typeof window.cueProbeFailureRecordings === "function" ? window.cueProbeFailureRecordings() : []');
+      report.failedRecordings = [];
+      for (const [index, recording] of failedRecordings.entries()) {
+        assert.ok(recording.samples.length <= recording.sampleRate * 2, 'Synthetic failure PCM exceeded its bound.');
+        const filename = `synthetic-quiet-failure-${index}.wav`;
+        await fs.writeFile(path.join(directory, filename), waveFile(recording.samples, recording.sampleRate));
+        report.failedRecordings.push({ pcmFile: filename, measurement: recording.measurement });
+      }
     }
     if (stopVideo) Object.assign(report, await stopVideo());
   } catch (error) {

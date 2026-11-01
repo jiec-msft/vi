@@ -14,7 +14,7 @@ using System.Threading;
 // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-createdesktopw
 // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-switchdesktop
 // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-closedesktop
-public static class ViCiDesktop
+public static partial class ViCiDesktop
 {
     const uint DesktopAccess = 0x01C7; // READ/WRITEOBJECTS, CREATEWINDOW/MENU, ENUMERATE, SWITCHDESKTOP
     const uint ReadSwitch = 0x0141;
@@ -69,6 +69,10 @@ public static class ViCiDesktop
     struct InputEvent { public uint type; public MouseInput mouse; }
     [StructLayout(LayoutKind.Sequential)]
     struct UserFlags { public int inherit, reserved; public uint flags; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SidAttributes { public IntPtr sid; public uint attributes; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct TokenGroups { public uint count; public SidAttributes first; }
     delegate bool EnumWindow(IntPtr window, IntPtr parameter);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -139,6 +143,35 @@ public static class ViCiDesktop
     static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out Accounting accounting, uint size, IntPtr needed);
     [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
     static extern bool QueryJobProcesses(IntPtr job, int infoClass, IntPtr buffer, uint size, IntPtr needed);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int size, out int needed);
+    [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+    [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+    [DllImport("advapi32.dll")] static extern bool EqualSid(IntPtr first, IntPtr second);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags, string application, StringBuilder command,
+        uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInfo process);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessAsUserW(IntPtr token, string application, StringBuilder command,
+        IntPtr processSecurity, IntPtr threadSecurity, bool inherit, uint flags, IntPtr environment,
+        string directory, ref StartupInfo startup, out ProcessInfo process);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ProcessIdToSessionId(uint pid, out uint session);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disableCount, IntPtr disabled,
+        uint deleteCount, IntPtr deleted, uint restrictCount, IntPtr restricted, out IntPtr result);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetTokenInformation(IntPtr token, int kind, IntPtr data, uint size);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSidToSidW(string text, out IntPtr sid);
+    [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
 
     static void Require(bool condition, string message)
     {
@@ -201,9 +234,9 @@ public static class ViCiDesktop
         }, IntPtr.Zero), "Enumerate owned windows");
         return count;
     }
-    static IntPtr NewJob()
+    static IntPtr NewJob(string name = null)
     {
-        IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+        IntPtr job = CreateJobObjectW(IntPtr.Zero, name);
         Win32(job != IntPtr.Zero, "Create owned process job");
         try {
             var limits = new ExtendedLimits();
@@ -919,6 +952,402 @@ public static class ViCiDesktop
         thread.Join();
         if (unhandled != null) throw unhandled;
         return result;
+    }
+    static IntPtr TokenData(IntPtr token, int kind)
+    {
+        GetTokenInformation(token, kind, IntPtr.Zero, 0, out int needed);
+        if (needed <= 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Read owned token metadata class " + kind);
+        Require(needed <= 4096, "Owned token metadata bound exceeded.");
+        IntPtr data = Marshal.AllocHGlobal(needed);
+        try {
+            Win32(GetTokenInformation(token, kind, data, needed, out needed), "Read owned token metadata class " + kind);
+            return data;
+        } catch { Marshal.FreeHGlobal(data); throw; }
+    }
+    static int TokenIntegrity(IntPtr token)
+    {
+        IntPtr data = TokenData(token, 25);
+        try {
+            IntPtr sid = Marshal.ReadIntPtr(data);
+            byte count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+            Require(count > 0, "Owned integrity SID unavailable.");
+            return Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)count - 1));
+        } finally { Marshal.FreeHGlobal(data); }
+    }
+    static int TokenNumber(IntPtr token, int kind)
+    {
+        IntPtr data = TokenData(token, kind);
+        try { return Marshal.ReadInt32(data); }
+        finally { Marshal.FreeHGlobal(data); }
+    }
+    static List<SidAttributes> Groups(IntPtr data)
+    {
+        int count = Marshal.ReadInt32(data), offset = Marshal.OffsetOf<TokenGroups>("first").ToInt32();
+        Require(count >= 0 && count <= 128, "Owned token group bound exceeded.");
+        var groups = new List<SidAttributes>();
+        for (int index = 0; index < count; index++)
+            groups.Add(Marshal.PtrToStructure<SidAttributes>(IntPtr.Add(data, offset + index * Marshal.SizeOf<SidAttributes>())));
+        return groups;
+    }
+    static Dictionary<long, uint> Privileges(IntPtr token)
+    {
+        IntPtr data = TokenData(token, 3);
+        try {
+            int count = Marshal.ReadInt32(data);
+            Require(count >= 0 && count <= 128, "Owned token privilege bound exceeded.");
+            var result = new Dictionary<long, uint>();
+            for (int index = 0; index < count; index++)
+                result.Add(Marshal.ReadInt64(data, 4 + index * 12), (uint)Marshal.ReadInt32(data, 12 + index * 12));
+            return result;
+        } finally { Marshal.FreeHGlobal(data); }
+    }
+    static IntPtr RestrictedMedium(IntPtr source)
+    {
+        Require(TokenNumber(source, 8) == 1, "Restricted derivation requires runner's own primary token.");
+        IntPtr data = TokenData(source, 2), disabled = IntPtr.Zero, admin = IntPtr.Zero,
+            medium = IntPtr.Zero, label = IntPtr.Zero, candidate = IntPtr.Zero;
+        try {
+            Win32(ConvertStringSidToSidW("S-1-5-32-544", out admin), "Create well-known administrator SID");
+            var groups = Groups(data).FindAll(group => (group.attributes & 8) != 0 || EqualSid(group.sid, admin));
+            Require(groups.Count > 0, "High runner token has no privileged group to disable.");
+            disabled = Marshal.AllocHGlobal(groups.Count * Marshal.SizeOf<SidAttributes>());
+            for (int index = 0; index < groups.Count; index++)
+                Marshal.StructureToPtr(groups[index], IntPtr.Add(disabled, index * Marshal.SizeOf<SidAttributes>()), false);
+            // DISABLE_MAX_PRIVILEGE only: never SANDBOX_INERT, new credentials, or privilege enablement.
+            Win32(CreateRestrictedToken(source, 1, (uint)groups.Count, disabled, 0, IntPtr.Zero, 0, IntPtr.Zero, out candidate),
+                "Derive restricted token from runner's own primary token");
+            Win32(ConvertStringSidToSidW("S-1-16-8192", out medium), "Create well-known medium integrity SID");
+            uint sidSize = GetLengthSid(medium);
+            Require(sidSize > 0 && sidSize <= 256, "Medium integrity SID bound exceeded.");
+            int labelSize = Marshal.SizeOf<SidAttributes>(), total = labelSize + (int)sidSize;
+            label = Marshal.AllocHGlobal(total);
+            var bytes = new byte[sidSize];
+            Marshal.Copy(medium, bytes, 0, bytes.Length);
+            Marshal.Copy(bytes, 0, IntPtr.Add(label, labelSize), bytes.Length);
+            Marshal.StructureToPtr(new SidAttributes { sid = IntPtr.Add(label, labelSize), attributes = 0x20 }, label, false);
+            Win32(SetTokenInformation(candidate, 25, label, (uint)total), "Lower derived token integrity to medium");
+            return candidate;
+        } catch {
+            if (candidate != IntPtr.Zero) CloseHandle(candidate);
+            throw;
+        } finally {
+            Marshal.FreeHGlobal(data);
+            if (disabled != IntPtr.Zero) Marshal.FreeHGlobal(disabled);
+            if (label != IntPtr.Zero) Marshal.FreeHGlobal(label);
+            if (admin != IntPtr.Zero) LocalFree(admin);
+            if (medium != IntPtr.Zero) LocalFree(medium);
+        }
+    }
+    static object VerifyCaretToken(IntPtr source, IntPtr candidate, bool derived)
+    {
+        IntPtr original = TokenData(source, 1), user = IntPtr.Zero, sourceStats = IntPtr.Zero,
+            candidateStats = IntPtr.Zero, groupData = IntPtr.Zero, admin = IntPtr.Zero;
+        try {
+            user = TokenData(candidate, 1);
+            Require(EqualSid(Marshal.ReadIntPtr(original), Marshal.ReadIntPtr(user)), "Caret token user differs from runner.");
+            sourceStats = TokenData(source, 10); candidateStats = TokenData(candidate, 10);
+            Require(Marshal.ReadInt64(sourceStats, 8) == Marshal.ReadInt64(candidateStats, 8),
+                "Caret token logon authentication identity changed.");
+            Require(TokenNumber(source, 12) == TokenNumber(candidate, 12), "Caret token session changed.");
+            Require(TokenNumber(candidate, 8) == 1 && TokenIntegrity(candidate) == 0x2000, "Caret token must be primary and medium.");
+            Require(TokenNumber(candidate, 26) == 0 && TokenNumber(candidate, 26) <= TokenNumber(source, 26),
+                "Caret token UIAccess was raised.");
+            var before = Privileges(source);
+            var after = Privileges(candidate);
+            foreach (var privilege in after)
+                Require(before.TryGetValue(privilege.Key, out uint attributes) &&
+                    ((privilege.Value & 2) == 0 || (attributes & 2) != 0), "Caret token added or enabled a privilege.");
+            Require(after.Count <= before.Count, "Caret token privilege count increased.");
+            groupData = TokenData(candidate, 2);
+            Win32(ConvertStringSidToSidW("S-1-5-32-544", out admin), "Create well-known administrator SID for verification");
+            bool adminDenied = true;
+            foreach (var group in Groups(groupData))
+                if (EqualSid(group.sid, admin))
+                    adminDenied = adminDenied && (group.attributes & 4) == 0 && (group.attributes & 0x10) != 0;
+            Require(adminDenied, "Caret token retains an enabled administrator group.");
+            bool filtered = TokenNumber(candidate, 21) != 0;
+            Require(!derived || filtered, "Derived caret token has no filtered provenance.");
+            return new { primary = true, integrity = 8192, sameUser = true, sameLogon = true, sameSession = true,
+                adminDenyOnly = adminDenied, privilegesNotIncreased = true, parentPrivilegeCount = before.Count,
+                privilegeCount = after.Count, uiAccess = 0, hasRestrictions = filtered };
+        } finally {
+            Marshal.FreeHGlobal(original);
+            foreach (IntPtr value in new[] { user, sourceStats, candidateStats, groupData })
+                if (value != IntPtr.Zero) Marshal.FreeHGlobal(value);
+            if (admin != IntPtr.Zero) LocalFree(admin);
+        }
+    }
+    public static int RunCaret(string executable, string script, string directory, string workingDirectory, int timeout,
+        bool allowDerivedRestricted = false, bool useOwnRestrictedAsUser = false,
+        Func<string, string, IntPtr, IntPtr, object> prepareOwnedLayout = null, bool diagnoseLoop = false,
+        Func<string, string, uint, object> collectOwnDiagnostics = null)
+    {
+        Guard();
+        Require(timeout == 180 && File.Exists(executable) && File.Exists(script), "Bounded caret executable/entry required.");
+        Require(Environment.GetEnvironmentVariable("VI_CARET_TRUSTED_HEAD") == "true" &&
+            Environment.GetEnvironmentVariable("GITHUB_REPOSITORY") == "jiec-msft/vi", "Caret exception requires a trusted own-repository CI head.");
+        string entry = Path.GetFileName(script);
+        Require((entry == "windows-caret-ui.cjs" || entry == "caret-app-root.cjs" || entry == "windows-caret-quiet.cjs") &&
+            String.Equals(Path.GetFullPath(script), Path.GetFullPath(Path.Combine(workingDirectory, "scripts", entry)), StringComparison.OrdinalIgnoreCase) &&
+            String.Equals(Path.GetFullPath(executable), Path.GetFullPath(Path.Combine(workingDirectory, "node_modules", "electron", "dist", "electron.exe")),
+                StringComparison.OrdinalIgnoreCase), "Only the prepared own-head caret App/quiet fixture and Electron binary are allowed.");
+        if (!useOwnRestrictedAsUser) Directory.CreateDirectory(directory);
+        var clock = Stopwatch.StartNew();
+        var errors = new List<string>();
+        var report = new Dictionary<string, object> {
+            ["sourceHead"] = Environment.GetEnvironmentVariable("VI_PROBE_HEAD"),
+            ["runId"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ID"),
+            ["attempt"] = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT"),
+            ["scope"] = "same-user-medium-token-owned-job",
+            ["callerPid"] = Environment.ProcessId
+        };
+        IntPtr job = IntPtr.Zero, ownToken = IntPtr.Zero, linked = IntPtr.Zero, childToken = IntPtr.Zero, restricted = IntPtr.Zero;
+        ProcessInfo child = new ProcessInfo();
+        bool attached = false;
+        Dictionary<long, uint> parentPrivileges = null;
+        string originalJobName = Environment.GetEnvironmentVariable("VI_CARET_JOB_NAME");
+        int result = 1;
+        try {
+            Require(Name(GetProcessWindowStation()) == "WinSta0" && InputName() == "Default", "Ordinary Default desktop required.");
+            using (var own = Process.GetCurrentProcess())
+                Win32(OpenProcessToken(own.Handle, allowDerivedRestricted ? 0x8bU : 8U, out ownToken), "Read runner's own token");
+            int originalIntegrity = TokenIntegrity(ownToken);
+            parentPrivileges = Privileges(ownToken);
+            Win32(LookupPrivilegeValueW(null, "SeIncreaseQuotaPrivilege", out long quota), "Read existing parent quota privilege identity");
+            report["parentQuotaAlreadyEnabled"] = parentPrivileges.TryGetValue(quota, out uint quotaAttributes) && (quotaAttributes & 2) != 0;
+            report["parentQuotaPresent"] = parentPrivileges.ContainsKey(quota);
+            report["originalIntegrity"] = originalIntegrity;
+            IntPtr launchToken = ownToken;
+            report["tokenOrigin"] = "existing-medium";
+            if (useOwnRestrictedAsUser) {
+                Require(allowDerivedRestricted && originalIntegrity == 0x3000 && prepareOwnedLayout != null,
+                    "Explicit AsUser fixture requires the verified own restricted primary and qualified layout.");
+                if (!parentPrivileges.ContainsKey(quota)) throw new Win32Exception(1314, "Existing quota privilege is absent.");
+                restricted = RestrictedMedium(ownToken);
+                launchToken = restricted;
+                report["tokenOrigin"] = "derived-restricted-medium";
+                report["processApi"] = "CreateProcessAsUserW";
+                report["parentQuotaDuringApi"] = "API-managed temporary use of existing privilege may occur; not sampled during call";
+                report["parentQuotaWasDisabled"] = (quotaAttributes & 2) == 0;
+            } else if (originalIntegrity != 0x2000) {
+                Require(originalIntegrity == 0x3000, "Unknown runner integrity; refusing a token transition.");
+                try {
+                    IntPtr data = TokenData(ownToken, 19);
+                    try { linked = Marshal.ReadIntPtr(data); }
+                    finally { Marshal.FreeHGlobal(data); }
+                    Require(linked != IntPtr.Zero, "Runner has no linked filtered token.");
+                    launchToken = linked;
+                    report["tokenOrigin"] = "linked-filtered-medium";
+                } catch (Win32Exception error) when (error.NativeErrorCode == 1312 && allowDerivedRestricted) {
+                    report["linkedTokenUnavailableCode"] = 1312;
+                    restricted = RestrictedMedium(ownToken);
+                    launchToken = restricted;
+                    report["tokenOrigin"] = "derived-restricted-medium";
+                }
+            }
+            report["launchTokenVerification"] = VerifyCaretToken(ownToken, launchToken, restricted != IntPtr.Zero);
+            report["launchIntegrity"] = TokenIntegrity(launchToken);
+            report["sameUserTokenVerified"] = true;
+            report["privilegesEnabledByLauncher"] = false;
+            if (useOwnRestrictedAsUser) report["ownedLayoutVerification"] = prepareOwnedLayout(workingDirectory, directory, ownToken, launchToken);
+            string jobName = "vi-ci-caret-" + Environment.GetEnvironmentVariable("GITHUB_RUN_ID") + "-" + Guid.NewGuid().ToString("N");
+            job = NewJob(jobName);
+            Environment.SetEnvironmentVariable("VI_CARET_JOB_NAME", jobName);
+            report["specificJobName"] = jobName;
+            var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = @"WinSta0\Default" };
+            var command = new StringBuilder(Quote(executable) + " " + Quote(script));
+            if (useOwnRestrictedAsUser) {
+                string profileDirectory = Path.Combine(workingDirectory, "artifacts-ci", "caret", "profile");
+                command.Append(" " + Quote("--user-data-dir=" + profileDirectory));
+                report["earlyProfileSwitch"] = true;
+                report["entryRole"] = entry == "caret-app-root.cjs" ? "actual-app-root"
+                    : entry == "windows-caret-ui.cjs" ? "caret-controller" : "quiet-exit";
+                report["workingDirectoryRole"] = "owned-checkout";
+                report["runAsNodeEnvironmentPresent"] = Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE") != null;
+                report["runAsNodeEnvironmentEnabled"] = !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE"));
+                if (diagnoseLoop) command.Append(" --ci-caret-loop-diagnostic");
+            }
+            if (!useOwnRestrictedAsUser && launchToken != ownToken) {
+                Win32(LookupPrivilegeValueW(null, "SeImpersonatePrivilege", out long impersonate), "Read required parent privilege identity");
+                if (!parentPrivileges.TryGetValue(impersonate, out uint attributes) || (attributes & 2) == 0)
+                    throw new Win32Exception(1314, "CreateProcessWithTokenW requires already-enabled parent SeImpersonatePrivilege; no enablement is allowed.");
+                report["requiredParentPrivilegeAlreadyEnabled"] = true;
+            }
+            bool started = useOwnRestrictedAsUser
+                ? CreateProcessAsUserW(launchToken, executable, command, IntPtr.Zero, IntPtr.Zero, false,
+                    SuspendedNoWindow, IntPtr.Zero, workingDirectory, ref startup, out child)
+                : launchToken == ownToken
+                ? CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false, SuspendedNoWindow, IntPtr.Zero,
+                    workingDirectory, ref startup, out child)
+                : CreateProcessWithTokenW(launchToken, 0, executable, command, SuspendedNoWindow, IntPtr.Zero,
+                    workingDirectory, ref startup, out child);
+            int startError = started ? 0 : Marshal.GetLastWin32Error();
+            if (useOwnRestrictedAsUser) {
+                var afterCall = Privileges(ownToken);
+                bool restored = afterCall.Count == parentPrivileges.Count;
+                foreach (var privilege in afterCall)
+                    restored = restored && parentPrivileges.TryGetValue(privilege.Key, out uint attributes) && attributes == privilege.Value;
+                report["parentPrivilegeAttributesRestoredAtApiReturn"] = restored;
+                Require(restored, "Parent privilege attributes were not restored at API return; root must remain suspended.");
+            }
+            if (!started) throw new Win32Exception(startError, "Start own medium caret fixture");
+            Win32(AssignProcessToJobObject(job, child.process), "Assign suspended caret root to its owned Job");
+            attached = true;
+            Win32(IsProcessInJob(child.process, job, out bool member), "Verify caret specific Job membership");
+            Require(member, "Caret root is not in its owned Job.");
+            Win32(OpenProcessToken(child.process, 8, out childToken), "Read suspended caret root token");
+            Require(TokenIntegrity(childToken) == 0x2000, "Caret root did not receive medium integrity.");
+            report["rootTokenVerification"] = VerifyCaretToken(ownToken, childToken, restricted != IntPtr.Zero);
+            IntPtr ownUser = TokenData(ownToken, 1), childUser = IntPtr.Zero;
+            try {
+                childUser = TokenData(childToken, 1);
+                Require(EqualSid(Marshal.ReadIntPtr(ownUser), Marshal.ReadIntPtr(childUser)), "Caret root user differs from runner.");
+            } finally {
+                Marshal.FreeHGlobal(ownUser);
+                if (childUser != IntPtr.Zero) Marshal.FreeHGlobal(childUser);
+            }
+            Win32(ProcessIdToSessionId((uint)Environment.ProcessId, out uint ownSession), "Read runner session");
+            Win32(ProcessIdToSessionId(child.pid, out uint rootSession), "Read suspended caret root session");
+            Require(rootSession == ownSession, "Caret root session differs from runner.");
+            var image = new StringBuilder(32768);
+            uint imageLength = (uint)image.Capacity;
+            Win32(QueryFullProcessImageNameW(child.process, 0, image, ref imageLength), "Read suspended caret root binary path");
+            Require(String.Equals(Path.GetFullPath(image.ToString()), Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase),
+                "Caret root binary path differs from the prepared Electron binary.");
+            Win32(GetProcessTimes(child.process, out long created, out long exited, out long kernel, out long user),
+                "Read caret root creation identity");
+            report["rootPid"] = child.pid;
+            report["rootCreationFileTime"] = created.ToString();
+            report["specificJobMember"] = member;
+            report["rootIntegrity"] = TokenIntegrity(childToken);
+            report["rootSession"] = rootSession;
+            report["rootUserVerified"] = true;
+            report["exactBinaryPathVerified"] = true;
+            report["suspendedAttachBeforeResume"] = true;
+            Win32(ResumeThread(child.thread) != UInt32.MaxValue, "Resume owned caret root");
+            try { report["ownedProcessObservations"] = CaretProcessObservation(job, child.pid); }
+            catch { report["ownedProcessObservationFailure"] = "owned-observer-unavailable"; }
+            uint wait;
+            if (diagnoseLoop) {
+                var samples = new List<object>();
+                report["loopDiagnosticSnapshots"] = samples;
+                var diagnosticClock = Stopwatch.StartNew();
+                do {
+                    wait = WaitForSingleObject(child.process, 3000);
+                    bool cpuObserved = GetProcessTimes(child.process, out long sampleCreated, out long sampleExited, out long sampleKernel, out long sampleUser);
+                    int cpuError = cpuObserved ? 0 : Marshal.GetLastWin32Error();
+                    string trace = Path.Combine(workingDirectory, "artifacts-ci", "caret", "bootstrap.jsonl");
+                    string lastStage = "unavailable";
+                    int heartbeatCount = 0;
+                    bool observedTrace = false;
+                    try {
+                        var info = new FileInfo(trace);
+                        if (info.Exists && info.Length <= 65536) {
+                            foreach (string line in File.ReadLines(trace)) {
+                                using (var json = JsonDocument.Parse(line)) {
+                                    var row = json.RootElement;
+                                    if (row.GetProperty("pid").GetUInt32() != child.pid) continue;
+                                    string stage = row.GetProperty("stage").GetString();
+                                    if (stage == "main-loop-heartbeat") heartbeatCount++;
+                                    else if (Regex.IsMatch(stage ?? "", "^[a-z-]{1,40}$")) lastStage = stage;
+                                }
+                            }
+                            observedTrace = true;
+                        }
+                    } catch { lastStage = "owned-trace-unavailable"; }
+                    samples.Add(new { elapsedMs = diagnosticClock.ElapsedMilliseconds, pid = child.pid, waitState = wait,
+                        processCpuObserved = cpuObserved, processCpuMs = cpuObserved ? (sampleKernel + sampleUser) / 10000 : -1,
+                        cpuWin32Error = cpuError, heartbeatCount, lastStage, observedTrace });
+                } while (wait == WaitTimeout && diagnosticClock.Elapsed.TotalSeconds < 15);
+                report["loopDiagnosticDeadlineSeconds"] = 15;
+            } else wait = WaitForSingleObject(child.process, (uint)timeout * 1000);
+            Require(wait == 0, wait == WaitTimeout
+                ? diagnoseLoop ? "Owned controller liveness diagnostic reached its 15-second deadline." : "Caret App fixture exceeded its 180-second internal watchdog."
+                : "Caret root wait failed.");
+            Win32(GetExitCodeProcess(child.process, out uint exitCode), "Read caret root raw exit");
+            report["rawExitCode"] = exitCode;
+            Require(exitCode == 0, "Caret App fixture exited " + exitCode + ".");
+            result = 0;
+        } catch (Exception error) {
+            errors.Add(error.Message);
+            report["failure"] = new { type = error.GetType().Name,
+                win32Error = error is Win32Exception native ? native.NativeErrorCode : 0 };
+        }
+        finally {
+            if (collectOwnDiagnostics != null && child.pid > 0) {
+                try { report["appDiagnosticCollection"] = collectOwnDiagnostics(workingDirectory, directory, child.pid); }
+                catch { report["appDiagnosticCollection"] = new { status = "owned-observer-error" }; }
+            }
+            if (child.process != IntPtr.Zero && !attached) {
+                bool terminated = TerminateProcess(child.process, 92) && WaitForSingleObject(child.process, 5000) == 0;
+                report["unattachedRootTerminated"] = terminated;
+                if (!terminated) errors.Add("Unattached owned caret root cleanup failed.");
+            }
+            if (attached && job != IntPtr.Zero) {
+                try { report["ownedProcessesBeforeCleanup"] = CaretProcessObservation(job, child.pid); }
+                catch { report["ownedProcessObservationFailure"] = "owned-observer-unavailable"; }
+            }
+            CleanupJob(job, errors, report, "ownedJobCleanup");
+            Environment.SetEnvironmentVariable("VI_CARET_JOB_NAME", originalJobName);
+            if (parentPrivileges != null && ownToken != IntPtr.Zero) {
+                try {
+                    var after = Privileges(ownToken);
+                    bool unchanged = after.Count == parentPrivileges.Count;
+                    foreach (var privilege in after)
+                        unchanged = unchanged && parentPrivileges.TryGetValue(privilege.Key, out uint attributes) &&
+                            (attributes & 3) == (privilege.Value & 3);
+                    report["parentPrivilegesUnchanged"] = unchanged;
+                    Require(unchanged, "Caret launch changed parent privilege state.");
+                } catch (Exception error) { errors.Add(error.Message); }
+            }
+            foreach (IntPtr token in new[] { childToken, restricted, linked, ownToken })
+                if (token != IntPtr.Zero && !CloseHandle(token)) errors.Add("Owned token handle cleanup failed.");
+            if (child.thread != IntPtr.Zero && !CloseHandle(child.thread)) errors.Add("Caret root thread handle cleanup failed.");
+            if (child.process != IntPtr.Zero && !CloseHandle(child.process)) errors.Add("Caret root process handle cleanup failed.");
+            try {
+                report["originalDefaultUnchanged"] = InputName() == "Default";
+                Require((bool)report["originalDefaultUnchanged"], "Input desktop changed during caret integration.");
+            } catch (Exception error) { errors.Add(error.Message); }
+            report["executionSeconds"] = clock.Elapsed.TotalSeconds;
+            report["errors"] = errors;
+            report["passed"] = result == 0 && errors.Count == 0;
+            if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
+            Write(directory, "caret-launch.json", report);
+        }
+        return result == 0 && errors.Count == 0 ? 0 : 1;
+    }
+    static object CaretProcessObservation(IntPtr job, uint root)
+    {
+        const int capacity = 32;
+        IntPtr buffer = Marshal.AllocHGlobal(8 + capacity * IntPtr.Size);
+        var rows = new List<object>();
+        try {
+            if (!QueryJobProcesses(job, 3, buffer, (uint)(8 + capacity * IntPtr.Size), IntPtr.Zero))
+                return new { observed = false, win32Error = Marshal.GetLastWin32Error(), processes = rows };
+            int count = Marshal.ReadInt32(buffer, 4);
+            if (count < 0 || count > capacity) return new { observed = false, win32Error = 0, processes = rows };
+            for (int index = 0; index < count; index++) {
+                uint pid = (uint)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
+                IntPtr process = OpenProcess(0x1000, false, pid);
+                if (process == IntPtr.Zero) { rows.Add(new { pid, observed = false, win32Error = Marshal.GetLastWin32Error() }); continue; }
+                try {
+                    bool member;
+                    long created, exited, kernel, user;
+                    var image = new StringBuilder(32768);
+                    uint length = (uint)image.Capacity;
+                    if (!IsProcessInJob(process, job, out member) || !member ||
+                        !GetProcessTimes(process, out created, out exited, out kernel, out user) ||
+                        !QueryFullProcessImageNameW(process, 0, image, ref length)) {
+                        rows.Add(new { pid, observed = false, win32Error = Marshal.GetLastWin32Error() }); continue;
+                    }
+                    string name = Path.GetFileName(image.ToString()).ToLowerInvariant();
+                    string role = pid == root ? "electron-root" : name == "electron.exe" ? "electron-child"
+                        : name == "crashpad_handler.exe" ? "crash-handler" : name == "werfault.exe" ? "error-handler" : "other-owned-child";
+                    rows.Add(new { pid, role, creationFileTime = created.ToString(), live = exited == 0, specificJobMember = member });
+                } finally { CloseHandle(process); }
+            }
+            return new { observed = true, win32Error = 0, processes = rows };
+        } finally { Marshal.FreeHGlobal(buffer); }
     }
     public static int RunHarness(string executable, string sentinel, string script, string directory,
         string entry, string workingDirectory, int timeout, bool timeoutProbe, bool earlyRecovery)
