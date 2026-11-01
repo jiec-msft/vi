@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">VI keyboard prototype</string>
+    <string name="consent">I consent to audio for this session only</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop / final</string>
+    <string name="cancel">Cancel</string>
+    <string name="switch_keyboard">Switch keyboard</string>
+    <string name="setup">Setup / permission</string>
+    <string name="permission_request">Request microphone permission</string>
+    <string name="permission_granted">Microphone permission granted. Return to editor; Start is still required.</string>
+    <string name="permission_denied">Microphone permission denied. No recording is started.</string>
+    <string name="permission_rationale">Optional microphone access is requested only here. You may deny it or leave. The device capture adapter is not implemented; CI uses synthetic PCM only. No audio is stored or sent over a network.</string>
+    <string name="input_settings">Open keyboard settings</string>
+    <string name="input_picker">Choose keyboard</string>
+    <string name="prototype_warning">PROTOTYPE / FAKE PROVIDER: final text is synthetic, not speech recognition.</string>
+    <string name="synthetic_capture">CI SYNTHETIC PCM / no hardware microphone</string>
+    <string name="device_capture">Hardware capture unavailable: adapter not installed</string>
+    <string name="idle">Idle</string>
+</resources>

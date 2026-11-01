@@ -1,0 +1,5 @@
+<resources>
+    <item name="owned_normal" type="id" />
+    <item name="owned_other" type="id" />
+    <item name="owned_secure" type="id" />
+</resources>

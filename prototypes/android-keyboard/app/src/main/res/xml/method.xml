@@ -1,0 +1,6 @@
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="org.example.vikeyboard.SetupActivity"
+    android:supportsSwitchingToNextInputMethod="true">
+    <subtype android:imeSubtypeMode="voice" android:languageTag="en-US"
+        android:label="@string/app_name" />
+</input-method>

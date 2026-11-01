@@ -1,0 +1,108 @@
+name: Android keyboard prototype
+on:
+  pull_request:
+    paths:
+      - prototypes/android-keyboard/**
+      - .github/workflows/android-keyboard.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-keyboard-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PROBE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+jobs:
+  unit:
+    name: Android native build and unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Start whole-job clock
+        run: echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PROBE_HEAD }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Native build and lifecycle unit tests
+        working-directory: prototypes/android-keyboard
+        run: gradle --no-daemon --console=plain :app:testSyntheticDebugUnitTest :app:assembleDeviceDebug :app:assembleSyntheticDebug :app:assembleSyntheticDebugAndroidTest
+      - name: Record exact-head timing
+        if: always()
+        run: python prototypes/android-keyboard/ci/receipt.py 180
+      - name: Save unit reports only, never application binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-${{ env.PROBE_HEAD }}
+          path: |
+            prototypes/android-keyboard/app/build/test-results/testSyntheticDebugUnitTest/*.xml
+            prototypes/android-keyboard/evidence/receipt.json
+          if-no-files-found: error
+          retention-days: 3
+  emulator:
+    name: Android API 35 owned editor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Start whole-job clock
+        run: echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PROBE_HEAD }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Enable hosted KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build ephemeral instrumentation packages
+        working-directory: prototypes/android-keyboard
+        run: gradle --no-daemon --console=plain :app:assembleSyntheticDebug :app:assembleSyntheticDebugAndroidTest
+      - name: Probe real IME and owned InputConnection
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash prototypes/android-keyboard/ci/probe.sh
+      - name: Prepare actual emulator preview
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          fi
+          ffprobe -v error -show_entries stream=width,height -of json prototypes/android-keyboard/evidence/keyboard.mp4
+          ffmpeg -hide_banner -loglevel error -i prototypes/android-keyboard/evidence/keyboard.mp4 -t 24 \
+            -filter_complex 'fps=4,scale=360:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse' \
+            -y prototypes/android-keyboard/evidence/keyboard.gif
+          test -s prototypes/android-keyboard/evidence/probe.json
+          test -s prototypes/android-keyboard/evidence/03-final-only-commit.png
+      - name: Record exact-head timing
+        if: always()
+        run: python prototypes/android-keyboard/ci/receipt.py 600
+      - name: Save owned emulator evidence, never APK or AAB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator-${{ env.PROBE_HEAD }}
+          path: prototypes/android-keyboard/evidence/*
+          if-no-files-found: error
+          retention-days: 3
