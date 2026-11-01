@@ -197,9 +197,13 @@ function Capture-Target {
     @{ window = $target[0].ToString(); focus = $target[1].ToString(); pid = $owner }
 }
 function Assert-Target($target) {
+    if ($target.caretLease -and $target.caretInvalidated) { throw 'target-changed' }
     $current = Capture-Target
     if ($current.window -ne $target.window) { $script:failureCheck = 'foreground-window'; throw 'target-changed' }
     if ($current.pid -ne $target.pid) { $script:failureCheck = 'foreground-process'; throw 'target-changed' }
+    if ($target.caretLease -and $current.focus -ne $target.focus) {
+        $script:failureCheck = 'native-focus'; throw 'target-changed'
+    }
     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
     Start-Sleep -Milliseconds 50
     $settled = [System.Windows.Automation.AutomationElement]::FocusedElement

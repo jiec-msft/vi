@@ -8,6 +8,7 @@ const DEFAULTS = Object.freeze({
   deviceId: '',
   autoCopy: false,
   sounds: true,
+  caretIndicator: false,
   openAtLogin: true,
   shortcut: 'CommandOrControl+Shift+Space',
   cancelShortcut: 'CommandOrControl+Shift+Backspace',
@@ -39,7 +40,7 @@ function preferences(saved = {}, platform = process.platform) {
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('Invalid settings object.');
   const next = { ...DEFAULTS };
   next.plugins = pluginPreferences(saved.plugins);
-  for (const key of ['consent', 'autoCopy', 'sounds', 'openAtLogin']) {
+  for (const key of ['consent', 'autoCopy', 'sounds', 'openAtLogin', 'caretIndicator']) {
     if (saved[key] !== undefined) {
       if (typeof saved[key] !== 'boolean') throw new Error(`Invalid ${key} setting.`);
       next[key] = saved[key];

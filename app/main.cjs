@@ -16,6 +16,7 @@ const { Registry } = require('./plugins/registry.cjs');
 const { PluginRuntime } = require('./plugins/pipeline.cjs');
 const { pluginPreferences, failure } = require('./plugins/manifest.cjs');
 const { TranscriptOutput } = require('./transcript-output.cjs');
+const { CaretIndicator } = require('./caret-indicator.cjs');
 
 const uiUrl = pathToFileURL(path.join(__dirname, 'index.html')).href;
 const overlayUrl = pathToFileURL(path.join(__dirname, 'overlay.html')).href;
@@ -48,6 +49,7 @@ let retainedOutput;
 let pluginWarnings = [];
 let pluginChanging = false;
 let pluginLoading;
+let caretIndicator;
 
 function snapshot() {
   const { plugins, ...publicSettings } = settings;
@@ -75,6 +77,7 @@ function snapshot() {
     nativePointer: Boolean(overlayPointer?.ready),
     nativePointerState: overlayPointer?.state || 'fallback',
     nativePointerRestarts: overlayPointer?.restarts || 0,
+    caretIndicatorState: caretIndicator?.state || 'hidden',
     overlayControlError, diagnosticsError };
 }
 
@@ -243,6 +246,7 @@ function publish(phase, message, text = status.text, details = {}) {
   const changed = phase !== status.phase;
   status = { ...(changed ? {} : status), phase, message, text,
     stopReason: active?.stopReason ?? (changed ? undefined : status.stopReason), ...details };
+  caretIndicator?.update(active, phase, settings.caretIndicator);
   for (const target of [window, overlay]) {
     if (target && !target.isDestroyed()) target.webContents.send('status', snapshot());
   }
@@ -428,6 +432,7 @@ async function prepareInput(run, fromShortcut, targetCapture) {
       throw new Error('Focus a text field in another app before using the dictation shortcut. Record preview does not type into other apps.');
     }
     run.target = target;
+    if (settings.caretIndicator && process.platform === 'win32') run.target.caretLease = true;
     run.inputState = 'ready';
     logEvent('input-target', run);
     logEvent('input-ready', run);
@@ -706,7 +711,7 @@ function installIpc() {
     if (active || testingMic || checkingAuth || pluginChanging) throw new Error('Stop dictation, microphone tests and access checks before changing preferences.');
     if (!patch || typeof patch !== 'object') throw new Error('Invalid preferences.');
     const changes = {};
-    for (const key of ['autoCopy', 'sounds', 'openAtLogin', 'shortcut', 'cancelShortcut', 'deviceId', 'triggerMode']) {
+    for (const key of ['autoCopy', 'sounds', 'openAtLogin', 'shortcut', 'cancelShortcut', 'deviceId', 'triggerMode', 'caretIndicator']) {
       if (patch[key] !== undefined) changes[key] = patch[key];
     }
     const next = preferences({ ...settings, ...changes });
@@ -869,6 +874,9 @@ function keepWindowInTray(target) {
 async function launch() {
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Windows and macOS only.');
   desktop = new DesktopInput({});
+  caretIndicator = new CaretIndicator({ onState: () => {
+    if (window && !window.isDestroyed()) window.webContents.send('status', snapshot());
+  } });
   diagnostics = new Diagnostics(path.join(app.getPath('userData'), 'logs'), (error) => {
     diagnosticsError = error.message;
     console.error(error.message);
@@ -1040,6 +1048,7 @@ else {
     clearTimeout(overlayMoveTimer);
     clearTimeout(micTestTimer);
     shortcutPress?.close();
+    caretIndicator?.close();
     overlayPointer?.close();
     overlayMoveTimer = undefined;
     authProbe?.cancel();

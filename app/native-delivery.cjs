@@ -3,10 +3,10 @@ const readline = require('node:readline');
 const path = require('node:path');
 
 class NativeDelivery {
-  constructor(platform, resources) {
+  constructor(platform, resources, script = 'windows-delivery.ps1') {
     const executable = platform === 'win32' ? 'powershell.exe' : path.join(resources, 'macos-delivery');
     const args = platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
-      '-File', path.join(resources, 'windows-delivery.ps1')] : [];
+      '-File', path.join(resources, script)] : [];
     this.process = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     this.sequence = 0;
     this.queue = Promise.resolve();

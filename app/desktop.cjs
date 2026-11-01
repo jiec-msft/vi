@@ -54,6 +54,7 @@ class DesktopInput {
   async paste(text, target, signal, onSkipped = () => {}) {
     if (!text.trim()) throw new Error('No speech was recognized.');
     if (!target || signal?.aborted) { onSkipped(target ? 'cancelled' : 'no-target'); return false; }
+    if (target.caretLease && target.caretInvalidated) { onSkipped('target-changed', 'native-focus'); return false; }
     await this.warmup();
     if (signal?.aborted) { onSkipped('cancelled'); return false; }
     try {

@@ -260,5 +260,5 @@ function planDock(input) {
 
 module.exports = {
   MAX_SAMPLE_AGE_MS, WINDOW_POLICY, physicalRect, uiaCaretRect, axCaretRect,
-  planCaret, CaretPresentation, planDock,
+  planCaret, CaretPresentation, planDock, markerPlacement,
 };

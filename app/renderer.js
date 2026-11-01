@@ -34,13 +34,14 @@ function showStatus(value) {
   byId('shortcut').textContent = value.shortcut.replace('Control', 'Ctrl').replace('Command', 'Cmd');
   byId('cancel-shortcut').textContent = value.cancelShortcut.replace('Control', 'Ctrl').replace('Command', 'Cmd');
   soundsEnabled = value.sounds;
-  const nextKey = JSON.stringify([value.triggerMode, value.deviceId, value.autoCopy, value.sounds, value.openAtLogin, value.shortcut, value.cancelShortcut]);
+  const nextKey = JSON.stringify([value.triggerMode, value.deviceId, value.autoCopy, value.sounds, value.openAtLogin, value.shortcut, value.cancelShortcut, value.caretIndicator]);
   if (preferenceKey !== nextKey) {
     byId('trigger-mode').value = value.triggerMode;
     savedDeviceId = value.deviceId;
     selectDevice(savedDeviceId);
     byId('auto-copy').checked = value.autoCopy;
     byId('sounds').checked = value.sounds;
+    byId('caret-indicator').checked = value.caretIndicator;
     byId('open-at-login').checked = value.openAtLogin;
     byId('record-shortcut').value = value.shortcut;
     byId('cancel-binding').value = value.cancelShortcut;
@@ -55,6 +56,10 @@ function showStatus(value) {
     ? 'In System Settings > Privacy & Security > Microphone, allow VI. Automatic paste also needs Accessibility.'
     : 'In Windows Settings > Privacy & security > Microphone, enable microphone access and let desktop apps access your microphone.';
   byId('open-at-login').disabled = busy || !value.loginManaged;
+  byId('caret-indicator').disabled = busy || value.testingMic || value.platform !== 'win32';
+  byId('caret-state').textContent = value.platform !== 'win32' ? 'Caret indicator is unavailable on this platform.'
+    : value.caretIndicator ? `Caret indicator: ${value.caretIndicatorState}. Unavailable targets remain hidden; use Copy result if the lease expires.`
+      : 'Off by default. The indicator is feedback only and never changes the target caret.';
   byId('startup-state').textContent = !value.loginManaged ? 'Isolated test profile: startup registration disabled.'
     : value.loginEnabled ? 'Start at login: enabled. Recording never starts automatically.' : 'Start at login: currently disabled.';
   if (value.preferenceError || value.diagnosticsError || value.overlayControlError) {
@@ -277,7 +282,8 @@ byId('check-shortcuts').onclick = () => preferenceAction(() => window.voice.chec
 byId('save-preferences').onclick = () => preferenceAction(async () => {
   await window.voice.preferences({ ...shortcutDraft(), triggerMode: byId('trigger-mode').value,
     deviceId: byId('input-device').value,
-    autoCopy: byId('auto-copy').checked, sounds: byId('sounds').checked, openAtLogin: byId('open-at-login').checked });
+    autoCopy: byId('auto-copy').checked, sounds: byId('sounds').checked, openAtLogin: byId('open-at-login').checked,
+    caretIndicator: byId('caret-indicator').checked });
   return 'Preferences saved.';
 });
 window.voice.status().then(showStatus).catch(displayError);

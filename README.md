@@ -129,6 +129,37 @@ record the desktop. The framework suite uses synthetic microphone permission;
 TCC/hardware permissions, physical shortcut/PTT dispatch, dragging and
 cross-application accessibility remain separate acceptance gates.
 
+### Windows caret indicator (experimental)
+
+Settings includes an explicit, off-by-default **Windows caret indicator**.
+During shortcut recording/finalization it adds a blue caret-side line and a
+small rounded microphone badge. These are separate, owned, nonactivating,
+pointer-transparent native windows; the application never changes the editor's
+caret or adds a dictation control. The existing floating controls are unchanged.
+Preview recordings and other platforms do not start the helper.
+
+The initial native adapter supports only per-monitor-DPI-aware Windows `Edit`
+controls with a verified collapsed selection, matching foreground HWND/PID/focus,
+UIA password/read-only/focus checks, and the same medium integrity/session.
+UIA-only editors, selected text, elevated/unknown/secure fields, inaccessible
+Default input desktops and unverified geometry remain hidden. It does not read
+target text or window titles. UIA runs on one bounded background worker in an
+isolated helper; a native message-pump timer expires geometry after 250 ms.
+Late completions cannot revive an invalidated turn.
+
+Opt-in recordings use a stricter field lease: loss of focus, an unavailable
+caret or expired query hides the indicator and suppresses automatic paste for
+that turn, even if focus later returns. The final transcript remains available
+for Copy. Cancellation/completion/quit destroy the helper and its marker windows.
+This deliberate opt-in behavior does not alter delivery when the setting is off.
+
+`Windows caret integration` is a separate, standard Windows x64 hosted check
+with a 10-minute whole-job limit and an internal 180-second GUI watchdog. Its
+synthetic native editor exercises the actual application, not the presentation
+prototype. Current-head GIF/PNG and native receipts are required before claiming
+CI qualification. CI does not establish real-device, UIA-only editor, secure
+desktop, mixed-monitor or application-package acceptance.
+
 The framework recording must contain a test-only visual marker in every test
 frame. Windows CI suppresses first-login onboarding only inside the hosted VM,
 so a system setup screen cannot conceal successful renderer-only operations.

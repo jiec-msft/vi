@@ -12,7 +12,7 @@ function hostedGuard(env = process.env, platform = process.platform, arch = proc
 }
 module.exports = { hostedGuard };
 
-if (process.versions.electron) {
+if (process.versions.electron && require.main === module) {
   hostedGuard();
   run().catch(async (error) => {
     const { app } = require('electron');
