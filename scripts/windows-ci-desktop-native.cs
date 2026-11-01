@@ -1079,7 +1079,8 @@ public static partial class ViCiDesktop
     }
     public static int RunCaret(string executable, string script, string directory, string workingDirectory, int timeout,
         bool allowDerivedRestricted = false, bool useOwnRestrictedAsUser = false,
-        Func<string, string, IntPtr, IntPtr, object> prepareOwnedLayout = null, bool diagnoseLoop = false)
+        Func<string, string, IntPtr, IntPtr, object> prepareOwnedLayout = null, bool diagnoseLoop = false,
+        Func<string, string, uint, object> collectOwnDiagnostics = null)
     {
         Guard();
         Require(timeout == 180 && File.Exists(executable) && File.Exists(script), "Bounded caret executable/entry required.");
@@ -1273,6 +1274,10 @@ public static partial class ViCiDesktop
                 win32Error = error is Win32Exception native ? native.NativeErrorCode : 0 };
         }
         finally {
+            if (collectOwnDiagnostics != null && child.pid > 0) {
+                try { report["appDiagnosticCollection"] = collectOwnDiagnostics(workingDirectory, directory, child.pid); }
+                catch { report["appDiagnosticCollection"] = new { status = "owned-observer-error" }; }
+            }
             if (child.process != IntPtr.Zero && !attached) {
                 bool terminated = TerminateProcess(child.process, 92) && WaitForSingleObject(child.process, 5000) == 0;
                 report["unattachedRootTerminated"] = terminated;

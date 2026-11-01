@@ -57,15 +57,7 @@ app.commandLine.appendSwitch('use-file-for-fake-audio-capture', path.join(direct
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 const evaluate = (expression) => mainWindow.webContents.executeJavaScript(expression);
 const status = () => evaluate('window.voice.status()');
-async function until(action, label, limit = 20000) {
-  const deadline = Date.now() + limit;
-  do {
-    const value = await action();
-    if (value) return value;
-    await pause(60);
-  } while (Date.now() < deadline);
-  throw new Error(`Caret fixture deadline: ${label}`);
-}
+const { until } = require('./caret-until.cjs');
 function ownedFrame(png) {
   const image = nativeImage.createFromBuffer(png);
   const { width, height } = image.getSize();

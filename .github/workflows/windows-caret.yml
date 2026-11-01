@@ -52,6 +52,7 @@ jobs:
           test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
           scripts/windows-ci-desktop-probe.test.cjs test/framework/caret-bootstrap.test.cjs
           test/framework/caret-fixture-files.test.cjs
+          test/framework/caret-until.test.cjs
   native:
     name: Caret App integration (Windows x64)
     needs: contract
@@ -115,6 +116,7 @@ jobs:
             artifacts-ci/caret/caret-launch.json
             artifacts-ci/caret/bootstrap.jsonl
             artifacts-ci/caret/parent-preparation.json
+            artifacts-ci/caret/app-diagnostics.json
             artifacts-ci/caret/quiet-exit/caret-launch.json
             artifacts-ci/caret/caret-visible.png
             artifacts-ci/caret/caret.gif

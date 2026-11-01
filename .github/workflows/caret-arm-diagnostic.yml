@@ -1,0 +1,30 @@
+name: Caret ARM native gap evidence
+on:
+  pull_request:
+    paths:
+      - test/framework/native-diagnostics.test.cjs
+      - .github/workflows/caret-arm-diagnostic.yml
+permissions:
+  contents: read
+jobs:
+  gap:
+    runs-on: windows-11-arm
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Isolated original native host-gap contract
+        run: node --test --test-name-pattern="native sampler independently persists a host pulse gap" test/framework/native-diagnostics.test.cjs
+      - name: Preserve only sanitized failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caret-arm-gap-failure
+          path: artifacts-ci/caret-arm/host-gap-failure.json
+          retention-days: 3
+          if-no-files-found: warn

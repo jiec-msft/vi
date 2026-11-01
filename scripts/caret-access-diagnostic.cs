@@ -124,7 +124,85 @@ public static partial class ViCiDesktop {
 
     public static int RunQualifiedCaretAsUser(string executable, string script, string directory, string root, int timeout,
         bool diagnoseLoop = false) {
-        return RunCaret(executable, script, directory, root, timeout, true, true, PrepareQualifiedCaretLayout, diagnoseLoop);
+        return RunCaret(executable, script, directory, root, timeout, true, true, PrepareQualifiedCaretLayout, diagnoseLoop,
+            CollectOwnAppDiagnostics);
+    }
+
+    static object CollectOwnAppDiagnostics(string root, string directory, uint pid) {
+        root = Path.GetFullPath(root); directory = Path.GetFullPath(directory);
+        PlainOwnedPath(root, directory);
+        var cancel = new System.Threading.CancellationTokenSource();
+        var work = System.Threading.Tasks.Task.Run(() => {
+            var files = new List<object>();
+            var records = new List<object>();
+            var stageNames = new HashSet<string> { "preferences", "login", "plugins", "windows", "renderers", "desktop",
+                "controls", "window-show", "window-focus", "window-order", "build-info", "pointer", "tray", "shortcuts",
+                "settings-renderer", "overlay-renderer", "quit" };
+            var states = new HashSet<string> { "begin", "end", "failure", "boot", "app-ready", "spawn", "spawned",
+                "request", "write", "reply", "timeout", "ready", "close", "exit", "unresponsive", "responding",
+                "process-gone", "startup-failed", "uncaught-exception", "unhandled-rejection", "native-start",
+                "host-gap", "host-resumed", "compile", "stderr", "suspended", "resumed" };
+            foreach (string name in new[] { "events.jsonl", "events.jsonl.1", "events.jsonl.2", "events.jsonl.3",
+                "native-pointer.jsonl", "native-pointer.jsonl.1", "native-pointer.jsonl.2",
+                "native-delivery.jsonl", "native-delivery.jsonl.1", "native-delivery.jsonl.2" }) {
+                if (cancel.IsCancellationRequested) break;
+                string role = name.StartsWith("events") ? "main" : name.StartsWith("native-pointer") ? "pointer" : "delivery";
+                string file = Path.Combine(root, "artifacts-ci", "caret", "profile", "logs", name);
+                try {
+                    PlainOwnedPath(root, file);
+                    var info = new FileInfo(file);
+                    if (!info.Exists) { files.Add(new { role, presence = "missing" }); continue; }
+                    if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Length > 524288) {
+                        files.Add(new { role, presence = "unavailable", category = "bounded-file-required" }); continue;
+                    }
+                    int accepted = 0;
+                    foreach (string line in File.ReadLines(file)) {
+                        if (cancel.IsCancellationRequested || records.Count >= 2048) break;
+                        if (line.Length > 8192) continue;
+                        using (var json = System.Text.Json.JsonDocument.Parse(line)) {
+                            var row = json.RootElement;
+                            string ownerKey = role == "main" ? "pid" : "parentPid";
+                            if (!row.TryGetProperty(ownerKey, out var owner) || !owner.TryGetUInt32(out uint recordOwner) || recordOwner != pid) continue;
+                            var safe = new Dictionary<string, object> { ["role"] = role };
+                            foreach (string key in new[] { "pid", "parentPid", "helperPid", "seq", "generation", "monoMs", "nativeMonoMs",
+                                "spanMs", "elapsedMs", "win32Error", "errorNumber", "exitCode", "hostGapMs" }) {
+                                if (row.TryGetProperty(key, out var value) && value.TryGetInt64(out long number) &&
+                                    number >= -2147483648 && number <= 9007199254740991) safe[key] = number;
+                            }
+                            foreach (string key in new[] { "run", "birthFileTime", "frameworkRevision", "assemblyRevision" }) {
+                                if (row.TryGetProperty(key, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String) {
+                                    string text = value.GetString();
+                                    if (Regex.IsMatch(text ?? "", "^(?:[a-f0-9-]{36}|[a-f0-9]{40}|[0-9]{15,20})$")) safe[key] = text;
+                                }
+                            }
+                            foreach (string key in new[] { "stage", "lastStage", "lastSuccessfulStage" }) {
+                                if (row.TryGetProperty(key, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                    stageNames.Contains(value.GetString())) safe[key] = value.GetString();
+                            }
+                            if (row.TryGetProperty("state", out var state) && states.Contains(state.GetString())) safe["state"] = state.GetString();
+                            if (row.TryGetProperty("event", out var evt) && new[] { "lifecycle", "app-start", "startup-stage", "native" }.Contains(evt.GetString()))
+                                safe["event"] = evt.GetString();
+                            if (row.TryGetProperty("clock", out var clock) && new[] { "main-performance", "helper-stopwatch" }.Contains(clock.GetString()))
+                                safe["clock"] = clock.GetString();
+                            if (row.TryGetProperty("time", out var time) && DateTimeOffset.TryParse(time.GetString(), out var parsed))
+                                safe["time"] = parsed.ToUniversalTime().ToString("o");
+                            records.Add(safe); accepted++;
+                        }
+                    }
+                    files.Add(new { role, presence = "present", bytes = info.Length, accepted });
+                } catch { files.Add(new { role, presence = "read-error", category = "owned-diagnostic-read-failed" }); }
+            }
+            var packet = new { rootPid = pid, head = Environment.GetEnvironmentVariable("VI_PROBE_HEAD"),
+                runId = Environment.GetEnvironmentVariable("GITHUB_RUN_ID"), scope = "allowlisted-owned-app-diagnostics-only",
+                files, records };
+            if (!cancel.IsCancellationRequested) Write(directory, "app-diagnostics.json", packet);
+            return (object)new { status = "collected", files, records = records.Count };
+        });
+        try {
+            if (work.Wait(2000)) return work.GetAwaiter().GetResult();
+            cancel.Cancel();
+            return new { status = "owned-observer-deadline" };
+        } finally { if (work.IsCompleted) cancel.Dispose(); }
     }
 
     static object PrepareQualifiedCaretLayout(string root, string directory, IntPtr own, IntPtr medium) {
