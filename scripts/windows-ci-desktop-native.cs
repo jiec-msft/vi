@@ -1048,7 +1048,8 @@ public static class ViCiDesktop
             Require(TokenNumber(candidate, 8) == 1 && TokenIntegrity(candidate) == 0x2000, "Caret token must be primary and medium.");
             Require(TokenNumber(candidate, 26) == 0 && TokenNumber(candidate, 26) <= TokenNumber(source, 26),
                 "Caret token UIAccess was raised.");
-            var before = Privileges(source), after = Privileges(candidate);
+            var before = Privileges(source);
+            var after = Privileges(candidate);
             foreach (var privilege in after)
                 Require(before.TryGetValue(privilege.Key, out uint attributes) &&
                     ((privilege.Value & 2) == 0 || (attributes & 2) != 0), "Caret token added or enabled a privilege.");
