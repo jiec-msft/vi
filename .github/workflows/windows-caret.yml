@@ -50,7 +50,7 @@ jobs:
           node --test --test-concurrency=1 test/framework/caret-indicator.test.cjs
           test/framework/desktop.test.cjs test/framework/native-delivery.test.cjs
           test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
-          scripts/windows-ci-desktop-probe.test.cjs
+          scripts/windows-ci-desktop-probe.test.cjs test/framework/caret-bootstrap.test.cjs
   native:
     name: Caret App integration (Windows x64)
     needs: contract
@@ -113,6 +113,7 @@ jobs:
           path: |
             artifacts-ci/caret/caret-report.json
             artifacts-ci/caret/caret-launch.json
+            artifacts-ci/caret/bootstrap.jsonl
             artifacts-ci/caret/quiet-exit/caret-launch.json
             artifacts-ci/caret/caret-visible.png
             artifacts-ci/caret/caret.gif

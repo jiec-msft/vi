@@ -1155,6 +1155,15 @@ public static partial class ViCiDesktop
             report["specificJobName"] = jobName;
             var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = @"WinSta0\Default" };
             var command = new StringBuilder(Quote(executable) + " " + Quote(script));
+            if (useOwnRestrictedAsUser) {
+                string profileDirectory = Path.Combine(workingDirectory, "artifacts-ci", "caret", "profile");
+                command.Append(" " + Quote("--user-data-dir=" + profileDirectory));
+                report["earlyProfileSwitch"] = true;
+                report["entryRole"] = entry == "windows-caret-ui.cjs" ? "caret-controller" : "quiet-exit";
+                report["workingDirectoryRole"] = "owned-checkout";
+                report["runAsNodeEnvironmentPresent"] = Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE") != null;
+                report["runAsNodeEnvironmentEnabled"] = !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE"));
+            }
             if (!useOwnRestrictedAsUser && launchToken != ownToken) {
                 Win32(LookupPrivilegeValueW(null, "SeImpersonatePrivilege", out long impersonate), "Read required parent privilege identity");
                 if (!parentPrivileges.TryGetValue(impersonate, out uint attributes) || (attributes & 2) == 0)
@@ -1213,6 +1222,8 @@ public static partial class ViCiDesktop
             report["exactBinaryPathVerified"] = true;
             report["suspendedAttachBeforeResume"] = true;
             Win32(ResumeThread(child.thread) != UInt32.MaxValue, "Resume owned caret root");
+            try { report["ownedProcessObservations"] = CaretProcessObservation(job, child.pid); }
+            catch { report["ownedProcessObservationFailure"] = "owned-observer-unavailable"; }
             uint wait = WaitForSingleObject(child.process, (uint)timeout * 1000);
             Require(wait == 0, wait == WaitTimeout ? "Caret App fixture exceeded its 180-second internal watchdog." : "Caret root wait failed.");
             Win32(GetExitCodeProcess(child.process, out uint exitCode), "Read caret root raw exit");
@@ -1229,6 +1240,10 @@ public static partial class ViCiDesktop
                 bool terminated = TerminateProcess(child.process, 92) && WaitForSingleObject(child.process, 5000) == 0;
                 report["unattachedRootTerminated"] = terminated;
                 if (!terminated) errors.Add("Unattached owned caret root cleanup failed.");
+            }
+            if (attached && job != IntPtr.Zero) {
+                try { report["ownedProcessesBeforeCleanup"] = CaretProcessObservation(job, child.pid); }
+                catch { report["ownedProcessObservationFailure"] = "owned-observer-unavailable"; }
             }
             CleanupJob(job, errors, report, "ownedJobCleanup");
             Environment.SetEnvironmentVariable("VI_CARET_JOB_NAME", originalJobName);
@@ -1258,6 +1273,39 @@ public static partial class ViCiDesktop
             Write(directory, "caret-launch.json", report);
         }
         return result == 0 && errors.Count == 0 ? 0 : 1;
+    }
+    static object CaretProcessObservation(IntPtr job, uint root)
+    {
+        const int capacity = 32;
+        IntPtr buffer = Marshal.AllocHGlobal(8 + capacity * IntPtr.Size);
+        var rows = new List<object>();
+        try {
+            if (!QueryJobProcesses(job, 3, buffer, (uint)(8 + capacity * IntPtr.Size), IntPtr.Zero))
+                return new { observed = false, win32Error = Marshal.GetLastWin32Error(), processes = rows };
+            int count = Marshal.ReadInt32(buffer, 4);
+            if (count < 0 || count > capacity) return new { observed = false, win32Error = 0, processes = rows };
+            for (int index = 0; index < count; index++) {
+                uint pid = (uint)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
+                IntPtr process = OpenProcess(0x1000, false, pid);
+                if (process == IntPtr.Zero) { rows.Add(new { pid, observed = false, win32Error = Marshal.GetLastWin32Error() }); continue; }
+                try {
+                    bool member;
+                    long created, exited, kernel, user;
+                    var image = new StringBuilder(32768);
+                    uint length = (uint)image.Capacity;
+                    if (!IsProcessInJob(process, job, out member) || !member ||
+                        !GetProcessTimes(process, out created, out exited, out kernel, out user) ||
+                        !QueryFullProcessImageNameW(process, 0, image, ref length)) {
+                        rows.Add(new { pid, observed = false, win32Error = Marshal.GetLastWin32Error() }); continue;
+                    }
+                    string name = Path.GetFileName(image.ToString()).ToLowerInvariant();
+                    string role = pid == root ? "electron-root" : name == "electron.exe" ? "electron-child"
+                        : name == "crashpad_handler.exe" ? "crash-handler" : name == "werfault.exe" ? "error-handler" : "other-owned-child";
+                    rows.Add(new { pid, role, creationFileTime = created.ToString(), live = exited == 0, specificJobMember = member });
+                } finally { CloseHandle(process); }
+            }
+            return new { observed = true, win32Error = 0, processes = rows };
+        } finally { Marshal.FreeHGlobal(buffer); }
     }
     public static int RunHarness(string executable, string sentinel, string script, string directory,
         string entry, string workingDirectory, int timeout, bool timeoutProbe, bool earlyRecovery)

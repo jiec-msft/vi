@@ -1,11 +1,18 @@
+const { stage: bootStage } = require('./caret-bootstrap-trace.cjs');
+bootStage('entry-loaded');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const childProcess = require('node:child_process');
 const readline = require('node:readline');
 const { hostedGuard } = require('./windows-hosted-guard.cjs');
+bootStage('guard-before');
 hostedGuard();
+bootStage('guard-after');
+bootStage('electron-import-before');
 const { app, BrowserWindow, nativeImage, desktopCapturer } = require('electron');
+bootStage('electron-import-after');
+app.once('ready', () => bootStage('browser-ready'));
 const { recordDesktop } = require('./desktop-evidence.cjs');
 const { fiveMarkersVisible } = require('./visible-markers.cjs');
 const directory = path.resolve('artifacts-ci', 'caret');
@@ -105,6 +112,7 @@ async function cancel() {
   await until(async () => (await inspect('hidden')).markers.length === 0, 'native marker destruction');
 }
 async function run() {
+  bootStage('actor-start');
   await fs.mkdir(profile, { recursive: true });
   const wav = Buffer.alloc(44 + 32000);
   wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
@@ -114,7 +122,9 @@ async function run() {
   for (let i = 0; i < 16000; i++) wav.writeInt16LE(Math.round(Math.sin(i * Math.PI * 220 / 8000) * 3000), 44 + i * 2);
   await fs.writeFile(path.join(directory, 'input.wav'), wav);
   const provider = path.resolve(process.env.VI_PROVIDER_DIR);
+  bootStage('provider-before');
   service = await require(path.join(provider, 'fixtures', 'provider-service.cjs')).createService();
+  bootStage('provider-after');
   const fixture = path.join(directory, 'fixture-provider');
   await fs.mkdir(fixture, { recursive: true });
   await fs.writeFile(path.join(fixture, 'plugin.json'), JSON.stringify({
@@ -128,8 +138,12 @@ async function run() {
     consent: true, sounds: false, openAtLogin: false, caretIndicator: true,
     shortcut: 'Control+Alt+Shift+F9', cancelShortcut: 'Control+Alt+Shift+F10',
   }));
+  bootStage('app-import-before');
   require('../app/main.cjs');
+  bootStage('app-import-after');
+  bootStage('app-ready-before');
   await app.whenReady();
+  bootStage('app-ready-after');
   await until(async () => {
     mainWindow = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/index.html'));
     return mainWindow && (await status()).shortcutReady;
@@ -231,6 +245,7 @@ run().then(async () => {
   if (report.passed) app.quit();
   else app.exit(1);
 }, async (error) => {
+  bootStage('module-error', error);
   report.passed = false;
   report.error = error.message;
   console.error(error);
@@ -260,4 +275,5 @@ async function cleanup() {
   editor?.close();
   await service?.close();
   await fs.writeFile(path.join(directory, 'caret-report.json'), JSON.stringify(report, null, 2));
+  bootStage('report-saved');
 }
