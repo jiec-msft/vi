@@ -3,7 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const childProcess = require('node:child_process');
 const readline = require('node:readline');
-const { hostedGuard } = require('./windows-ci-desktop-probe.cjs');
+const { hostedGuard } = require('./windows-hosted-guard.cjs');
 hostedGuard();
 const { app, BrowserWindow, nativeImage, desktopCapturer } = require('electron');
 const { recordDesktop } = require('./desktop-evidence.cjs');

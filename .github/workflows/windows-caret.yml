@@ -34,10 +34,12 @@ jobs:
           test/framework/desktop.test.cjs test/framework/native-delivery.test.cjs
           test/framework/diagnostics.test.cjs test/framework/native-diagnostics.test.cjs
           test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
+          scripts/windows-ci-desktop-probe.test.cjs
   native:
     name: Caret App integration (Windows x64)
     needs: unit
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Native launch remains paused until the explicit API plan is approved.
+    if: false
     runs-on: windows-2025
     timeout-minutes: 10
     env:

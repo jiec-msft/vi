@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { hostedGuard } = require('./windows-ci-desktop-probe.cjs');
+const vm = require('node:vm');
+const { setImmediate: nextTurn } = require('node:timers/promises');
 const valid = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows',
   GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', VI_EXPECTED_ARCH: 'x64' };
 test('hosted guard refuses local, self-hosted, wrong platform, emulation and missing run identity', () => {
@@ -35,4 +37,23 @@ test('PowerShell local invocation refuses before loading the native type', () =>
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /requires a native GitHub-hosted Actions Windows job/);
   assert.doesNotMatch(result.stderr, /Add-Type|Compiler|DllNotFound/);
+});
+test('Electron fixture bootstrap does not require Node require.main identity before writing its own started receipt', async () => {
+  const writes = [];
+  const app = { setPath() {}, commandLine: { appendSwitch() {} }, whenReady: () => new Promise(() => {}) };
+  const context = vm.createContext({
+    module: { exports: {} }, __dirname,
+    process: { versions: { electron: '45.1.0' }, env: valid, platform: 'win32', arch: 'x64', pid: 42,
+      argv: ['electron', 'probe', '--desktop-probe-role=default', '--desktop-probe-case=normal',
+        '--desktop-probe-name=Default', '--desktop-probe-output=synthetic-owned-output'] },
+    require: (name) => name === 'node:fs/promises' ? { writeFile: async (file, text) => writes.push({ file, text }) }
+      : name === 'electron' ? { app }
+        : name === './windows-hosted-guard.cjs' ? { hostedGuard: () => hostedGuard(valid, 'win32', 'x64') }
+          : name === './desktop-evidence.cjs' ? { recordDesktop: assert.fail } : require(name),
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'windows-ci-desktop-probe.cjs'), 'utf8'), context);
+  await nextTurn();
+  assert.equal(writes.length, 1);
+  assert.equal(path.basename(writes[0].file), 'started.json');
+  assert.equal(JSON.parse(writes[0].text).pid, 42);
 });

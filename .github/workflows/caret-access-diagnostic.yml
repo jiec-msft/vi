@@ -35,7 +35,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Controlled runtime dependencies failed.' }
           node -e "console.log(require('electron'))"
           if ($LASTEXITCODE -ne 0) { throw 'Controlled official runtime preparation failed.' }
-      - name: Read privilege presence and controlled path DACLs without launching
+      - name: Qualify only the fresh owned synthetic layout without launching
         shell: pwsh
         run: .\scripts\caret-access-diagnostic.ps1
       - name: Preserve sanitized read-only facts

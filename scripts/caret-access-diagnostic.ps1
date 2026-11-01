@@ -8,6 +8,6 @@ Add-Type -Path @((Join-Path $PSScriptRoot 'windows-ci-desktop-native.cs'),
     (Join-Path $PSScriptRoot 'caret-access-diagnostic.cs'))
 $root = (Get-Location).Path
 $output = Join-Path $root 'artifacts-ci\caret-access'
-$code = [ViCiDesktop]::RunCaretAccessDiagnostic($root, $output)
+$code = [ViCiDesktop]::RunCaretAccessDiagnostic($root, $output, $true)
 Get-Content -LiteralPath (Join-Path $output 'access-report.json')
 if ($code -ne 0) { throw 'Read-only controlled access diagnostic failed; no launch was attempted.' }
