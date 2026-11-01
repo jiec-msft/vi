@@ -1,0 +1,56 @@
+name: Voice command prototype checks
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - prototypes/voice-commands/**
+      - .github/workflows/voice-commands.yml
+permissions:
+  contents: read
+concurrency:
+  group: voice-commands-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  unit:
+    name: Voice command engine (Node 24)
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check standalone CJS syntax
+        run: |
+          node --check prototypes/voice-commands/engine.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check prototypes/voice-commands/demo.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check prototypes/voice-commands/engine.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Focused command and dictation regressions
+        run: node --test prototypes/voice-commands/engine.test.cjs
+      - name: Run synthetic event demo
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts-ci/voice-commands | Out-Null
+          node prototypes/voice-commands/demo.cjs > artifacts-ci/voice-commands/demo.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = @{
+            head = '${{ github.event.pull_request.head.sha || github.sha }}'
+            runId = '${{ github.run_id }}'
+            runAttempt = '${{ github.run_attempt }}'
+            inputs = 'synthetic events only'
+            scope = 'isolated engine; no speech detection, UI, microphone, network or OS delivery'
+          }
+          $report | ConvertTo-Json | Set-Content -Encoding utf8 artifacts-ci/voice-commands/report.json
+      - name: Save synthetic trace and head binding
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-command-demo
+          path: artifacts-ci/voice-commands/*.json
+          retention-days: 7
+          if-no-files-found: error

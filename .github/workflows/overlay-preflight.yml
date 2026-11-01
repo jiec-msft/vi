@@ -1,0 +1,28 @@
+name: Overlay diagnostic preflight (nonrelease)
+on:
+  push:
+    branches: [ci/overlay-preflight]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    name: DIAGNOSTIC overlay invariants (Windows x64, nonrelease)
+    runs-on: windows-2025
+    timeout-minutes: 3
+    env:
+      VI_EXPECTED_ARCH: x64
+      VI_PROBE_HEAD: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --omit=dev --no-audit --no-fund
+      - name: Pure overlay regressions and actual PS5 serialization (no GUI)
+        run: >-
+          node --test test/framework/overlay-pointer.test.cjs
+          test/framework/overlay-drag.test.cjs test/framework/overlay-controls.test.cjs
+          test/framework/native-types.test.cjs scripts/overlay-ci-desktop.test.cjs
