@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   unit:
-    name: Caret and startup diagnostics integration
+    name: Root diagnostics and timing integration (required)
     runs-on: windows-2025
     timeout-minutes: 3
     steps:
@@ -28,16 +28,32 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Targeted lifecycle, diagnostics, delivery and native syntax
+      - name: Root diagnostics and timing without native compilation
+        run: node --test --test-concurrency=1 test/framework/diagnostics.test.cjs
+      - name: Root native diagnostics after timing tests
+        if: always()
+        run: node --test --test-concurrency=1 test/framework/native-diagnostics.test.cjs
+  contract:
+    name: Current caret contract and native syntax
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Caret, lease, bootstrap, delivery and native syntax
         run: >-
           node --test --test-concurrency=1 test/framework/caret-indicator.test.cjs
           test/framework/desktop.test.cjs test/framework/native-delivery.test.cjs
-          test/framework/diagnostics.test.cjs test/framework/native-diagnostics.test.cjs
           test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
           scripts/windows-ci-desktop-probe.test.cjs
   native:
     name: Caret App integration (Windows x64)
-    needs: unit
+    needs: contract
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-2025
     timeout-minutes: 10

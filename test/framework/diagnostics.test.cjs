@@ -113,12 +113,13 @@ test('critical begin is independently visible while the main thread is deliberat
 
 test('a stalled writer bounds checkpoint, queue and exit flush without exposing raw errors', async (t) => {
   let writer;
+  let lastSynchronousWrite;
   const failures = [];
   const d = new Diagnostics('unused', (error) => failures.push(error), 524288, {
     createWriter: () => {
       writer = new EventEmitter();
       writer.unref = () => {};
-      writer.postMessage = () => {};
+      writer.postMessage = () => { lastSynchronousWrite = performance.now(); };
       return writer;
     },
   });
@@ -130,8 +131,11 @@ test('a stalled writer bounds checkpoint, queue and exit flush without exposing 
   assert.ok(d.pending.length + d.inflight.size <= 128);
   assert.ok(d.dropped > 0);
   const flushAt = performance.now();
+  const cpuAt = process.cpuUsage();
   await d.flush();
-  assert.ok(performance.now() - flushAt < 350);
+  const elapsed = performance.now() - flushAt, cpu = process.cpuUsage(cpuAt);
+  assert.ok(elapsed < 350, JSON.stringify({ elapsedMs: elapsed, processCpuMs: (cpu.user + cpu.system) / 1000,
+    synchronousDrainMs: lastSynchronousWrite - flushAt, inflight: d.inflight.size, dropped: d.dropped }));
   assert.equal(failures.length, 1);
   writer.emit('error', new Error('PRIVATE_PATH'));
   assert.equal(failures.length, 2);
