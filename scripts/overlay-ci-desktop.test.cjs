@@ -82,6 +82,25 @@ function fixture() {
       coverage: 'window-desktop-association', rootCreationFileTime: birth(1), snapshotCompletedAt: 1690,
       threadQuery: { ...unknownThread } })),
     descendantDesktopObservations: [1, 2, 3, 4, 5, 6].map(member) };
+  desktop.defaultPid = 8;
+  desktop.rootWallLimitSeconds = 150;
+  desktop.defaultHeartbeatIdentity = { protocol: 'vi-ci-immutable-heartbeat-v1', pid: 8,
+    creationFileTime: birth(8), generation: 1, cadenceMilliseconds: 250, frameLimit: 720,
+    lifetimeBound: 'existing-default-ready20-root-inclusive-deadline-and-job-cleanup10' };
+  desktop.defaultHeartbeatSamples = ['before-owned-root', 'root-outcome-freshness-check',
+    'after-original-restore-before-job-cleanup'].map((phase) => ({
+    phase, protocol: 'vi-ci-immutable-heartbeat-v1', pid: 8, heartbeatPid: 8, creationFileTime: birth(8),
+    heartbeatCreationFileTime: birth(8), generation: 1, heartbeatGeneration: 1, frameLimit: 720,
+    cadenceMilliseconds: 250, heartbeatSequence: 1, frameCount: 1,
+    heartbeatFile: `heartbeat-v1-8-${birth(8)}-g1-s000001.json`, heartbeatStatus: 'read-immutable-frame',
+    heartbeatAt: 1750, sampleAt: 1800, ageMilliseconds: 50, freshnessLimitMilliseconds: 3000,
+    processCreatedAt: 1000, snapshotCompletedAt: 1810, liveCheckedAt: 1811,
+    processTimesRead: true, processTimesError: 0, membershipApi: 'IsProcessInJob', membershipRead: true,
+    membershipError: 0, specificDefaultJobMember: true, liveCheckApi: 'WaitForSingleObject',
+    liveCheckWaitState: 258, liveCheckWin32Error: 0, visibleWindowCount: 1 }));
+  desktop.defaultHeartbeatCheck = desktop.defaultHeartbeatSamples[1];
+  desktop.defaultFixtureExit = { pid: 8, creationFileTime: birth(8), processTimesRead: true,
+    processTimesError: 0, exitedAt: 1900 };
   return { report, desktop };
 }
 test('accepts explicit role-specific proof while retaining inaccessible remote threads as nonproof', () => {
@@ -155,6 +174,24 @@ for (const [label, change] of [
   ['connected wrong remote desktop', (r, d) => { d.rootWindowObservations[0].threadQuery.threadDesktop = 'Default'; }],
   ['wrong observer current thread', (r, d) => { d.rootWindowQueryContext.currentThreadQuery.tid = 999; }],
   ['stale Default heartbeat', (r, d) => { d.defaultFixtureHeartbeatFresh = false; }],
+  ['missing immutable Default protocol', (r, d) => { delete d.defaultHeartbeatIdentity; }],
+  ['wrong immutable Default process birth', (r, d) => { d.defaultHeartbeatSamples[0].heartbeatCreationFileTime = birth(99); }],
+  ['wrong immutable Default generation', (r, d) => { d.defaultHeartbeatSamples[0].heartbeatGeneration = 2; }],
+  ['missing completed immutable Default sample', (r, d) => { d.defaultHeartbeatSamples.length = 0; }],
+  ['stale immutable Default sample', (r, d) => {
+    Object.assign(d.defaultHeartbeatSamples[0], { sampleAt: 4750, ageMilliseconds: 3000, snapshotCompletedAt: 4760, liveCheckedAt: 4761 });
+  }],
+  ['immutable Default cap increased', (r, d) => { d.defaultHeartbeatIdentity.frameLimit++; }],
+  ['immutable Default cadence relaxed', (r, d) => { d.defaultHeartbeatSamples[0].cadenceMilliseconds = 500; }],
+  ['immutable Default sequence malformed', (r, d) => { d.defaultHeartbeatSamples[0].heartbeatSequence = '1'; }],
+  ['immutable Default frame count gap', (r, d) => { d.defaultHeartbeatSamples[0].frameCount = 2; }],
+  ['immutable Default filename mismatch', (r, d) => { d.defaultHeartbeatSamples[0].heartbeatFile = 'heartbeat.json'; }],
+  ['immutable Default membership missing', (r, d) => { d.defaultHeartbeatSamples[0].specificDefaultJobMember = false; }],
+  ['immutable Default exited live wait', (r, d) => { d.defaultHeartbeatSamples[0].liveCheckWaitState = 0; }],
+  ['immutable Default failed live wait', (r, d) => { d.defaultHeartbeatSamples[0].liveCheckWaitState = 0xffffffff; }],
+  ['immutable Default window missing', (r, d) => { d.defaultHeartbeatSamples[0].visibleWindowCount = 0; }],
+  ['immutable Default exit birth mismatch', (r, d) => { d.defaultFixtureExit.creationFileTime = birth(99); }],
+  ['immutable Default sample completed after exit', (r, d) => { d.defaultFixtureExit.exitedAt = 1810; }],
 ]) {
   test(`rejects ${label}`, () => {
     const { report, desktop } = fixture();

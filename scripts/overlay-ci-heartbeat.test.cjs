@@ -2,71 +2,77 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 
-test('native heartbeat readers permit atomic Node replacement while retaining each open JSON version',
+test('real Default fixture publishes new immutable frames while old reader handles remain open',
   { timeout: 30000 }, async () => {
     assert.ok(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted' &&
       process.env.RUNNER_OS === 'Windows' && process.platform === 'win32' &&
       process.arch === process.env.VI_EXPECTED_ARCH && ['x64', 'arm64'].includes(process.arch),
-    'Heartbeat concurrency verification requires native GitHub-hosted Windows CI.');
+    'Heartbeat protocol verification requires native GitHub-hosted Windows CI.');
     const directory = path.resolve('artifacts-ci', 'overlay-recovery', 'heartbeat-reader');
     await fs.mkdir(path.dirname(directory), { recursive: true });
     await fs.mkdir(directory);
-    const file = path.join(directory, 'heartbeat.json'), temporary = path.join(directory, 'heartbeat.tmp');
-    const write = async (sequence) => {
-      const value = { pid: process.pid, time: Date.now(), sequence };
-      await fs.writeFile(temporary, JSON.stringify(value));
-      await fs.rename(temporary, file);
-      return value;
-    };
-    let previous = await write(0);
     const child = spawn(process.env.VI_DESKTOP_PWSH, ['-NoProfile', '-NonInteractive', '-File',
       path.resolve('scripts', 'overlay-ci-heartbeat-reader.ps1'), '-Directory', directory,
-      '-ProducerPid', String(process.pid)], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', (bytes) => { stderr += bytes; });
+      '-Executable', require('electron'), '-WorkingDirectory', process.cwd()],
+    { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let diagnostics = '';
+    child.stdout.on('data', (bytes) => { diagnostics += bytes; });
+    child.stderr.on('data', (bytes) => { diagnostics += bytes; });
     const exited = new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('exit', (code, signal) => resolve({ code, signal }));
     });
     const timer = setTimeout(() => child.kill(), 25000);
-    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-    const receipts = [];
     try {
-      let current, iteration = 0, expecting = 'opened';
-      for await (const line of lines) {
-        const message = JSON.parse(line);
-        assert.equal(message.pid, child.pid);
-        assert.equal(message.iteration, iteration);
-        assert.equal(message.type, expecting);
-        if (message.type === 'opened') {
-          current = await write(iteration + 1);
-          child.stdin.write('replacement-complete\n');
-          expecting = 'read';
-        } else {
-          assert.deepEqual(message.old, previous);
-          assert.deepEqual(message.current, current);
-          assert.ok(message.sampleAt - current.time < 3000);
-          receipts.push(message);
-          previous = current;
-          iteration++;
-          expecting = 'opened';
-        }
-      }
       const outcome = await exited;
-      assert.equal(outcome.code, 0, `Native reader exited ${JSON.stringify(outcome)}: ${stderr}`);
-      assert.equal(stderr, '');
-      assert.equal(iteration, 64, 'Producer/read verification stopped before all atomic replacements.');
-      assert.equal(expecting, 'opened');
-      await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify({ status: 'passed', producerPid: process.pid,
-        readerPid: child.pid, completedAtomicReplacements: iteration, freshnessLimitMilliseconds: 3000,
-        scope: 'stable file handle JSON and concurrent replacement; not desktop or old-failure cause proof', receipts }, null, 2));
+      const report = JSON.parse(await fs.readFile(path.join(directory, 'report.json'), 'utf8').catch((error) => {
+        throw new Error(`Heartbeat child has no readable report: ${JSON.stringify({ outcome, diagnostics })}`, { cause: error });
+      }));
+      assert.equal(outcome.code, 0, `Immutable protocol verification failed: ${JSON.stringify({ outcome, report, diagnostics })}`);
+      assert.equal(report.passed, true);
+      assert.deepEqual(report.errors, []);
+      assert.equal(report.readerPid, child.pid);
+      assert.equal(report.protocol, 'vi-ci-immutable-heartbeat-v1');
+      assert.equal(report.completedOverlaps, 64);
+      assert.equal(report.overlaps.length, 64);
+      assert.ok(report.finalFrameCount >= 65 && report.finalFrameCount <= report.frameLimit);
+      assert.deepEqual(report.freshnessBoundary, { at2999: true, at3000: false, wrongPid: false });
+      for (const [index, receipt] of report.overlaps.entries()) {
+        assert.equal(receipt.iteration, index);
+        assert.equal(receipt.oldFrame.pid, report.producerPid);
+        assert.equal(receipt.nextFrame.pid, report.producerPid);
+        assert.equal(receipt.oldFrame.creationFileTime, report.producerCreationFileTime);
+        assert.equal(receipt.nextFrame.creationFileTime, report.producerCreationFileTime);
+        assert.equal(receipt.oldFrame.generation, 1);
+        assert.equal(receipt.nextFrame.generation, 1);
+        assert.ok(receipt.nextFrame.sequence > receipt.knownPublishedSequenceAfterOpen);
+        assert.ok(receipt.knownPublishedSequenceAfterOpen >= receipt.oldFrame.sequence);
+        assert.notEqual(receipt.oldFrame.fileName, receipt.nextFrame.fileName);
+        assert.ok(receipt.handleOpenedAt <= receipt.heldReadCompletedAt);
+        assert.equal(receipt.nextProof.specificDefaultJobMember, true);
+        assert.equal(receipt.nextProof.liveCheckWaitState, 258);
+        assert.equal(receipt.nextProof.liveCheckWin32Error, 0);
+        assert.ok(receipt.nextProof.visibleWindowCount > 0);
+        assert.ok(receipt.nextProof.liveCheckedAt >= receipt.nextProof.snapshotCompletedAt);
+        assert.ok(receipt.nextProof.ageMilliseconds < 3000);
+      }
+      assert.deepEqual(report.negativeCases, ['missing', 'tmp-only', 'malformed', 'partial-final', 'wrong-pid',
+        'wrong-birth', 'wrong-generation', 'wrong-sequence', 'wrong-filename', 'sequence-format', 'duplicate', 'gap',
+        'invalid-time', 'invalid-time-type', 'wrong-protocol', 'duplicate-property', 'over-cap', 'stale-latest']);
+      assert.deepEqual(report.negativeWitnesses.map(({ label }) => label), report.negativeCases);
+      assert.ok(report.negativeWitnesses.every(({ exceptionType, error }) => exceptionType && error));
+      assert.equal(report.producerFailure.childExitCode, 1);
+      assert.equal(report.producerFailure.stoppedAfterPublishedFrames, 1);
+      assert.equal(report.defaultJobCleanup.active, 0);
+      assert.equal(report.producerFailureJobCleanup.active, 0);
+      assert.equal(report.processHandlesClosed, true);
+      assert.equal(report.readerHandlesClosed, true);
+      assert.equal(report.originalDefaultUnchanged, true);
+      assert.equal(report.fixtureWindowsRemoved, true);
     } finally {
       clearTimeout(timer);
-      lines.close();
-      child.stdin.end();
       if (child.exitCode === null && child.signalCode === null) child.kill();
       await exited;
     }

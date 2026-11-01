@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 // Ordinary WinSta0 desktops only. API contracts:
@@ -19,6 +20,7 @@ public static class ViCiDesktop
     const uint ReadSwitch = 0x0141;
     const uint SuspendedNoWindow = 0x08000004;
     const uint WaitTimeout = 258;
+    const string HeartbeatProtocol = "vi-ci-immutable-heartbeat-v1";
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct StartupInfo
@@ -214,7 +216,8 @@ public static class ViCiDesktop
         }
     }
     static ProcessInfo Start(IntPtr job, string executable, string script, string directory, string desktop, string role, string testCase,
-        string entry = "probe", string workingDirectory = null, bool timeoutProbe = false, bool earlyRecovery = false)
+        string entry = "probe", string workingDirectory = null, bool timeoutProbe = false, bool earlyRecovery = false,
+        int immutableHeartbeatLimit = 0)
     {
         var startup = new StartupInfo { cb = (uint)Marshal.SizeOf<StartupInfo>(), desktop = "WinSta0\\" + desktop };
         string arguments = entry == "probe"
@@ -224,12 +227,29 @@ public static class ViCiDesktop
                 " --ci-owned-desktop=" + desktop + " " + Quote("--ci-desktop-receipt=" + directory) +
                 (timeoutProbe ? " --ci-desktop-timeout-probe" : "") +
                 (earlyRecovery ? " --ci-startup-recovery-probe" : "");
+        Require(immutableHeartbeatLimit == 0 || (entry == "probe" && role == "default" &&
+            testCase == "normal" && immutableHeartbeatLimit > 0 && immutableHeartbeatLimit <= 720),
+            "Immutable heartbeat is limited to the finite P0 Default fixture.");
+        if (immutableHeartbeatLimit > 0) arguments += " --desktop-probe-heartbeat=immutable-v1";
         var command = new StringBuilder(Quote(executable) + " " + Quote(script) + arguments);
         ProcessInfo child;
         Win32(CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false,
             SuspendedNoWindow, IntPtr.Zero, workingDirectory ?? Environment.CurrentDirectory, ref startup, out child), "Create owned suspended child");
         try {
             Win32(AssignProcessToJobObject(job, child.process), "Assign owned child to job");
+            if (immutableHeartbeatLimit > 0) {
+                Win32(GetProcessTimes(child.process, out long created, out long exited, out long kernel, out long user),
+                    "Read suspended Default fixture creation identity");
+                Win32(IsProcessInJob(child.process, job, out bool member), "Read suspended Default fixture specific Job");
+                Require(member, "Suspended Default fixture is not in its specific Job.");
+                using (var file = new FileStream(Path.Combine(directory, "immutable-identity.json"),
+                    FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(file, new UTF8Encoding(false))) {
+                    writer.Write(JsonSerializer.Serialize(new { protocol = HeartbeatProtocol, pid = child.pid,
+                        creationFileTime = created.ToString(), generation = 1, frameLimit = immutableHeartbeatLimit,
+                        cadenceMilliseconds = 250 }));
+                }
+            }
             Win32(ResumeThread(child.thread) != UInt32.MaxValue, "Resume owned child");
             Win32(CloseHandle(child.thread), "Close child thread handle");
             child.thread = IntPtr.Zero;
@@ -269,8 +289,106 @@ public static class ViCiDesktop
     {
         return heartbeatPid == pid && sampleAt - heartbeatAt < 3000;
     }
+    sealed class HeartbeatFrame
+    {
+        public string protocol { get; set; }
+        public uint pid { get; set; }
+        public string creationFileTime { get; set; }
+        public int generation { get; set; }
+        public int sequence { get; set; }
+        public long time { get; set; }
+        public string fileName { get; set; }
+        public long fileLastWriteTicks { get; set; }
+        public long fileLength { get; set; }
+    }
+    sealed class ImmutableHeartbeatReader
+    {
+        public readonly string directory, birth;
+        public readonly uint pid;
+        public readonly int generation, limit;
+        readonly Dictionary<int, HeartbeatFrame> frames = new Dictionary<int, HeartbeatFrame>();
+        public int Count { get { return frames.Count; } }
+        public ImmutableHeartbeatReader(string directory, uint pid, string birth, int generation, int limit)
+        {
+            Require(pid > 0 && Regex.IsMatch(birth, "^[1-9][0-9]+$") && generation == 1 && limit > 0 && limit <= 720,
+                "Invalid immutable heartbeat reader identity or lifetime bound.");
+            this.directory = directory; this.pid = pid; this.birth = birth;
+            this.generation = generation; this.limit = limit;
+        }
+        public string FileName(int sequence)
+        {
+            return "heartbeat-v1-" + pid + "-" + birth + "-g" + generation + "-s" + sequence.ToString("D6") + ".json";
+        }
+        public HeartbeatFrame Parse(string text, string fileName)
+        {
+            using (var json = JsonDocument.Parse(text)) {
+                var value = json.RootElement;
+                Require(value.ValueKind == JsonValueKind.Object, "Immutable heartbeat is not a complete JSON object.");
+                var properties = new HashSet<string>();
+                foreach (var property in value.EnumerateObject())
+                    Require(properties.Add(property.Name), "Duplicate immutable heartbeat JSON field.");
+                Require(properties.Count == 6, "Immutable heartbeat schema is incomplete or has unexpected fields.");
+                var frame = new HeartbeatFrame { protocol = value.GetProperty("protocol").GetString(),
+                    pid = value.GetProperty("pid").GetUInt32(), creationFileTime = value.GetProperty("creationFileTime").GetString(),
+                    generation = value.GetProperty("generation").GetInt32(), sequence = value.GetProperty("sequence").GetInt32(),
+                    time = value.GetProperty("time").GetInt64(), fileName = fileName };
+                Require(frame.protocol == HeartbeatProtocol && frame.pid == pid && frame.creationFileTime == birth &&
+                    frame.generation == generation && frame.sequence > 0 && frame.sequence <= limit &&
+                    fileName == FileName(frame.sequence) && frame.time > 0 &&
+                    frame.time <= DateTimeOffset.MaxValue.ToUnixTimeMilliseconds() &&
+                    frame.time >= new DateTimeOffset(DateTime.FromFileTimeUtc(Int64.Parse(birth))).ToUnixTimeMilliseconds(),
+                    "Immutable heartbeat filename/content identity, sequence, protocol or time invalid: " + text);
+                return frame;
+            }
+        }
+        public HeartbeatFrame Latest()
+        {
+            string failure = Path.Combine(directory, "immutable-producer-error.json");
+            Require(!File.Exists(failure), "Immutable heartbeat producer failed: " +
+                (File.Exists(failure) ? File.ReadAllText(failure) : "failure receipt"));
+            string[] files = Directory.GetFiles(directory, "heartbeat-*.json");
+            Require(files.Length > 0 && files.Length <= limit, "Immutable heartbeat final frames missing or over lifetime cap.");
+            var present = new HashSet<int>();
+            int latest = 0;
+            foreach (string file in files) {
+                string name = Path.GetFileName(file);
+                var match = Regex.Match(name, "^heartbeat-v1-[1-9][0-9]*-[1-9][0-9]*-g[1-9][0-9]*-s([0-9]{6})\\.json$");
+                Require(match.Success && Int32.TryParse(match.Groups[1].Value, out int sequence) &&
+                    sequence > 0 && sequence <= limit && name == FileName(sequence),
+                    "Immutable heartbeat final filename/sequence/identity invalid: " + name);
+                sequence = Int32.Parse(match.Groups[1].Value);
+                Require(present.Add(sequence), "Duplicate immutable heartbeat sequence.");
+                var info = new FileInfo(file);
+                if (frames.TryGetValue(sequence, out var frame)) {
+                    Require(frame.fileLastWriteTicks == info.LastWriteTimeUtc.Ticks && frame.fileLength == info.Length,
+                        "A published immutable heartbeat frame changed while its fixture was live.");
+                } else {
+                    string text;
+                    using (var stream = OpenHeartbeatSnapshot(file))
+                    using (var reader = new StreamReader(stream, Encoding.UTF8)) { text = reader.ReadToEnd(); }
+                    frame = Parse(text, name);
+                    frame.fileLastWriteTicks = info.LastWriteTimeUtc.Ticks;
+                    frame.fileLength = info.Length;
+                    frames.Add(sequence, frame);
+                }
+                latest = Math.Max(latest, sequence);
+            }
+            Require(present.Count == latest && present.Count == frames.Count,
+                "Immutable heartbeat sequence gap or a published frame removed while live.");
+            return frames[latest];
+        }
+    }
+    static HeartbeatFrame FreshHeartbeat(ImmutableHeartbeatReader reader, out long sampleAt)
+    {
+        var frame = reader.Latest();
+        sampleAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        Require(IsDefaultHeartbeatFresh(reader.pid, frame.pid, frame.time, sampleAt),
+            "Default desktop owned fixture heartbeat is stale: " + JsonSerializer.Serialize(new {
+                frame, sampleAt, ageMilliseconds = sampleAt - frame.time, freshnessLimitMilliseconds = 3000 }));
+        return frame;
+    }
     static Dictionary<string, object> ReadDefaultHeartbeat(ProcessInfo fixture, IntPtr job, IntPtr desktop,
-        string directory, string phase, double? rootElapsedSeconds)
+        ImmutableHeartbeatReader reader, string phase, double? rootElapsedSeconds)
     {
         var sample = new Dictionary<string, object> {
             ["phase"] = phase, ["pid"] = fixture.pid, ["role"] = "default-fixture",
@@ -280,26 +398,23 @@ public static class ViCiDesktop
             ["monotonicClock"] = "native-wrapper-Stopwatch-not-fixture-Node-clock",
             ["monotonicFrequency"] = Stopwatch.Frequency.ToString(),
             ["heartbeatClock"] = "fixture-Node-Date.now",
-            ["rootElapsedSeconds"] = rootElapsedSeconds, ["freshnessLimitMilliseconds"] = 3000
+            ["rootElapsedSeconds"] = rootElapsedSeconds, ["freshnessLimitMilliseconds"] = 3000,
+            ["protocol"] = HeartbeatProtocol, ["frameLimit"] = reader.limit, ["cadenceMilliseconds"] = 250
         };
-        string file = Path.Combine(directory, "default", "heartbeat.json");
-        if (File.Exists(file)) {
-            string text;
-            using (var stream = OpenHeartbeatSnapshot(file))
-            using (var reader = new StreamReader(stream, Encoding.UTF8)) { text = reader.ReadToEnd(); }
-            using (var heartbeat = JsonDocument.Parse(text)) {
-                long at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                long heartbeatAt = heartbeat.RootElement.GetProperty("time").GetInt64();
-                sample["heartbeatPid"] = heartbeat.RootElement.GetProperty("pid").GetUInt32();
-                sample["heartbeatAt"] = heartbeatAt;
-                sample["sampleAt"] = at;
-                sample["ageMilliseconds"] = at - heartbeatAt;
-                sample["heartbeatReadCompletedTicks"] = Stopwatch.GetTimestamp().ToString();
-                sample["fileLastWriteAt"] = new DateTimeOffset(File.GetLastWriteTimeUtc(file)).ToUnixTimeMilliseconds();
-                sample["fileMetadataScope"] = "stat-after-read-may-observe-a-newer-atomic-replacement";
-                sample["heartbeatStatus"] = "read";
-            }
-        } else sample["heartbeatStatus"] = "missing-not-freshness-proof";
+        var frame = FreshHeartbeat(reader, out long at);
+        sample["heartbeatPid"] = frame.pid;
+        sample["heartbeatCreationFileTime"] = frame.creationFileTime;
+        sample["heartbeatGeneration"] = frame.generation;
+        sample["heartbeatSequence"] = frame.sequence;
+        sample["frameCount"] = reader.Count;
+        sample["heartbeatFile"] = frame.fileName;
+        sample["heartbeatAt"] = frame.time;
+        sample["sampleAt"] = at;
+        sample["ageMilliseconds"] = at - frame.time;
+        sample["heartbeatReadCompletedTicks"] = Stopwatch.GetTimestamp().ToString();
+        sample["fileLastWriteAt"] = new DateTimeOffset(new DateTime(frame.fileLastWriteTicks, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+        sample["fileMetadataScope"] = "immutable-final-frame-stat-not-atomic-directory-snapshot";
+        sample["heartbeatStatus"] = "read-immutable-frame";
         bool timesRead = GetProcessTimes(fixture.process, out long created, out long exited, out long kernel, out long user);
         int timesError = timesRead ? 0 : Marshal.GetLastWin32Error();
         sample["processTimesRead"] = timesRead;
@@ -322,11 +437,185 @@ public static class ViCiDesktop
         sample["liveCheckWin32Error"] = waitError;
         sample["liveCheckedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         sample["sampleCompletedTicks"] = Stopwatch.GetTimestamp().ToString();
-        Require(timesRead && membershipRead && member &&
+        Require(timesRead && created.ToString() == reader.birth && membershipRead && member &&
             (waitState == 0 || waitState == WaitTimeout) &&
             (long)sample["liveCheckedAt"] >= (long)sample["snapshotCompletedAt"],
             "Default fixture identity/lifetime observation failed: " + JsonSerializer.Serialize(sample));
         return sample;
+    }
+    static List<string> VerifyInvalidHeartbeats(string directory, HeartbeatFrame identity, List<object> witnesses)
+    {
+        var rejected = new List<string>();
+        foreach (string label in new[] { "missing", "tmp-only", "malformed", "partial-final", "wrong-pid",
+            "wrong-birth", "wrong-generation", "wrong-sequence", "wrong-filename", "sequence-format", "duplicate", "gap",
+            "invalid-time", "invalid-time-type", "wrong-protocol", "duplicate-property", "over-cap", "stale-latest" }) {
+            string target = Path.Combine(directory, "negative-" + label);
+            Directory.CreateDirectory(target);
+            var reader = new ImmutableHeartbeatReader(target, identity.pid, identity.creationFileTime, 1, label == "over-cap" ? 1 : 2);
+            var data = new Dictionary<string, object> { ["protocol"] = HeartbeatProtocol, ["pid"] = identity.pid,
+                ["creationFileTime"] = identity.creationFileTime, ["generation"] = 1, ["sequence"] = 1,
+                ["time"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+            if (label == "wrong-pid") data["pid"] = identity.pid + 1;
+            if (label == "wrong-birth") data["creationFileTime"] = (Int64.Parse(identity.creationFileTime) + 1).ToString();
+            if (label == "wrong-generation") data["generation"] = 2;
+            if (label == "wrong-sequence") data["sequence"] = 0;
+            if (label == "invalid-time") data["time"] = 0;
+            if (label == "invalid-time-type") data["time"] = "invalid";
+            if (label == "wrong-protocol") data["protocol"] = "other";
+            if (label == "gap") data["sequence"] = 2;
+            if (label != "missing") {
+                string name = label == "wrong-filename" ? "heartbeat-v1-invalid.json" : reader.FileName(label == "gap" ? 2 : 1);
+                if (label == "sequence-format") name = name.Replace("s000001.json", "s1.json");
+                if (label == "tmp-only") name = Path.ChangeExtension(name, ".tmp");
+                string text = JsonSerializer.Serialize(data);
+                if (label == "duplicate-property") text = text.Substring(0, text.Length - 1) + ",\"sequence\":1}";
+                File.WriteAllText(Path.Combine(target, name), label == "malformed" || label == "partial-final" ? "{" : text);
+            }
+            if (label == "duplicate" || label == "over-cap" || label == "stale-latest") {
+                data["sequence"] = label == "duplicate" ? 1 : 2;
+                if (label == "stale-latest") data["time"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 3000;
+                File.WriteAllText(Path.Combine(target, reader.FileName(2)), JsonSerializer.Serialize(data));
+            }
+            bool failed = false;
+            try { FreshHeartbeat(reader, out long at); }
+            catch (Exception error) when (error is InvalidOperationException || error is JsonException ||
+                error is KeyNotFoundException || error is FormatException || error is OverflowException) {
+                failed = true;
+                witnesses.Add(new { label, exceptionType = error.GetType().Name, error = error.Message });
+            }
+            Require(failed, "Invalid immutable heartbeat was accepted: " + label);
+            rejected.Add(label);
+        }
+        return rejected;
+    }
+    public static int VerifyImmutableHeartbeats(string executable, string script, string directory, string workingDirectory)
+    {
+        Guard();
+        var clock = Stopwatch.StartNew();
+        var errors = new List<string>();
+        var report = new Dictionary<string, object> { ["protocol"] = HeartbeatProtocol,
+            ["scope"] = "real-default-fixture-publication-and-immutable-reader-not-old-failure-cause-proof",
+            ["readerPid"] = Environment.ProcessId, ["freshnessLimitMilliseconds"] = 3000 };
+        IntPtr desktop = IntPtr.Zero, job = IntPtr.Zero, failureJob = IntPtr.Zero;
+        ProcessInfo fixture = new ProcessInfo(), failureFixture = new ProcessInfo();
+        var overlaps = new List<object>();
+        var heldHandles = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        report["overlaps"] = overlaps;
+        try {
+            desktop = OpenInputDesktop(0, false, ReadSwitch);
+            Win32(desktop != IntPtr.Zero, "Open Default for heartbeat verification");
+            Require(Equal(Name(desktop), "Default"), "Heartbeat verification requires the original Default desktop.");
+            job = NewJob();
+            string target = Path.Combine(directory, "default");
+            Directory.CreateDirectory(target);
+            fixture = Start(job, executable, script, target, "Default", "default", "normal", workingDirectory: workingDirectory,
+                immutableHeartbeatLimit: 120);
+            Win32(GetProcessTimes(fixture.process, out long created, out long exited, out long kernel, out long user),
+                "Read real heartbeat fixture birth");
+            var reader = new ImmutableHeartbeatReader(target, fixture.pid, created.ToString(), 1, 120);
+            WaitReady(fixture, Path.Combine(target, "ready.json"), 20);
+            for (int index = 0; index < 64; index++) {
+                var before = FreshHeartbeat(reader, out long openedAt);
+                using (var stream = OpenHeartbeatSnapshot(Path.Combine(target, before.fileName)))
+                using (var held = new StreamReader(stream, Encoding.UTF8)) {
+                    heldHandles.Add(stream.SafeFileHandle);
+                    long handleOpenedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var atOpen = reader.Latest();
+                    var next = atOpen;
+                    do {
+                        Require(clock.Elapsed.TotalSeconds < 25, "Immutable heartbeat concurrent verification deadline exceeded.");
+                        Require(WaitForSingleObject(fixture.process, 0) == WaitTimeout, "Real heartbeat producer exited during overlap.");
+                        Thread.Sleep(10);
+                        next = FreshHeartbeat(reader, out long observedAt);
+                    } while (next.sequence <= atOpen.sequence);
+                    var old = reader.Parse(held.ReadToEnd(), before.fileName);
+                    Require(old.pid == before.pid && old.creationFileTime == before.creationFileTime &&
+                        old.generation == before.generation && old.sequence == before.sequence && old.time == before.time,
+                        "Held immutable frame changed during real next-frame publication.");
+                    var sample = ReadDefaultHeartbeat(fixture, job, desktop, reader, "concurrent-next-frame", clock.Elapsed.TotalSeconds);
+                    Require((uint)sample["liveCheckWaitState"] == WaitTimeout && (int)sample["visibleWindowCount"] > 0 &&
+                        (int)sample["heartbeatSequence"] > before.sequence,
+                        "Next real fixture frame lacks its live Default window/Job proof.");
+                    overlaps.Add(new { iteration = index, openedAt, handleOpenedAt, knownPublishedSequenceAfterOpen = atOpen.sequence,
+                        oldFrame = old, nextFrame = next, nextProof = sample,
+                        heldHandle = stream.SafeFileHandle.DangerousGetHandle().ToInt64().ToString(),
+                        heldReadCompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+                }
+            }
+            report["producerPid"] = fixture.pid;
+            report["producerCreationFileTime"] = created.ToString();
+            report["completedOverlaps"] = overlaps.Count;
+            report["frameLimit"] = reader.limit;
+            report["finalFrameCount"] = reader.Count;
+            var final = reader.Latest();
+            Require(IsDefaultHeartbeatFresh(fixture.pid, fixture.pid, final.time, final.time + 2999) &&
+                !IsDefaultHeartbeatFresh(fixture.pid, fixture.pid, final.time, final.time + 3000) &&
+                !IsDefaultHeartbeatFresh(fixture.pid, fixture.pid + 1, final.time, final.time),
+                "The immutable protocol lost its actual freshness/PID boundary.");
+            report["freshnessBoundary"] = new { at2999 = true, at3000 = false, wrongPid = false };
+            var negativeWitnesses = new List<object>();
+            report["negativeCases"] = VerifyInvalidHeartbeats(directory, final, negativeWitnesses);
+            report["negativeWitnesses"] = negativeWitnesses;
+            failureJob = NewJob();
+            string failureTarget = Path.Combine(directory, "producer-failure");
+            Directory.CreateDirectory(failureTarget);
+            failureFixture = Start(failureJob, executable, script, failureTarget, "Default", "default", "normal",
+                workingDirectory: workingDirectory, immutableHeartbeatLimit: 1);
+            Win32(GetProcessTimes(failureFixture.process, out long failureCreated, out long failureExited,
+                out long failureKernel, out long failureUser), "Read intended producer failure birth");
+            WaitReady(failureFixture, Path.Combine(failureTarget, "ready.json"), 20);
+            uint state;
+            do {
+                state = WaitForSingleObject(failureFixture.process, 50);
+                Require(state == 0 || state == WaitTimeout, "Producer failure child wait API failed.");
+                Require(clock.Elapsed.TotalSeconds < 25, "Producer failure verification deadline exceeded.");
+            } while (state == WaitTimeout);
+            Win32(GetExitCodeProcess(failureFixture.process, out uint code), "Read intended producer failure exit");
+            using (var failure = JsonDocument.Parse(File.ReadAllText(Path.Combine(failureTarget, "immutable-producer-error.json")))) {
+                Require(code == 1 && failure.RootElement.GetProperty("pid").GetUInt32() == failureFixture.pid &&
+                    failure.RootElement.GetProperty("creationFileTime").GetString() == failureCreated.ToString() &&
+                    failure.RootElement.GetProperty("generation").GetInt32() == 1 &&
+                    failure.RootElement.GetProperty("protocol").GetString() == HeartbeatProtocol &&
+                    failure.RootElement.GetProperty("sequence").GetInt32() == 1 &&
+                    failure.RootElement.GetProperty("error").GetString() == "Immutable heartbeat lifetime frame cap exceeded." &&
+                    Directory.GetFiles(failureTarget, "heartbeat-*.json").Length == 1,
+                    "Producer failure was not the exact intended cap/exit witness.");
+                report["producerFailure"] = new { pid = failureFixture.pid, childExitCode = code,
+                    rawError = failure.RootElement.Clone(), stoppedAfterPublishedFrames = 1 };
+            }
+        } catch (Exception error) { errors.Add(error.ToString()); }
+        finally {
+            bool readersClosed = heldHandles.TrueForAll(handle => handle.IsClosed);
+            report["readerHandlesClosed"] = readersClosed;
+            if (!readersClosed) errors.Add("An immutable heartbeat reader handle survived verification.");
+            CleanupJob(failureJob, errors, report, "producerFailureJobCleanup");
+            CleanupJob(job, errors, report, "defaultJobCleanup");
+            bool handlesClosed = true;
+            foreach (var process in new[] { fixture, failureFixture }) {
+                if (process.process == IntPtr.Zero) continue;
+                if (WaitForSingleObject(process.process, 5000) != 0) errors.Add("Heartbeat fixture did not signal exit after Job cleanup.");
+                if (!CloseHandle(process.process)) {
+                    handlesClosed = false;
+                    errors.Add("Close heartbeat fixture process handle failed: " + Marshal.GetLastWin32Error());
+                }
+            }
+            report["processHandlesClosed"] = handlesClosed;
+            if (desktop != IntPtr.Zero) {
+                bool unchanged = Equal(InputName(), "Default");
+                report["originalDefaultUnchanged"] = unchanged;
+                if (!unchanged) errors.Add("Input desktop changed during heartbeat verification.");
+                bool windowsGone = (fixture.pid == 0 || VisibleWindows(desktop, fixture.pid) == 0) &&
+                    (failureFixture.pid == 0 || VisibleWindows(desktop, failureFixture.pid) == 0);
+                report["fixtureWindowsRemoved"] = windowsGone;
+                if (!windowsGone) errors.Add("Real heartbeat fixture window survived cleanup.");
+                if (!CloseDesktop(desktop)) errors.Add("Close heartbeat Default desktop handle failed: " + Marshal.GetLastWin32Error());
+            }
+            report["elapsedSeconds"] = clock.Elapsed.TotalSeconds;
+            report["errors"] = errors;
+            report["passed"] = errors.Count == 0;
+            Write(directory, "report.json", report);
+        }
+        return errors.Count == 0 ? 0 : 1;
     }
     sealed class ThreadDesktopQuery
     {
@@ -627,7 +916,11 @@ public static class ViCiDesktop
         Stopwatch rootClock = null;
         var descendantDesktops = new Dictionary<string, DesktopObservation>();
         var defaultHeartbeatSamples = new List<object>();
-        if (entry != "probe") report["defaultHeartbeatSamples"] = defaultHeartbeatSamples;
+        if (entry != "probe") {
+            report["defaultHeartbeatSamples"] = defaultHeartbeatSamples;
+            report["rootWallLimitSeconds"] = timeout;
+        }
+        ImmutableHeartbeatReader heartbeatReader = null;
         double lastHeartbeatSampleSeconds = -1;
         try {
             Require(Equal(Name(GetProcessWindowStation()), "WinSta0"), "Only WinSta0 is supported.");
@@ -662,11 +955,21 @@ public static class ViCiDesktop
             string defaultDirectory = Path.Combine(directory, "default");
             Directory.CreateDirectory(defaultDirectory);
             background = Start(defaultJob, executable, script, defaultDirectory, originalName, "default", testCase,
-                "probe", workingDirectory);
+                "probe", workingDirectory, immutableHeartbeatLimit: entry == "probe" ? 0 : (20 + timeout + 10) * 4);
+            if (entry != "probe") {
+                Win32(GetProcessTimes(background.process, out long created, out long exited, out long kernel, out long user),
+                    "Read live Default fixture creation identity");
+                heartbeatReader = new ImmutableHeartbeatReader(defaultDirectory, background.pid, created.ToString(), 1,
+                    (20 + timeout + 10) * 4);
+                report["defaultHeartbeatIdentity"] = new { protocol = HeartbeatProtocol, pid = background.pid,
+                    creationFileTime = created.ToString(), generation = 1, frameLimit = heartbeatReader.limit,
+                    cadenceMilliseconds = 250,
+                    lifetimeBound = "existing-default-ready20-root-inclusive-deadline-and-job-cleanup10" };
+            }
             WaitReady(background, Path.Combine(defaultDirectory, "ready.json"), 20);
             Require(VisibleWindows(original, background.pid) > 0, "Owned default fixture has no visible window.");
             if (entry != "probe") defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original,
-                directory, "before-owned-root", null));
+                heartbeatReader, "before-owned-root", null));
             ownedJob = NewJob();
             Require(entry == "probe" || !File.Exists(Path.Combine(directory, "ready.json")), "Stale harness readiness receipt refused.");
             rootClock = Stopwatch.StartNew();
@@ -692,7 +995,7 @@ public static class ViCiDesktop
                     Require(defaultHeartbeatSamples.Count < 180, "Default heartbeat diagnostic sample bound exceeded.");
                     lastHeartbeatSampleSeconds = rootClock.Elapsed.TotalSeconds;
                     defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original,
-                        directory, "owned-root-running", lastHeartbeatSampleSeconds));
+                        heartbeatReader, "owned-root-running", lastHeartbeatSampleSeconds));
                 }
                 ObserveJobDesktops(ownedJob, ownedName, directory, descendantDesktops);
             });
@@ -736,11 +1039,11 @@ public static class ViCiDesktop
                         "Default desktop owned fixture heartbeat is stale.");
                 }
             } else {
-                var finalHeartbeat = ReadDefaultHeartbeat(background, defaultJob, original, directory,
+                var finalHeartbeat = ReadDefaultHeartbeat(background, defaultJob, original, heartbeatReader,
                     "root-outcome-freshness-check", rootClock.Elapsed.TotalSeconds);
                 report["defaultHeartbeatCheck"] = finalHeartbeat;
                 defaultHeartbeatSamples.Add(finalHeartbeat);
-                Require((string)finalHeartbeat["heartbeatStatus"] == "read" &&
+                Require((string)finalHeartbeat["heartbeatStatus"] == "read-immutable-frame" &&
                     IsDefaultHeartbeatFresh(background.pid, (uint)finalHeartbeat["heartbeatPid"],
                         (long)finalHeartbeat["heartbeatAt"], (long)finalHeartbeat["sampleAt"]) &&
                     (uint)finalHeartbeat["liveCheckWaitState"] == WaitTimeout &&
@@ -760,8 +1063,8 @@ public static class ViCiDesktop
                     if (decision == "restore") Win32(SwitchDesktop(original), "Restore original input desktop");
                     restored = Equal(InputName(), originalName);
                     Require(restored, "Original input desktop restore readback failed.");
-                    if (entry != "probe" && background.process != IntPtr.Zero)
-                        defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original, directory,
+                    if (entry != "probe" && background.process != IntPtr.Zero && heartbeatReader != null)
+                        defaultHeartbeatSamples.Add(ReadDefaultHeartbeat(background, defaultJob, original, heartbeatReader,
                             "after-original-restore-before-job-cleanup", rootClock?.Elapsed.TotalSeconds));
                 } catch (Exception error) { errors.Add(error.Message); }
             }

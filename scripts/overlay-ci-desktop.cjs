@@ -85,6 +85,64 @@ function assertDesktopChain(report, desktop) {
   assert.equal(desktop.windowSeparation, true);
   assert.equal(desktop.defaultFixtureStayedAlive, true);
   assert.equal(desktop.defaultFixtureHeartbeatFresh, true);
+  const defaultIdentity = desktop.defaultHeartbeatIdentity;
+  assert.equal(defaultIdentity?.protocol, 'vi-ci-immutable-heartbeat-v1');
+  assert.equal(defaultIdentity.pid, desktop.defaultPid);
+  assert.notEqual(desktop.defaultPid, desktop.ownedPid);
+  assert.match(defaultIdentity.creationFileTime, /^[1-9][0-9]+$/);
+  assert.equal(defaultIdentity.generation, 1);
+  assert.equal(defaultIdentity.cadenceMilliseconds, 250);
+  assert.ok([35, 60, 150].includes(desktop.rootWallLimitSeconds));
+  assert.equal(defaultIdentity.frameLimit, (20 + desktop.rootWallLimitSeconds + 10) * 4);
+  assert.equal(defaultIdentity.lifetimeBound, 'existing-default-ready20-root-inclusive-deadline-and-job-cleanup10');
+  const defaultSamples = desktop.defaultHeartbeatSamples;
+  assert.ok(Array.isArray(defaultSamples) && defaultSamples.length >= 3 && defaultSamples.length <= 183);
+  assert.equal(defaultSamples[0].phase, 'before-owned-root');
+  assert.equal(defaultSamples.at(-1).phase, 'after-original-restore-before-job-cleanup');
+  let previousDefaultSequence = 0;
+  for (const sample of defaultSamples) {
+    assert.equal(sample.protocol, defaultIdentity.protocol);
+    assert.equal(sample.pid, defaultIdentity.pid);
+    assert.equal(sample.heartbeatPid, defaultIdentity.pid);
+    assert.equal(sample.creationFileTime, defaultIdentity.creationFileTime);
+    assert.equal(sample.heartbeatCreationFileTime, defaultIdentity.creationFileTime);
+    assert.equal(sample.generation, defaultIdentity.generation);
+    assert.equal(sample.heartbeatGeneration, defaultIdentity.generation);
+    assert.equal(sample.frameLimit, defaultIdentity.frameLimit);
+    assert.equal(sample.cadenceMilliseconds, 250);
+    assert.ok(Number.isInteger(sample.heartbeatSequence) && sample.heartbeatSequence > 0 &&
+      sample.heartbeatSequence >= previousDefaultSequence && sample.heartbeatSequence <= sample.frameLimit);
+    assert.equal(sample.frameCount, sample.heartbeatSequence);
+    assert.equal(sample.heartbeatFile, `heartbeat-v1-${sample.pid}-${sample.creationFileTime}-g1-s${String(sample.heartbeatSequence).padStart(6, '0')}.json`);
+    previousDefaultSequence = sample.heartbeatSequence;
+    assert.equal(sample.heartbeatStatus, 'read-immutable-frame');
+    assert.equal(sample.ageMilliseconds, finiteTime(sample.sampleAt) - finiteTime(sample.heartbeatAt));
+    assert.equal(sample.freshnessLimitMilliseconds, 3000);
+    assert.ok(sample.ageMilliseconds < 3000, 'Latest immutable Default heartbeat is stale.');
+    assert.equal(sample.processTimesRead, true);
+    assert.equal(sample.processTimesError, 0);
+    assert.equal(sample.membershipApi, 'IsProcessInJob');
+    assert.equal(sample.membershipRead, true);
+    assert.equal(sample.membershipError, 0);
+    assert.equal(sample.specificDefaultJobMember, true);
+    assert.equal(sample.liveCheckApi, 'WaitForSingleObject');
+    assert.equal(sample.liveCheckWaitState, 258);
+    assert.equal(sample.liveCheckWin32Error, 0);
+    assert.ok(sample.visibleWindowCount > 0);
+    assert.ok(finiteTime(sample.processCreatedAt) <= sample.sampleAt &&
+      sample.sampleAt <= finiteTime(sample.snapshotCompletedAt) &&
+      sample.snapshotCompletedAt <= finiteTime(sample.liveCheckedAt));
+    assert.notEqual(sample.allThreadDesktop, true);
+    assert.notEqual(sample.desktopVerified, true);
+  }
+  assert.ok(defaultSamples.includes(desktop.defaultHeartbeatCheck) ||
+    defaultSamples.some((sample) => sample.phase === 'root-outcome-freshness-check' &&
+      JSON.stringify(sample) === JSON.stringify(desktop.defaultHeartbeatCheck)));
+  assert.equal(desktop.defaultFixtureExit?.pid, defaultIdentity.pid);
+  assert.equal(desktop.defaultFixtureExit.creationFileTime, defaultIdentity.creationFileTime);
+  assert.equal(desktop.defaultFixtureExit.processTimesRead, true);
+  assert.equal(desktop.defaultFixtureExit.processTimesError, 0);
+  assert.ok(finiteTime(desktop.defaultFixtureExit.exitedAt) >= defaultSamples.at(-1).liveCheckedAt);
   const observations = desktop.descendantDesktopObservations;
   function member(pid, birth) {
     assert.ok(Number.isInteger(pid) && pid > 0, 'A required role lacks an actual PID.');
