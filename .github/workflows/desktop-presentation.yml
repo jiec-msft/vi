@@ -1,0 +1,132 @@
+name: Desktop presentation prototype
+on:
+  pull_request:
+    paths:
+      - prototypes/desktop-presentation/**
+      - .github/workflows/desktop-presentation.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-presentation-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  policy:
+    name: Presentation policy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Geometry, capability and lifecycle tests
+        shell: pwsh
+        run: |
+          node --test prototypes/desktop-presentation/presentation.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Presentation policy tests failed.' }
+      - name: Synthetic policy demonstration
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'presentation-report' | Out-Null
+          node prototypes/desktop-presentation/demo.cjs > presentation-report/demo.json
+          if ($LASTEXITCODE -ne 0) { throw 'Presentation demo failed.' }
+          @{
+            schemaVersion = 1
+            evidenceKind = 'synthetic-policy-demo'
+            nativeUiExercised = $false
+            runId = $env:GITHUB_RUN_ID
+            attempt = $env:GITHUB_RUN_ATTEMPT
+            headSha = '${{ github.event.pull_request.head.sha || github.sha }}'
+            runnerOs = '${{ matrix.os }}'
+            arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            osVersion = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+          } | ConvertTo-Json | Set-Content presentation-report/identity.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: presentation-policy-${{ matrix.os }}
+          path: presentation-report/*.json
+          retention-days: 7
+          if-no-files-found: error
+  contracts:
+    name: Native contract metadata (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Compile Windows SDK contracts and probe only own thread
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'presentation-report' | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw 'MSVC installation unavailable.' }
+          $developer = Join-Path $installation 'Common7\Tools\VsDevCmd.bat'
+          & $env:ComSpec /c "call `"$developer`" -no_logo -arch=x64 -host_arch=x64 && cl /nologo /std:c++17 /W4 /WX /EHsc /D_WIN32_WINNT=0x0A00 prototypes\desktop-presentation\contract-probe.cpp /Fopresentation-report\contract-probe.obj /Fepresentation-report\contract-probe.exe /link user32.lib && presentation-report\contract-probe.exe > presentation-report\native.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows contract probe failed.' }
+          & $env:ComSpec /v:on /c "call `"$developer`" -no_logo -arch=x64 -host_arch=x64 && echo !WindowsSDKVersion! > presentation-report\sdk.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows SDK identity failed.' }
+      - name: Compile macOS SDK contracts and check trust without prompting
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir presentation-report
+          xcrun clang++ -std=c++17 -Wall -Wextra -Werror \
+            -mmacosx-version-min=11.0 -framework ApplicationServices \
+            prototypes/desktop-presentation/contract-probe.cpp \
+            -o presentation-report/contract-probe
+          presentation-report/contract-probe > presentation-report/native.json
+          xcrun --show-sdk-version > presentation-report/sdk.txt
+      - name: Validate and identify native metadata (not UI evidence)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Get-Content presentation-report/native.json -Raw | ConvertFrom-Json
+          if ($report.schemaVersion -ne 1 -or $report.evidenceKind -cne 'native-contract-metadata' -or
+              $report.nativeUiExercised -ne $false -or $report.targetTextRead -ne $false) {
+            throw 'Invalid native metadata boundary.'
+          }
+          if ('${{ runner.os }}' -eq 'Windows' -and
+              ($report.queryScope -cne 'own-thread-only' -or $report.dpiContextRestored -ne $true -or
+               $report.shellQueried -ne $false -or $report.uiaContractCompiled -ne $true -or
+               $report.appbarContractCompiled -ne $true)) { throw 'Windows contract assertions failed.' }
+          if ('${{ runner.os }}' -eq 'macOS' -and
+              ($report.permissionPrompted -ne $false -or $report.optionsReleased -ne $true -or
+               $report.axContractCompiled -ne $true)) { throw 'macOS contract assertions failed.' }
+          @{
+            schemaVersion = 1
+            evidenceKind = 'native-contract-metadata'
+            nativeUiExercised = $false
+            runId = $env:GITHUB_RUN_ID
+            attempt = $env:GITHUB_RUN_ATTEMPT
+            headSha = '${{ github.event.pull_request.head.sha || github.sha }}'
+            runnerOs = '${{ matrix.os }}'
+            arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            osVersion = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+            sdkVersion = (Get-Content presentation-report/sdk.txt -Raw).Trim()
+          } | ConvertTo-Json | Set-Content presentation-report/identity.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: presentation-contract-${{ matrix.os }}
+          path: |
+            presentation-report/native.json
+            presentation-report/identity.json
+          retention-days: 7
+          if-no-files-found: error
