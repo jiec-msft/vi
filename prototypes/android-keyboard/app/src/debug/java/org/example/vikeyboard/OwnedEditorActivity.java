@@ -6,6 +6,7 @@ import android.text.InputType;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputConnectionWrapper;
+import android.view.inputmethod.TextAttribute;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -53,6 +54,11 @@ public final class OwnedEditorActivity extends Activity {
                     @Override public boolean commitText(CharSequence value, int cursor) {
                         COMMITS.incrementAndGet();
                         return super.commitText(value, cursor);
+                    }
+                    @android.annotation.TargetApi(33)
+                    @Override public boolean commitText(CharSequence value, int cursor, TextAttribute attribute) {
+                        COMMITS.incrementAndGet();
+                        return super.commitText(value, cursor, attribute);
                     }
                     @Override public boolean performEditorAction(int action) {
                         ACTIONS.incrementAndGet();

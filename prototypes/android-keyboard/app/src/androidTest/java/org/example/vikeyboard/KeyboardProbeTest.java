@@ -11,6 +11,7 @@ import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
 import java.io.File;
 import java.io.FileWriter;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
 import org.junit.Test;
 
@@ -46,7 +47,7 @@ public final class KeyboardProbeTest {
         click("Stop / final");
         waitState("COMMITTED:");
         assertEquals(1, OwnedEditorActivity.COMMITS.get());
-        assertEquals("owned " + FakeProvider.FINAL + " tail", text("owned_normal"));
+        assertEquals("owned " + FakeProvider.FINAL + " tail", text(R.id.owned_normal));
         assertReleased();
         screenshot("03-final-only-commit.png");
 
@@ -55,7 +56,7 @@ public final class KeyboardProbeTest {
         click("Stop / final");
         click("Cancel");
         device.waitForIdle();
-        device.wait(Until.hasObject(By.textStartsWith("CANCELLED:")), 3_000);
+        waitState("CANCELLED:");
         assertReleased();
         assertEquals(1, OwnedEditorActivity.COMMITS.get());
 
@@ -65,7 +66,7 @@ public final class KeyboardProbeTest {
         clickResource("owned_other");
         waitState("CANCELLED:");
         assertReleased();
-        assertEquals("", text("owned_other"));
+        assertEquals("", text(R.id.owned_other));
         assertEquals(1, OwnedEditorActivity.COMMITS.get());
 
         consentAndStart();
@@ -104,6 +105,7 @@ public final class KeyboardProbeTest {
         report.put("editorActions", OwnedEditorActivity.ACTIONS.get());
         report.put("openCaptures", CaptureFactory.OPEN_CAPTURES.get());
         report.put("openProviders", FakeProvider.OPEN_SESSIONS.get());
+        report.put("lastSessionState", device.findObject(By.textStartsWith("CANCELLED:")).getText());
         report.put("cases", "visible IME; consent; selection replacement; duplicate final; cancel; target switch; hide; password; keyboard switch; permission denied");
         try (FileWriter writer = new FileWriter(new File(evidence, "probe.json"))) {
             writer.write(report.toString(2));
@@ -126,8 +128,12 @@ public final class KeyboardProbeTest {
         assertNotNull("Missing editor: " + id, object);
         object.click();
     }
-    private String text(String id) {
-        return device.findObject(By.res(context.getPackageName(), id)).getText();
+    private String text(int id) {
+        AtomicReference<String> value = new AtomicReference<>();
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> value.set(
+                ((android.widget.EditText) OwnedEditorActivity.current.findViewById(id))
+                        .getText().toString()));
+        return value.get();
     }
     private void waitState(String prefix) {
         assertTrue("Missing state: " + prefix,
