@@ -30,7 +30,7 @@ jobs:
           node-version: '24'
       - name: Targeted lifecycle, diagnostics, delivery and native syntax
         run: >-
-          node --test test/framework/caret-indicator.test.cjs
+          node --test --test-concurrency=1 test/framework/caret-indicator.test.cjs
           test/framework/desktop.test.cjs test/framework/native-delivery.test.cjs
           test/framework/diagnostics.test.cjs test/framework/native-diagnostics.test.cjs
           test/framework/native-types.test.cjs prototypes/desktop-presentation/presentation.test.cjs
