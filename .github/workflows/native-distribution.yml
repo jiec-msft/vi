@@ -1,0 +1,72 @@
+name: Neutral native distribution bases
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Same application version for all three neutral targets
+        required: true
+        default: 0.6.4-preview
+        type: string
+      upload_bases:
+        description: Owner has reviewed upstream provider redistribution terms; upload neutral base contents
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  native:
+    name: Neutral base (${{ matrix.os }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+          - { os: macos-15, arch: arm64 }
+    env:
+      DISTRIBUTION_VERSION: ${{ inputs.version }}
+      DISTRIBUTION_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Validate explicit version and native architecture
+        run: node -e "require('./scripts/distribution.cjs').distributionVersion(process.env.DISTRIBUTION_VERSION);if(process.arch!==process.env.DISTRIBUTION_ARCH)throw new Error('Native architecture mismatch.');"
+      - name: Install public locked tools
+        run: npm ci --no-audit --no-fund
+      - name: Public unit contracts
+        run: npm test
+      - name: Compile native helper on the matching host
+        run: node scripts/build-native.cjs
+      - name: Build, seal, archive and verify the actual neutral executable
+        run: node -e "const{spawnSync}=require('node:child_process');const r=spawnSync(process.execPath,['scripts/distribution.cjs',process.env.DISTRIBUTION_VERSION,process.env.DISTRIBUTION_ARCH],{stdio:'inherit'});if(r.error)throw r.error;process.exitCode=r.status===0?0:1;"
+      - name: Save neutral bases, provenance and checksums
+        if: inputs.upload_bases
+        uses: actions/upload-artifact@v4
+        with:
+          name: neutral-base-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            artifacts-ci/distribution/*-neutral.zip
+            artifacts-ci/distribution/authority.json
+            artifacts-ci/distribution/receipt.json
+            artifacts-ci/distribution/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
+      - name: Save receipts only pending provider redistribution approval
+        if: ${{ !inputs.upload_bases }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: neutral-base-receipts-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            artifacts-ci/distribution/authority.json
+            artifacts-ci/distribution/receipt.json
+            artifacts-ci/distribution/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error

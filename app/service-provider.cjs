@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { app } = require('electron');
 const { providerSetup } = require('./provider-error.cjs');
+const { providerOptions } = require('./provider-config.cjs');
+const { instantiateSession } = require('./provider-module.cjs');
 
 function directory() {
   const supplied = app.commandLine.getSwitchValue('provider-dir');
@@ -23,18 +25,13 @@ function createSession() {
 
 function loadSession() {
   const root = directory();
-  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
-  if (manifest.apiVersion !== 1 || manifest.kind !== 'service-provider' ||
-      typeof manifest.entry !== 'string' || /[\\:\x00]/.test(manifest.entry) ||
-      path.posix.isAbsolute(manifest.entry) || manifest.entry.split('/').some((part) => !part || part === '..' || part === '.')) {
-    throw new Error('Invalid provider manifest.');
-  }
-  const options = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
-  const override = readOverride();
-  if (override.endpointOverride) options.endpoint = override.endpointOverride;
-  const factory = require(path.join(root, manifest.entry)).createSession;
-  if (typeof factory !== 'function') throw new Error('Provider session interface unavailable.');
-  return factory(options);
+  const bundled = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  const options = providerOptions({ bundled, override: readOverride(), executable: process.execPath,
+    platform: process.platform, packaged: app.isPackaged,
+    explicitProviderDirectory: Boolean(app.commandLine.getSwitchValue('provider-dir')),
+    explicitConfig: app.commandLine.hasSwitch('provider-config')
+      ? app.commandLine.getSwitchValue('provider-config') : undefined });
+  return instantiateSession(root, options);
 }
 
 module.exports = { providerAvailable, createSession, readOverride };
