@@ -323,6 +323,12 @@ ready 20 s、host absence 2 s、child/reap budgets 不变。事件仅是一次 o
 协议，不代替 actor identity 证明；parent 与 child handle 分别独立清理，cleanup
 故障仍与原 prepare 故障保留。纯控制执行同一 parent completion 与实际生成的 child
 wait 函数，覆盖未验证身份、signal failure、lease expiry、nonzero 与 timeout。
+readiness 的原 20 s／100 ms 条件循环同时等待 ready 文件与本 watch 的真实 client
+start event，而不是退出后才第一次取队列。live CIM 采样后还须核对唯一 start record
+的 PID、parent、session、exe 与 birth 时间；只有两种证明均成立才发 completion。
+当前 CIM 不能替代 event，旧 generation／其它 source／ambiguous event 均不能成为
+proof；退出后的 receipt／actor 检查仍保留。没有新增 sleep、延长 lease 或 exit
+budget；事件未到、进程先退出或 deadline 到期都必须失败，不把诊断补采变成成功。
 execFile 已失败时，partial JSON、缺失／损坏／不匹配的 ACK 或 pipe/commit 不一致
 均继续抛同一个原始 process error；validation error 以非枚举属性另存，公开事件只
 增加固定 rejection stage。只有全部 receipt 验证完成才附 nativeReceipt；Windows

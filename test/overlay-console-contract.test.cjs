@@ -14,5 +14,5 @@ test('console completion, exit and failure witness contracts reject wrong paths 
   const report = JSON.parse(output.trim());
   assert.equal(report.status, 'passed');
   assert.equal(report.scope, 'pure-functions-only-no-registry-or-child-launch');
-  assert.equal(report.checks.length, 21);
+  assert.equal(report.checks.length, 44);
 });

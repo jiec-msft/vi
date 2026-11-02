@@ -49,6 +49,10 @@ function Complete-OverlayConsoleProbe($Probe, $Release, $Report) {
         $Report.probeProcess.exitRequestOutcome = 'identity-unverified'
         throw 'Owned console probe completion requires verified live identity.'
     }
+    if (!$Report.probeProcess.startReceipt.verified) {
+        $Report.probeProcess.exitRequestOutcome = 'start-unverified'
+        throw 'Owned console probe completion requires a verified process-start receipt.'
+    }
     try {
         if (!$Release.Set()) { throw 'Owned console probe completion signal failed.' }
     } catch { $Report.probeProcess.exitRequestOutcome = 'signal-error'; throw }
@@ -128,6 +132,46 @@ function Read-ProcessStarts($identifier, $baseline) {
             createdAt = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null } }
     })
     return @{ starts = $starts; existingParents = $existingParents; capturedAt = [DateTime]::UtcNow.ToString('o') }
+}
+function Wait-OverlayConsoleProbeReady($Probe, $Report, $ProbeFile, $Identifier, $Baseline, $Deadline) {
+    $observation = @{ readinessFile = $false; startObserved = $false; polls = 0 }
+    $Report.probeProcess.readiness = $observation
+    while (!$Probe.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
+        $observation.polls++
+        $observation.readinessFile = Test-Path -LiteralPath $ProbeFile
+        $Report.processStarts = Read-ProcessStarts $Identifier $Baseline
+        $observation.startObserved = [bool] @($Report.processStarts.starts | Where-Object { $_.pid -eq $Probe.Id }).Count
+        if ($observation.readinessFile -and $observation.startObserved -and
+            !$Probe.HasExited -and [DateTime]::UtcNow -lt $Deadline) { return }
+        Start-Sleep -Milliseconds 100
+    }
+    if (!$observation.readinessFile) { throw 'Owned console host probe did not produce a readiness receipt.' }
+    throw 'Owned console probe process-start receipt missing.'
+}
+function Assert-OverlayConsoleProbeStart($Probe, $Report, $Client) {
+    $observation = @{ verified = $false; outcome = 'validating' }
+    $Report.probeProcess.startReceipt = $observation
+    $matches = @($Report.processStarts.starts | Where-Object { $_.pid -eq $Probe.Id })
+    if ($matches.Count -ne 1) {
+        $observation.outcome = 'missing-or-ambiguous'
+        throw 'Owned console probe process-start receipt missing or ambiguous.'
+    }
+    $start = $matches[0]
+    $birth = [DateTime]::MinValue
+    $eventTime = [DateTime]::MinValue
+    if (!$Report.probeProcess.identityVerified -or !(Identity-Key $Client) -or $Probe.HasExited -or
+        $Client.pid -ne $Probe.Id -or $start.parentPid -ne $Client.parentPid -or
+        $null -eq $start.session -or $start.session -ne $Client.session -or $start.exe -ne $Client.exe -or
+        ![DateTime]::TryParse($Client.createdAt, [ref] $birth) -or
+        !$start.observedAt -or ![DateTime]::TryParse($start.observedAt, [ref] $eventTime) -or
+        $eventTime.ToUniversalTime() -lt $birth.ToUniversalTime() -or
+        $eventTime.ToUniversalTime() -gt [DateTime]::UtcNow) {
+        $observation.outcome = 'generation-conflict'
+        throw 'Owned console probe process-start receipt conflicts with live CIM generation.'
+    }
+    $observation.verified = $true
+    $observation.outcome = 'verified-live-generation'
+    $observation.observedAt = $start.observedAt
 }
 
 if ($Mode -eq 'restore') {
@@ -289,10 +333,7 @@ public static class OwnedConsoleProbe {
         scope = 'new console before app or OS mouse input'; windowStyle = 'Normal'; launchAPI = 'Start-Process';
         completionProtocol = 'owned-release-after-live-identity'; releaseLeaseMilliseconds = 5000 }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
-    while (!(Test-Path -LiteralPath $probeFile) -and !$probe.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 100
-    }
-    if (!(Test-Path -LiteralPath $probeFile)) { throw 'Owned console host probe did not produce a readiness receipt.' }
+    Wait-OverlayConsoleProbeReady $probe $report $probeFile $watchId $baselineInventory $deadline
     $report.probe = Get-Content -Raw -LiteralPath $probeFile | ConvertFrom-Json -AsHashtable
     $report.duringProbe = Process-Snapshot
     $hosts = @($report.duringProbe.chains | Where-Object {
@@ -317,6 +358,7 @@ public static class OwnedConsoleProbe {
     $report.probeProcess.parentPid = $hosts[0].chain[1].parentPid
     $report.probeProcess.createdAt = $hosts[0].chain[1].createdAt
     $report.probeProcess.identityVerified = $true
+    Assert-OverlayConsoleProbeStart $probe $report $clientIdentity
     Complete-OverlayConsoleProbe $probe $probeRelease $report
     $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
     $clientIdentity.exitedAt = $report.probeProcess.exitedAt
