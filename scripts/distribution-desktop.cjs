@@ -55,8 +55,10 @@ async function run() {
   await editor.webContents.executeJavaScript(`(() => {
     const field=document.querySelector('textarea');field.value='Prefix  Suffix';field.focus();field.setSelectionRange(7,7);
   })()`);
-  clipboard.write({ text: 'Owned original clipboard', html: '<b>Owned original rich clipboard</b>' });
-  const original = { text: clipboard.readText(), html: clipboard.readHTML() };
+  await clipboard.write({ text: 'Owned original clipboard', html: '<b>Owned original rich clipboard</b>' });
+  const original = { text: await clipboard.readText(), html: await clipboard.readHTML() };
+  assert.equal(original.text, 'Owned original clipboard');
+  assert.match(original.html, /<b>Owned original rich clipboard<\/b>/);
   await driver.warmup();
   report.actualFinalHelperReady = true;
   report.helperPid = driver.driver.process.pid;
@@ -65,7 +67,7 @@ async function run() {
   assert.equal(await driver.paste('Approved final fixture', target), true);
   await until(async () => await editor.webContents.executeJavaScript("document.querySelector('textarea').value") ===
     'Prefix Approved final fixture Suffix', 'one caret paste with unchanged prefix/suffix');
-  assert.deepEqual({ text: clipboard.readText(), html: clipboard.readHTML() }, original);
+  assert.deepEqual({ text: await clipboard.readText(), html: await clipboard.readHTML() }, original);
   report.actualFinalTargetedPaste = true;
   report.actualMixedClipboardRestored = true;
   report.status = 'passed';

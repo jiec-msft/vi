@@ -65,9 +65,9 @@ public sealed class ClipboardSnapshot : IDisposable {
         return new ClipboardPreparationException(code, Marshal.GetLastWin32Error());
     }
     static IntPtr GlobalCopy(IntPtr source, int length) {
+        if (length == 0) throw new ClipboardPreparationException("clipboard-format");
         IntPtr copy = GlobalAlloc(0x42, new UIntPtr((uint)length));
         if (copy == IntPtr.Zero) throw Fault("clipboard-snapshot-failed");
-        if (length == 0) return copy;
         IntPtr input = GlobalLock(source);
         if (input == IntPtr.Zero) { var error = Fault("clipboard-snapshot-failed"); GlobalFree(copy); throw error; }
         try {
@@ -131,12 +131,12 @@ public sealed class ClipboardSnapshot : IDisposable {
                 }
                 SetLastError(0);
                 uint flags = GlobalFlags(data);
-                if (flags == 0x8000) throw new ClipboardPreparationException("clipboard-format");
+                if (flags == 0x8000 || (flags & 0x4000) != 0) throw new ClipboardPreparationException("clipboard-format");
                 SetLastError(0);
                 ulong length = GlobalSize(data).ToUInt64();
                 int error = Marshal.GetLastWin32Error();
                 if (error != 0) throw new ClipboardPreparationException("clipboard-snapshot-failed", error);
-                if (length > 67108864) throw new ClipboardPreparationException("clipboard-format");
+                if (length == 0 || length > 67108864) throw new ClipboardPreparationException("clipboard-format");
                 item.Bytes = length;
                 item.Handle = GlobalCopy(data, (int)length);
             }

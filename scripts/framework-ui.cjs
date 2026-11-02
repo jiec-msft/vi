@@ -159,13 +159,14 @@ async function verifyWindowsPaste() {
     await editor.webContents.executeJavaScript(`(() => {
       const field=document.querySelector('textarea');field.value='Prefix  Suffix';field.focus();field.setSelectionRange(7,7);
     })()`);
-    clipboard.writeText('Owned previous clipboard');
+    await clipboard.writeText('Owned previous clipboard');
+    assert.equal(await clipboard.readText(), 'Owned previous clipboard');
     await driver.warmup();
     const target = await driver.capture();
     assert.equal(await driver.paste('Approved final fixture', target), true);
     await until(async () => await editor.webContents.executeJavaScript("document.querySelector('textarea').value") ===
       'Prefix Approved final fixture Suffix', 'one approved caret paste without replacing surrounding text');
-    assert.equal(clipboard.readText(), 'Owned previous clipboard');
+    assert.equal(await clipboard.readText(), 'Owned previous clipboard');
     report.checks.push('actual-native-approved-caret-paste-once', 'actual-native-clipboard-restored');
   } finally { driver.close(); editor.destroy(); }
 }

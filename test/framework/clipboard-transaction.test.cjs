@@ -13,5 +13,12 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
   { env, encoding: 'utf8', timeout: 20000, maxBuffer: 65536 }));
   assert.equal(report.status, 'passed');
   assert.equal(report.inputEventsSent, 0);
-  assert.equal(report.checks.length, 11);
+  assert.equal(report.checks.length, 13);
+  assert.ok(report.zeroAllocation.Format >= 0xc000);
+  assert.ok((report.zeroAllocation.Flags & 0x4000) !== 0);
+  assert.equal(report.zeroAllocation.Bytes, 0);
+  assert.equal(typeof report.zeroAllocation.SetSucceeded, 'boolean');
+  assert.ok(Number.isInteger(report.zeroAllocation.NativeError) && report.zeroAllocation.NativeError >= 0);
+  assert.equal(report.zeroAllocationOutcome,
+    report.zeroAllocation.SetSucceeded ? 'clipboard-format' : 'native-publication-rejected');
 });

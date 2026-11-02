@@ -23,7 +23,10 @@ native polling 仅保留 drag fallback，不再与 DOM 各自派发 Stop/Cancel�
 Windows paste 在同一个 clipboard lock 内枚举并建立原生 backup，不再依赖
 managed OLE 数据投影/反序列化。已知 bitmap/metafile/palette 按原生类型
 clone；Unicode、rich formats、streams、registered HGLOBAL metadata 保留
-原始 bytes，包括合法零长度 payload。OLE 的 DataObject/Ole Private Data
+原始 backed bytes。空 clipboard（没有格式）和零值 metadata 都有 roundtrip；
+不能把 `GlobalAlloc(GMEM_MOVEABLE, 0)` 产生的 discarded handle 当作可复制的
+空 buffer。discarded/零容量 HGLOBAL 或无法 render 的格式在修改前明确拒绝，
+不填充伪造 bytes 或忽略格式。OLE 的 DataObject/Ole Private Data
 仅为原 owner 的 marshalling bookkeeping，不可移交给新 owner；其它可用
 用户格式仍须保留。owner-specific/non-HGLOBAL/不可保留格式明确失败，不
 清空原剪贴板继续粘贴。上限为 256 formats、单项 64 MiB、总 backup
@@ -57,7 +60,7 @@ Targeted paste 仍经过原有 focus/secure-field/modifier/IME guards，只发�
 不能给旧包改名代替。
 
 CI-only Windows fixture 使用实际 transaction 类测试 empty/Unicode/rich/
-image/zero metadata、暂时/持续占用、不可保留格式、新 copy、early reader
+image/zero-valued metadata、暂时/持续占用、不可保留格式、新 copy、early reader
 和 restore failure；没有向真实用户字段发送输入。framework UI 另用 owned
 editor 验证实际 caret 单次粘贴与 clipboard restore；浮窗检查从原生 desktop
 capture 验证实际 controls pixels、受控越界/resize、renderer failure 及主动
@@ -68,6 +71,19 @@ display notification 是
 synthetic seam，不宣称真实硬件 DPI/monitor/RDP/compositor incident 已复现。
 这些新 gates 需要在 Windows x64/ARM64 CI 实际运行；旧 head 的 green
 packaging receipts 不证明本功能修复通过，也不授权本机交互测试或发布。
+零长度 allocation 有独立的真实 `SetClipboardData` probe（先验证相同 owner
+可发布 backed text/metadata），记录 numeric format、allocation flags/bytes、
+实际 API 返回值与立即捕获的 Win32 error。若系统接受该 discarded handle，
+仍须验证 transaction 在修改前拒绝；若系统拒绝发布，明确记录该原生拒绝，
+不冒称已经 roundtrip。另有真实 delayed/unrenderable producer 的无 mutation
+负例。fixture 的 allocation/lock/set 失败包含 bounded case/stage/format/size/
+nativeError，不输出 payload 或 format names；raw bytes 与 transaction 前
+实际分配的原始 bytes 比较，不假设 `GlobalSize` 等于请求长度。
+参见 [GlobalAlloc 的零长度契约](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalalloc)
+和 [SetClipboardData 的 ownership/返回值](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setclipboarddata)。
+Electron clipboard 的读写在 UI 与 final-extracted gate 中均等待完成；text/HTML
+baseline 必须先验证为实际内容，再检查 targeted paste 后的恢复，不能用 Promise
+对象代替 clipboard 内容。上述契约修正不定位任何历史用户 clipboard 故障。
 
 MIT-licensed application and provider-interface experiments. CI uses a local
 fixture service and synthetic audio; no account or external speech service is

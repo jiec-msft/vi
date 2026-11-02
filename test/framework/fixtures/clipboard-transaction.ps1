@@ -15,41 +15,87 @@ using System.Windows.Forms;
 public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
  public static Func<uint,IntPtr,IntPtr> RealSetter;
- public static int FailAfter=-1, Writes;
+ public static int FailAfter=-1, Writes, CaseId;
  public static IntPtr RestoreSetter(uint format,IntPtr data){
   if(Writes==FailAfter)throw new InvalidOperationException("Controlled restore setter failure.");
   IntPtr result=RealSetter(format,data);if(result!=IntPtr.Zero)Writes++;return result;
  }
- [DllImport("user32.dll")]static extern bool OpenClipboard(IntPtr owner);
+ [DllImport("user32.dll",SetLastError=true)]static extern bool OpenClipboard(IntPtr owner);
  [DllImport("user32.dll")]static extern bool CloseClipboard();
- [DllImport("user32.dll")]static extern bool EmptyClipboard();
- [DllImport("user32.dll")]static extern IntPtr SetClipboardData(uint format,IntPtr data);
+ [DllImport("user32.dll",SetLastError=true)]static extern bool EmptyClipboard();
+ [DllImport("user32.dll",SetLastError=true)]static extern IntPtr SetClipboardData(uint format,IntPtr data);
  [DllImport("user32.dll")]static extern IntPtr GetClipboardData(uint format);
  [DllImport("user32.dll")]public static extern bool IsClipboardFormatAvailable(uint format);
  [DllImport("user32.dll")]static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr wparam,IntPtr lparam);
  public static void RenderAll(IntPtr window){SendMessage(window,0x306,IntPtr.Zero,IntPtr.Zero);}
  [DllImport("user32.dll")]public static extern uint GetClipboardSequenceNumber();
+ [DllImport("user32.dll")]public static extern int CountClipboardFormats();
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern uint RegisterClipboardFormat(string name);
- [DllImport("kernel32.dll")]static extern IntPtr GlobalAlloc(uint flags,UIntPtr size);
- [DllImport("kernel32.dll")]static extern IntPtr GlobalLock(IntPtr data);
+ [DllImport("kernel32.dll")]static extern void SetLastError(uint error);
+ [DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr GlobalAlloc(uint flags,UIntPtr size);
+ [DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr GlobalLock(IntPtr data);
+ [DllImport("kernel32.dll")]static extern uint GlobalFlags(IntPtr data);
  [DllImport("kernel32.dll")]static extern bool GlobalUnlock(IntPtr data);
  [DllImport("kernel32.dll")]static extern UIntPtr GlobalSize(IntPtr data);
  [DllImport("kernel32.dll")]static extern IntPtr GlobalFree(IntPtr data);
  public OwnedClipboardFixture(){CreateHandle(new CreateParams{Parent=new IntPtr(-3)});}
- public void Put(uint[] formats,byte[][] payloads){
-  if(!OpenClipboard(Handle))throw new Exception("Owned fixture clipboard lock failed.");
+ static Exception Failure(string stage,uint format,int bytes,int error){
+  return new Exception("Owned fixture failure: case="+CaseId+", stage="+stage+
+   ", format="+format+", bytes="+bytes+", nativeError="+error+".");
+ }
+ public sealed class ZeroContract {
+  public uint Format, Flags;
+  public ulong Bytes;
+  public bool SetSucceeded;
+  public int NativeError;
+ }
+ public ZeroContract ProbeZero(uint format){
+  if(format<0xc000)throw new Exception("Owned registered format was not created.");
+  if(!OpenClipboard(Handle))throw Failure("zero-open",format,0,Marshal.GetLastWin32Error());
+  IntPtr memory=IntPtr.Zero;
   try{
-   if(!EmptyClipboard())throw new Exception("Owned fixture reset failed.");
+   if(!EmptyClipboard())throw Failure("zero-empty",format,0,Marshal.GetLastWin32Error());
+   memory=GlobalAlloc(0x42,UIntPtr.Zero);
+   if(memory==IntPtr.Zero)throw Failure("zero-allocate",format,0,Marshal.GetLastWin32Error());
+   var result=new ZeroContract{Format=format,Flags=GlobalFlags(memory),Bytes=GlobalSize(memory).ToUInt64()};
+   SetLastError(0);
+   IntPtr written=SetClipboardData(format,memory);
+   result.NativeError=Marshal.GetLastWin32Error();
+   result.SetSucceeded=written!=IntPtr.Zero;
+   if(result.SetSucceeded)memory=IntPtr.Zero;
+   Console.Error.WriteLine("Owned zero allocation contract: case="+CaseId+", format="+format+
+    ", bytes="+result.Bytes+", flags="+result.Flags+", setSucceeded="+result.SetSucceeded+
+    ", nativeError="+result.NativeError+".");
+   return result;
+  }finally{if(memory!=IntPtr.Zero)GlobalFree(memory);CloseClipboard();}
+ }
+ public void AdvertiseUnrenderable(uint format){
+  Put(new uint[0],new byte[0][]);
+  if(!OpenClipboard(Handle))throw Failure("delayed-open",format,0,Marshal.GetLastWin32Error());
+  try{
+   SetLastError(0);SetClipboardData(format,IntPtr.Zero);
+   int error=Marshal.GetLastWin32Error();
+   if(error!=0)throw Failure("delayed-advertise",format,0,error);
+   if(!IsClipboardFormatAvailable(format))throw new Exception("Owned delayed format was not advertised.");
+  }finally{CloseClipboard();}
+ }
+ public void Put(uint[] formats,byte[][] payloads){
+  if(!OpenClipboard(Handle))throw Failure("open",0,0,Marshal.GetLastWin32Error());
+  try{
+   if(!EmptyClipboard())throw Failure("empty",0,0,Marshal.GetLastWin32Error());
    foreach(var memory in privateMemory)GlobalFree(memory);privateMemory.Clear();
    for(int i=0;i<formats.Length;i++){
     IntPtr memory=GlobalAlloc(0x42,new UIntPtr((uint)payloads[i].Length));
-    if(memory==IntPtr.Zero)throw new Exception("Owned fixture allocation failed.");
+    if(memory==IntPtr.Zero)throw Failure("allocate",formats[i],payloads[i].Length,Marshal.GetLastWin32Error());
     if(payloads[i].Length>0){
      IntPtr pointer=GlobalLock(memory);
-     if(pointer==IntPtr.Zero)throw new Exception("Owned fixture memory lock failed.");
+     if(pointer==IntPtr.Zero){int error=Marshal.GetLastWin32Error();GlobalFree(memory);throw Failure("lock",formats[i],payloads[i].Length,error);}
      try{Marshal.Copy(payloads[i],0,pointer,payloads[i].Length);}finally{GlobalUnlock(memory);}
     }
-    if(SetClipboardData(formats[i],memory)==IntPtr.Zero){GlobalFree(memory);throw new Exception("Owned fixture write failed.");}
+    SetLastError(0);
+    IntPtr written=SetClipboardData(formats[i],memory);
+    int nativeError=Marshal.GetLastWin32Error();
+    if(written==IntPtr.Zero){GlobalFree(memory);throw Failure("set-data",formats[i],payloads[i].Length,nativeError);}
     if(formats[i]>=0x200&&formats[i]<=0x2ff)privateMemory.Add(memory);
    }
   }finally{CloseClipboard();}
@@ -85,6 +131,13 @@ function Fault-Code($Exception){
     if($Exception -is [ViClipboard.ClipboardPreparationException]){return $Exception.Code}
     throw $Exception
 }
+function Read-Mixed($Fixture,$Metadata,$Rich){
+    return @{
+        text=[Convert]::ToBase64String($Fixture.Read(13))
+        metadata=[Convert]::ToBase64String($Fixture.Read($Metadata))
+        rich=[Convert]::ToBase64String($Fixture.Read($Rich))
+    }
+}
 $fixture=[OwnedClipboardFixture]::new()
 $text=[Text.Encoding]::Unicode.GetBytes("Owned Unicode sample`0")
 $html=[Text.Encoding]::UTF8.GetBytes('Owned synthetic HTML fragment')
@@ -92,25 +145,63 @@ $format=[OwnedClipboardFixture]::RegisterClipboardFormat('VI synthetic metadata'
 $rich=[OwnedClipboardFixture]::RegisterClipboardFormat('HTML Format')
 $checks=[Collections.Generic.List[string]]::new()
 try{
+    [OwnedClipboardFixture]::CaseId=1
+    $fixture.Put([uint32[]]@(13,$format),[byte[][]]@($text,[byte[]]@(0)))
+    Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned Unicode sample') 'Native publication positive control failed.'
+    Check ($fixture.Read($format).Length -ge 1 -and $fixture.Read($format)[0] -eq 0) 'Backed zero-valued metadata positive control failed.'
+    $zero=$fixture.ProbeZero($format)
+    Check (($zero.Flags -band 0x4000) -ne 0 -and $zero.Bytes -eq 0) 'Zero allocation was not the documented discarded handle.'
+    $zeroOutcome='native-publication-rejected'
+    if($zero.SetSucceeded){
+        $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+        $transaction=[TranscriptClipboard]::new()
+        try{
+            $failed=$false
+            try{$transaction.Begin('Must not replace discarded data')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
+            Check $failed 'Published discarded metadata was not rejected.'
+            Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Discarded metadata rejection changed the clipboard.'
+            Check ([OwnedClipboardFixture]::IsClipboardFormatAvailable($format)) 'Discarded metadata was removed.'
+        }finally{$transaction.Dispose()}
+        $zeroOutcome='clipboard-format'
+    }
+    $checks.Add('zero-allocation-real-setclipboarddata-contract-recorded')
+    [OwnedClipboardFixture]::CaseId=2
+    $fixture.AdvertiseUnrenderable($format)
+    $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+    $transaction=[TranscriptClipboard]::new()
+    try{
+        $failed=$false
+        try{$transaction.Begin('Must not replace unrenderable data')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
+        Check $failed 'Unbacked delayed metadata was not rejected.'
+        Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Unrenderable metadata rejection changed the clipboard.'
+        Check ([OwnedClipboardFixture]::IsClipboardFormatAvailable($format)) 'Unrenderable metadata was removed.'
+    }finally{$transaction.Dispose()}
+    $checks.Add('unbacked-metadata-fails-closed-without-mutation')
     foreach($empty in @($false,$true)){
+        [OwnedClipboardFixture]::CaseId=3+[int]$empty
         if($empty){$fixture.Put([uint32[]]@(),[byte[][]]@())}
-        else{$fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(),$html))}
+        else{
+            $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(0),$html))
+            $expected=Read-Mixed $fixture $format $rich
+        }
         $transaction=[TranscriptClipboard]::new()
         try{
             $transaction.Begin('Approved fixture result')
             Check ([Windows.Forms.Clipboard]::GetText() -eq 'Approved fixture result') 'Delayed render did not expose the approved text.'
             $transaction.Restore()
-            if($empty){Check ([Windows.Forms.Clipboard]::GetText() -eq '') 'Empty clipboard was not restored.'}
+            if($empty){Check ([OwnedClipboardFixture]::CountClipboardFormats() -eq 0) 'Empty clipboard formats were not restored.'}
             else{
-                Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Unicode bytes changed.'
-                Check ($fixture.Read($format).Length -eq 0) 'Empty registered metadata was lost.'
-                Check ([Convert]::ToBase64String($fixture.Read($rich)) -eq [Convert]::ToBase64String($html)) 'Rich format bytes changed.'
+                $restored=Read-Mixed $fixture $format $rich
+                Check ($restored.text -eq $expected.text) 'Unicode bytes changed.'
+                Check ($restored.metadata -eq $expected.metadata) 'Zero-valued registered metadata bytes changed.'
+                Check ($restored.rich -eq $expected.rich) 'Rich format bytes changed.'
             }
         }finally{$transaction.Dispose()}
-        if($empty){Check ([Windows.Forms.Clipboard]::GetText() -eq '') 'Disposal reintroduced the temporary transcript.'}
-        else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Disposal changed the restored Unicode bytes.'}
+        if($empty){Check ([OwnedClipboardFixture]::CountClipboardFormats() -eq 0) 'Disposal reintroduced clipboard formats.'}
+        else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expected.text) 'Disposal changed the restored Unicode bytes.'}
     }
-    $checks.Add('empty-unicode-rich-zero-metadata-native-roundtrip')
+    $checks.Add('empty-unicode-rich-zero-valued-metadata-native-roundtrip')
+    [OwnedClipboardFixture]::CaseId=5
     $ole=[Windows.Forms.DataObject]::new()
     $ole.SetText('Owned OLE text',[Windows.Forms.TextDataFormat]::UnicodeText)
     $ole.SetData([Windows.Forms.DataFormats]::Rtf,$false,'{\rtf1 Owned OLE rich text}')
@@ -121,6 +212,7 @@ try{
     Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned OLE text') 'Actual OLE text producer was not preserved.'
     Check ([Windows.Forms.Clipboard]::GetDataObject().GetData([Windows.Forms.DataFormats]::Rtf,$false) -eq '{\rtf1 Owned OLE rich text}') 'Actual OLE RTF producer was not preserved.'
     $checks.Add('actual-managed-ole-rich-producer')
+    [OwnedClipboardFixture]::CaseId=6
     $virtual=[Windows.Forms.DataObject]::new()
     $virtual.SetText('Owned virtual file fallback text')
     $virtual.SetData('FileGroupDescriptorW',$false,[IO.MemoryStream]::new([byte[]]@(1,0,0,0)))
@@ -135,6 +227,7 @@ try{
         Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Rejected OLE producer was modified.'
     }finally{$transaction.Dispose()}
     $checks.Add('ole-virtual-file-contract-fails-closed-before-data-access')
+    [OwnedClipboardFixture]::CaseId=7
     $bitmap=[Drawing.Bitmap]::new(8,8)
     $bitmap.SetPixel(3,3,[Drawing.Color]::FromArgb(255,17,99,201))
     try{
@@ -146,11 +239,15 @@ try{
         finally{$image.Dispose()}
     }finally{$bitmap.Dispose()}
     $checks.Add('image-pixel-preservation')
+    [OwnedClipboardFixture]::CaseId=8
     $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+    $expectedText=[Convert]::ToBase64String($fixture.Read(13))
     $fixture.Hold(80)
     $transaction=[TranscriptClipboard]::new()
     try{$transaction.Begin('Approved after transient lock');$transaction.Restore()}finally{$transaction.Dispose()}
+    Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Transient lock recovery changed clipboard bytes.'
     $checks.Add('transient-lock-recovers-without-content-loss')
+    [OwnedClipboardFixture]::CaseId=9
     $fixture.Hold(600)
     $transaction=[TranscriptClipboard]::new()
     try{
@@ -159,8 +256,9 @@ try{
         Check $failed 'Persistent lock was not classified busy.'
     }finally{$transaction.Dispose()}
     Start-Sleep -Milliseconds 650
-    Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Busy failure changed clipboard bytes.'
+    Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Busy failure changed clipboard bytes.'
     $checks.Add('busy-fails-closed')
+    [OwnedClipboardFixture]::CaseId=10
     $fixture.Put([uint32[]]@(13,0x200),[byte[][]]@($text,[byte[]]@(1,2,3)))
     $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
     $transaction=[TranscriptClipboard]::new()
@@ -171,6 +269,7 @@ try{
         Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Unsupported-format failure changed the clipboard.'
     }finally{$transaction.Dispose()}
     $checks.Add('unsupported-format-fails-without-mutation')
+    [OwnedClipboardFixture]::CaseId=11
     $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
     $transaction=[TranscriptClipboard]::new()
     try{
@@ -186,6 +285,7 @@ try{
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New user copy') 'A newer clipboard copy was overwritten.'
     }finally{$transaction.Dispose()}
     $checks.Add('early-reader-and-new-copy-win')
+    [OwnedClipboardFixture]::CaseId=12
     $transaction=[TranscriptClipboard]::new()
     try{
         $transaction.Begin('Approved restore failure result')
@@ -204,7 +304,9 @@ try{
     $original=$setter.GetValue($null)
     [OwnedClipboardFixture]::RealSetter=$original
     foreach($after in @(0,1)){
-        $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(),$html))
+        [OwnedClipboardFixture]::CaseId=13+$after
+        $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(0),$html))
+        $expected=Read-Mixed $fixture $format $rich
         $transaction=[TranscriptClipboard]::new()
         try{
             $transaction.Begin('Approved partial restore fixture')
@@ -219,15 +321,17 @@ try{
             Check ($sequence -eq [OwnedClipboardFixture]::GetClipboardSequenceNumber()) 'Own partial restoration was not attributed under the lock.'
             [OwnedClipboardFixture]::RenderAll($transaction.Handle)
             if($after -eq 0){Check (-not [OwnedClipboardFixture]::IsClipboardFormatAvailable(13)) 'Late rendering reintroduced temporary transcript data.'}
-            else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Late rendering changed the restored first format.'}
+            else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expected.text) 'Late rendering changed the restored first format.'}
             $setter.SetValue($null,$original)
             [TranscriptClipboard]::RecoverPending()
-            Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Mid-restore recovery lost the original Unicode bytes.'
-            Check ($fixture.Read($format).Length -eq 0) 'Mid-restore recovery lost zero metadata.'
-            Check ([Convert]::ToBase64String($fixture.Read($rich)) -eq [Convert]::ToBase64String($html)) 'Mid-restore recovery lost rich bytes.'
+            $restored=Read-Mixed $fixture $format $rich
+            Check ($restored.text -eq $expected.text) 'Mid-restore recovery lost the original Unicode bytes.'
+            Check ($restored.metadata -eq $expected.metadata) 'Mid-restore recovery lost zero-valued metadata bytes.'
+            Check ($restored.rich -eq $expected.rich) 'Mid-restore recovery lost rich bytes.'
         }finally{$setter.SetValue($null,$original);$transaction.Dispose()}
     }
     $checks.Add('actual-empty-and-first-format-restore-faults-recover-all-original-bytes')
+    [OwnedClipboardFixture]::CaseId=15
     $fixture.Put([uint32[]]@(13,$rich),[byte[][]]@($text,$html))
     $transaction=[TranscriptClipboard]::new()
     try{
@@ -242,5 +346,5 @@ try{
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New external copy wins') 'Deferred backup overwrote a genuinely newer external copy.'
     }finally{$setter.SetValue($null,$original);$transaction.Dispose()}
     $checks.Add('external-new-copy-wins-after-partial-restore')
-    @{status='passed';checks=@($checks);clipboardData='CI-owned synthetic only';inputEventsSent=0}|ConvertTo-Json -Compress
+    @{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}|ConvertTo-Json -Compress
 }finally{$fixture.Dispose()}
