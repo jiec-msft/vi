@@ -282,7 +282,14 @@ native privacy/content fixture 复用已有真实 writer fixture，先等 initia
 exit 或 fixture ACK deadline 都明确失败。生产 checkpoint 25 ms／flush 200 ms
 及失败通知不变，不把缺文件当空日志，不清除 warning。
 
-Windows UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/focus 状态；
+Overlay recovery UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/focus 状态；
+Framework UI 的 setup 先等待真实 native helper READY，再仅对该 CI 进程的可见、
+focusable main/editor window 做最多 5 s 的显式 foreground acquisition。只有实际
+capture 的 PID 与精确 HWND 都匹配、且 owned renderer ready 才建立 baseline；
+foreign／zero owner 和 Electron-only focus 不构成成功，late/stalled capture 明确失败。
+诊断只保留固定 phase、次数、owner 分类、window-match／renderer-ready 与失败类别。
+这不是 overlay 的 refocus 能力：baseline 建立之后的 bounds／renderer recovery
+检查仍只观察并断言，不重新激活窗口，不调整 foreground lock 或系统策略。
 每个 overlay recovery 边界仍须由真实 native capture 确认 foreground PID/HWND
 未变，不通过再次 focus 或移除断言掩盖问题。物理 Stop/Cancel 的 held case
 必须在按住及 native suspension 期间保持 recording 且零 action，实际释放后

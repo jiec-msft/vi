@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { recordDesktop } = require('./desktop-evidence.cjs');
 const { fiveMarkersVisible } = require('./visible-markers.cjs');
 const { DesktopInput } = require('../app/desktop.cjs');
+const { acquireOwnedForeground } = require('./owned-foreground.cjs');
 
 if (process.argv.find((arg) => arg.startsWith('--ci-mode=')) !== '--ci-mode=framework-ui' ||
     !process.env.VI_OUTPUT || !process.env.VI_PROVIDER_DIR) {
@@ -105,11 +106,27 @@ async function confirmOwnedFocus(driver, phase) {
     `${phase}: native foreground must remain the owned settings HWND.`);
   (report.focusChecks ||= []).push({ phase, ownerVerified: true, nativeForegroundVerified: true });
 }
+async function establishOwnedFocus(driver, window, phase, rendererReady) {
+  report.stage = phase;
+  const acquisition = { phase, budgetMs: 5000, attempts: 0, state: 'warming', nativeOwner: 'unobserved' };
+  (report.focusAcquisitions ||= []).push(acquisition);
+  try {
+    const target = await acquireOwnedForeground({ driver, window, ownerPid: process.pid, rendererReady,
+      onAttempt: (value) => Object.assign(acquisition, value, { state: 'acquiring' }) });
+    acquisition.state = 'verified';
+    return target;
+  } catch (error) {
+    acquisition.state = 'failed';
+    acquisition.failure = ['owned-focus-timeout', 'owned-focus-unavailable'].includes(error.code) ? error.code : 'native-error';
+    throw error;
+  }
+}
 async function verifyWindowsOverlay(driver) {
   if (process.platform !== 'win32') return;
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-  mainWindow.focus();
+  await establishOwnedFocus(driver, mainWindow, 'overlay-owned-foreground-baseline', async () =>
+    BrowserWindow.getFocusedWindow() === mainWindow && !mainWindow.webContents.isLoading() && await evaluate('document.hasFocus()'));
   await confirmOwnedFocus(driver, 'overlay-owned-foreground-baseline');
   const overlay = BrowserWindow.getAllWindows().find((item) => item.webContents.getURL().endsWith('/overlay.html'));
   assert.ok(overlay);
@@ -169,17 +186,16 @@ async function verifyWindowsPaste(driver) {
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   try {
     await editor.loadURL('data:text/html,<textarea aria-label="Owned synthetic text" style="width:95%;height:90%"></textarea>');
-    editor.show(); editor.focus();
+    editor.show();
     await editor.webContents.executeJavaScript(`(() => {
       const field=document.querySelector('textarea');field.value='Prefix  Suffix';field.focus();field.setSelectionRange(7,7);
     })()`);
     await clipboard.writeText('Owned previous clipboard');
     assert.equal(await clipboard.readText(), 'Owned previous clipboard');
-    await driver.warmup();
-    await until(async () => BrowserWindow.getFocusedWindow() === editor &&
-      await editor.webContents.executeJavaScript("document.hasFocus() && document.activeElement.tagName === 'TEXTAREA'"),
-    'owned editor renderer and focus readiness', 5000);
-    const target = await driver.capture();
+    const target = await establishOwnedFocus(driver, editor, 'owned-editor-foreground-baseline', async () =>
+      BrowserWindow.getFocusedWindow() === editor &&
+      await editor.webContents.executeJavaScript("document.hasFocus() && document.activeElement.tagName === 'TEXTAREA'"));
+    report.stage = 'owned-native-caret-paste';
     assert.equal(target.pid, process.pid, 'Only the CI-owned editor may receive this paste.');
     assert.equal(target.window, editor.getNativeWindowHandle().readBigUInt64LE().toString(),
       'Native target must match the CI-owned editor HWND.');
