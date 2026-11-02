@@ -1,7 +1,13 @@
-param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Zip)
+param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Zip,
+    [ValidateSet('create','extract')][string]$Action='create')
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.IO.Compression
 $Root=[IO.Path]::GetFullPath($Root)
+if($Action -eq 'extract'){
+    if(Test-Path -LiteralPath $Root){throw 'Fresh distribution extraction requires a new directory.'}
+    Expand-Archive -LiteralPath $Zip -DestinationPath $Root -ErrorAction Stop
+    exit
+}
 if(Test-Path -LiteralPath $Zip){throw 'Distribution archives must be new files.'}
 if(@(Get-ChildItem -LiteralPath $Root -Recurse -Force | Where-Object {
     $_.Attributes -band [IO.FileAttributes]::ReparsePoint

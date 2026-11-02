@@ -181,14 +181,19 @@ Electron 45 的 npm package 可以在首次调用公开 `require('electron')` lo
 receipt 同时记录输入 Electron executable hash 与最终输出 hash；
 不接受 dist override、另一份 runtime 或缺失 binary 的 fallback。
 
-Windows producer 在 PowerShell 7 runner shell 的 Node 子进程内启动
-inbox Windows PowerShell 5.1。两者 module runtime 不可混用：Node 会继承
-PS7 的 `PSModulePath`，但不会执行 PS7 直接启动 `powershell.exe` 时的
-路径转换。producer 因此只对子进程指定系统 Windows PowerShell executable
-和 inbox module path，并显式预检 Security/Archive manifest、cmdlet 来源
-与 Desktop edition；receipt 记录实际 toolchain。该设置同时覆盖 version、
-archive 与 extraction 命令，不修改 runner 全局环境，也不传给应用进程。
+Windows producer 固定使用标准 native runner 的 PowerShell 7
+`ProgramFiles/PowerShell/7/pwsh.exe`，没有 legacy PowerShell fallback。
+版本编辑、读取、archive 和 extraction 共用同一 native Core engine、
+隔离的 inbox module path 和 `-File` 参数边界，不修改 runner 全局环境，
+也不传给应用进程。应用的 desktop helper 不因此更换 engine。
+preflight 验证实际 engine 架构、Core edition，以及 cmdlet/function 的
+实现文件：Security binary assembly 正常位于 engine 根目录，
+Archive function 则来自该 engine 的 inbox `.psm1`。不能假设所有
+`ModuleBase` 都在 `Modules` 子目录，也不能仅凭一个字符串目录前缀放行。
+原始 toolchain JSON 在断言前保存，receipt 记录通过验证的来源。
 签名拒绝、numeric version、完整解包和逐文件 hash gate 均保持不变。
+legacy engine 的空输出超时本身不能定位在 startup、import 或其它阶段；
+不能据此归责机器或推断生产 app 行为。
 相关启动规则见
 <https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath>。
 

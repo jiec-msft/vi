@@ -4,39 +4,77 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
-const { distributionVersion, childEnv, electronDistribution, windowsPowerShellContext } = require('../scripts/distribution.cjs');
+const { fileInventory } = require('../scripts/distribution-files.cjs');
+const { distributionVersion, childEnv, electronDistribution, packagingShellContext,
+  validatePackagingShell, probePackagingShell } = require('../scripts/distribution.cjs');
 
-test('Windows packaging isolates inbox PowerShell modules from a PowerShell Core parent', () => {
-  const systemRoot = path.resolve('synthetic-windows');
-  const supplied = { SystemRoot: systemRoot, PATH: 'synthetic-path',
-    PSModulePath: 'synthetic-Core-modules', PSMODULEPATH: 'another-Core-path',
+test('Windows packaging uses the native runner PowerShell family with an isolated module path', () => {
+  const programFiles = path.resolve('synthetic-program-files');
+  const supplied = { ProgramFiles: programFiles, PATH: 'synthetic-path',
+    PSModulePath: 'synthetic-foreign-modules', PSMODULEPATH: 'another-foreign-path',
     NODE_OPTIONS: 'tool-parent-setting' };
   const original = { ...supplied };
-  const context = windowsPowerShellContext(supplied);
-  const home = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0');
-  assert.equal(context.executable, path.join(home, 'powershell.exe'));
+  const context = packagingShellContext(supplied);
+  const home = path.join(programFiles, 'PowerShell', '7');
+  assert.equal(context.executable, path.join(home, 'pwsh.exe'));
   assert.equal(context.env.PSModulePath, path.join(home, 'Modules'));
   assert.deepEqual(Object.keys(context.env).filter((name) => name.toUpperCase() === 'PSMODULEPATH'), ['PSModulePath']);
   assert.equal(context.env.PATH, supplied.PATH);
   assert.deepEqual(supplied, original, 'The tool context changed its parent process environment.');
-  assert.throws(() => windowsPowerShellContext({}), /SystemRoot/);
-  assert.throws(() => windowsPowerShellContext({ SystemRoot: 'relative' }), /absolute/);
+  assert.throws(() => packagingShellContext({}), /ProgramFiles/);
+  assert.throws(() => packagingShellContext({ ProgramFiles: 'relative' }), /absolute/);
   const app = childEnv('synthetic-profile');
   assert.ok(!Object.keys(app).some((name) => name.toUpperCase() === 'PSMODULEPATH'));
 });
 
-test('Windows packaging can load actual inbox cmdlets with an incompatible parent module path', {
+test('binary cmdlets may live in the engine root while archive functions must retain their exact script origin', () => {
+  const context = packagingShellContext({ ProgramFiles: path.resolve('synthetic-program-files') });
+  const home = path.dirname(context.executable);
+  const toolchain = { edition: 'Core', architecture: 'arm64', engineDirectory: home,
+    securityCommand: 'Microsoft.PowerShell.Security', archiveCommand: 'Microsoft.PowerShell.Archive',
+    securityModule: home, archiveModule: path.join(home, 'Modules', 'Microsoft.PowerShell.Archive'),
+    securityAssembly: path.join(home, 'Microsoft.PowerShell.Security.dll'),
+    archiveScript: path.join(home, 'Modules', 'Microsoft.PowerShell.Archive', 'Microsoft.PowerShell.Archive.psm1') };
+  validatePackagingShell(toolchain, context, 'arm64');
+  for (const change of [{ securityAssembly: path.join(home, 'other.dll') },
+    { archiveScript: path.resolve('foreign.psm1') }, { engineDirectory: path.dirname(home) },
+    { edition: 'Desktop' }, { architecture: 'x64' }]) {
+    assert.throws(() => validatePackagingShell({ ...toolchain, ...change }, context, 'arm64'));
+  }
+});
+
+test('Windows native packaging probe loads and validates the real selected cmdlet implementations', {
   skip: process.platform !== 'win32',
 }, () => {
-  const context = windowsPowerShellContext({ ...process.env, PSModulePath: path.resolve('synthetic-Core-only-modules') });
-  const result = JSON.parse(execFileSync(context.executable, ['-NoProfile', '-NonInteractive', '-Command',
-    "$s=Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -PassThru -ErrorAction Stop; " +
-    "$a=Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Archive\\Microsoft.PowerShell.Archive.psd1') -PassThru -ErrorAction Stop; " +
-    '@{edition=$PSVersionTable.PSEdition;security=(Get-Command Get-AuthenticodeSignature -ErrorAction Stop).ModuleName;' +
-    'archive=(Get-Command Expand-Archive -ErrorAction Stop).ModuleName}|ConvertTo-Json -Compress'],
-  { env: context.env, encoding: 'utf8', timeout: 15000 }));
-  assert.deepEqual(result, { edition: 'Desktop', security: 'Microsoft.PowerShell.Security',
-    archive: 'Microsoft.PowerShell.Archive' });
+  const supplied = { ...process.env, PSModulePath: path.resolve('synthetic-foreign-modules') };
+  const context = packagingShellContext(supplied);
+  validatePackagingShell(probePackagingShell(supplied), context, process.arch);
+});
+
+test('Windows native packaging archive scripts preserve bytes through whitespace-safe file arguments', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vi archive contract ')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const payload = path.join(root, 'payload with spaces');
+  fs.mkdirSync(path.join(payload, 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(payload, 'regular file.txt'), 'Synthetic archive content.');
+  fs.writeFileSync(path.join(payload, '.metadata'), Buffer.from([0, 1, 255]));
+  fs.writeFileSync(path.join(payload, 'nested', 'empty'), '');
+  const zip = path.join(root, 'archive with spaces.zip');
+  const extracted = path.join(root, 'fresh extraction');
+  const context = packagingShellContext();
+  const run = (args) => execFileSync(context.executable, ['-NoProfile', '-NonInteractive', '-File',
+    path.resolve('scripts', 'distribution-archive.ps1'), ...args],
+  { env: context.env, encoding: 'utf8', timeout: 15000 });
+  run(['-Root', payload, '-Zip', zip]);
+  run(['-Action', 'extract', '-Root', extracted, '-Zip', zip]);
+  assert.deepEqual(fileInventory(extracted), fileInventory(payload));
+  const bytes = fs.readFileSync(zip);
+  assert.equal(bytes.readUInt32LE(bytes.length - 22), 0x06054b50);
+  assert.equal(bytes.readUInt16LE(bytes.length - 12), 3);
+  assert.equal(bytes.subarray(30, 30 + bytes.readUInt16LE(26)).toString('utf8').startsWith('./'), false);
+  assert.throws(() => run(['-Action', 'extract', '-Root', extracted, '-Zip', zip]), /new directory/);
 });
 
 test('native distribution initializes the public Electron loader before reading its binary layout', (t) => {
