@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
+const { nativeHelperEnvironment } = require('../app/native-diagnostics.cjs');
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 function nodeEvent(report, kind, extra = {}) {
@@ -32,7 +33,7 @@ function createRequest(report, role, generation, caseId) {
   return value;
 }
 function requestEnvironment(request, base = process.env) {
-  return { ...base, VI_CI_NATIVE_GENERATION: String(request.generation),
+  return { ...nativeHelperEnvironment(base), VI_CI_NATIVE_GENERATION: String(request.generation),
     VI_CI_NATIVE_SPAWN_REQUEST: request.requestId, VI_CI_NATIVE_REQUEST_SEQUENCE: String(request.requestSequence),
     VI_CI_NATIVE_REQUEST_NONCE: request.requestNonce, VI_CI_NATIVE_CALLER_PID: String(request.callerPid) };
 }

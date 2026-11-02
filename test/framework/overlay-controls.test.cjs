@@ -61,6 +61,27 @@ test('DOM-only quick clicks execute once even when the polling observer is ready
   }
 });
 
+test('a held physical gesture never commits until pointerup across native suspension and recovery', () => {
+  for (const name of ['stop', 'cancel']) {
+    const f = fixture();
+    f.status(true);
+    f.pointer(name, 'pointerdown', { buttons: 1 });
+    f.nativeDown(name);
+    f.interrupt();
+    f.status(false);
+    assert.equal(f.calls[name], 0);
+    f.status(true);
+    assert.equal(f.calls[name], 0);
+    f.pointer(name, 'pointerup');
+    f.click(name);
+    assert.equal(f.calls[name], 1);
+    f.nativeDown(name);
+    assert.equal(f.calls[name], 1);
+    f.freshPress(name);
+    assert.equal(f.calls[name], 2);
+  }
+});
+
 test('native-first and DOM-first observations cannot duplicate a button gesture across readiness changes', () => {
   for (const name of ['stop', 'cancel']) {
     const f = fixture();

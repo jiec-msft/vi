@@ -85,6 +85,26 @@ Electron clipboard 的读写在 UI 与 final-extracted gate 中均等待完成�
 baseline 必须先验证为实际内容，再检查 targeted paste 后的恢复，不能用 Promise
 对象代替 clipboard 内容。上述契约修正不定位任何历史用户 clipboard 故障。
 
+Windows unit 先单独运行真实 cold helper READY 测试，再串行执行其余 files，
+避免原生编译与共享 desktop/clipboard fixture 并发；任一失败仍使整个 unit
+失败，不以预热后的成功替代 cold readiness。生产初始化 20 s、action 8 s、
+pointer 重启上限 3 次及既有 CI budgets 不变。helper 在加载 diagnostics 之前、
+各编译边界、protocol loop 之前输出有限 startup markers；只接收实际 child PID、
+固定 stage、pointer size 和 PowerShell major/edition，不记录环境路径或内容。
+fixture 另记录 engine/assembly/transaction/owned-fixture/case 边界，超时保留这些
+标量证据。没有 marker 只表示尚未观察到该边界，不能归因为 host noise 或某个 API。
+CI actor 子进程同样隔离 inherited `PSModulePath`，不改调用者或要求用户安装 Core。
+
+Windows UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/focus 状态；
+每个 overlay recovery 边界仍须由真实 native capture 确认 foreground PID/HWND
+未变，不通过再次 focus 或移除断言掩盖问题。物理 Stop/Cancel 的 held case
+必须在按住及 native suspension 期间保持 recording 且零 action，实际释放后
+恰好提交一次，后续 fresh gesture 仍可用。native polling 不重新成为按钮事件源。
+owned-desktop wrapper 保留 PID/desktop 匹配的 bounded startup progress；
+helper/attestor/renderer readiness 未完成时仍失败，不接受仅启动进程作为 READY。
+这些阶段证据与 CI 生成脚本的源文件重定位修正，都不等于已证明 ARM 冷启动
+或真实用户历史浮窗问题修复；仍需 exact-head native CI 和最终包 gates。
+
 MIT-licensed application and provider-interface experiments. CI uses a local
 fixture service and synthetic audio; no account or external speech service is
 needed. Regular checks do not publish application download packages. The explicit

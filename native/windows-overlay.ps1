@@ -102,6 +102,7 @@ public sealed class OverlayMouse {
 }
 '@
 [ViNativeDiagnostics]::Record('compile', 'end', 0)
+Write-ViStartup 'pointer-ready'
 try { [OverlayMouse]::Run($Window, $Parent); [ViNativeDiagnostics]::Record('native-exit', 'exit', 0) }
 catch { [Console]::Error.WriteLine('Floating window pointer observer failed.'); exit 1 }
 finally { [ViNativeDiagnostics]::Close() }

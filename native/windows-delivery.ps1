@@ -5,8 +5,11 @@ $ErrorActionPreference = 'Stop'
 [ViNativeDiagnostics]::Record('compile', 'begin', 0)
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+Write-ViStartup 'input-begin'
 & (Join-Path $PSScriptRoot 'windows-input.ps1') -Action load
+Write-ViStartup 'input-ready'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes
+Write-ViStartup 'forms-ready'
 $clipboardSource=@'
 using System;
 using System.IO;
@@ -179,6 +182,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
 }
 '@
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($clipboardSource + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-clipboard-snapshot.cs')))
+Write-ViStartup 'clipboard-ready'
 [ViNativeDiagnostics]::Record('compile', 'end', 0)
 function Capture-Target {
     $target = [VoiceInput]::Capture()
@@ -209,6 +213,7 @@ function Assert-Target($target) {
     if ([VoiceInput]::CompositionActive([long]$current.focus)) { throw 'composition-active' }
     $current
 }
+Write-ViStartup 'protocol-ready'
 while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
     $request = $null
     $script:failureCheck = $null

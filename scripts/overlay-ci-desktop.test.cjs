@@ -2,11 +2,20 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent,
-  assertJobReceiptPath, selfReceiptStem, assertRootReport, committedHelperReady } = require('./overlay-ci-desktop.cjs');
+  assertJobReceiptPath, selfReceiptStem, assertRootReport, committedHelperReady, requestEnvironment } = require('./overlay-ci-desktop.cjs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+test('owned native actor environment does not inherit a Core module path or mutate its caller', () => {
+  const base = { PSModulePath: 'synthetic-core-modules', psMODULEpath: 'synthetic-override', KEEP: 'owned' };
+  const request = { generation: 1, requestId: 'owned', requestSequence: 1, requestNonce: 'owned', callerPid: 42 };
+  const env = requestEnvironment(request, base);
+  assert.ok(!Object.keys(env).some((key) => key.toUpperCase() === 'PSMODULEPATH'));
+  assert.equal(env.KEEP, 'owned');
+  assert.equal(env.VI_CI_NATIVE_CALLER_PID, '42');
+  assert.equal(base.PSModulePath, 'synthetic-core-modules');
+});
 test('production driver error retains callback stderr, exit code and committed native failure', async (t) => {
   const childProcess = require('node:child_process');
   const { EventEmitter } = require('node:events');

@@ -2,12 +2,30 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { NativeTrace } = require('../../app/native-diagnostics.cjs');
+const { NativeTrace, parseNativeStartup, nativeHelperEnvironment } = require('../../app/native-diagnostics.cjs');
 const { Diagnostics } = require('../../app/diagnostics.cjs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+
+test('bootstrap progress accepts only finite stages and the actual child identity without raw data', () => {
+  assert.deepEqual(parseNativeStartup('VI_STARTUP script-entry 42 8 5 Desktop', 42),
+    { startupStage: 'script-entry', pointerBytes: 8, powerShellMajor: 5, powerShellEdition: 'Desktop' });
+  for (const line of ['VI_STARTUP PRIVATE_PATH 42 8 5 Desktop', 'VI_STARTUP script-entry 99 8 5 Desktop',
+    'VI_STARTUP script-entry 42 16 5 Desktop', 'VI_STARTUP script-entry 42 8 5 PRIVATE_EDITION']) {
+    assert.equal(parseNativeStartup(line, 42), undefined);
+  }
+  const trace = new NativeTrace(undefined, 'delivery', 1);
+  const child = Object.assign(new EventEmitter(), { pid: 42, stderr: new PassThrough() });
+  trace.attach(child);
+  child.stderr.write('VI_STARTUP script-');
+  child.stderr.write('entry 42 8 5 Desktop\n');
+  for (let i = 0; i < 30; i++) child.stderr.write('VI_STARTUP protocol-ready 42 8 5 Desktop\n');
+  assert.equal(trace.startup.length, 16);
+  assert.equal(trace.startup[0].startupStage, 'script-entry');
+  assert.doesNotMatch(JSON.stringify(trace.startup), /PRIVATE/);
+});
 
 test('native diagnostics retain correlation and safe categories, never raw stderr or payload', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-native-log-'));
@@ -18,6 +36,7 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   trace.attach(child);
   child.stderr.write('PRIVATE_URL_TOKEN_PATH error CS1003\n');
   child.stderr.write('PRIVATE_OTHER error CS1003\n');
+  child.stderr.write('VI_STARTUP script-entry 123 8 5 Desktop\n');
   child.stderr.write(`VI_DIAG ${JSON.stringify({ run: diagnostics.runId, pid: 123, generation: 2,
     state: 'suspended', monoMs: 15, time: '2026-01-01T00:00:00.000Z', birthFileTime: '134380000000000000',
     inputDesktop: 'unavailable', win32Error: 5, endpoint: 'PRIVATE_ENDPOINT' })}\n`);
@@ -28,6 +47,8 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   assert.doesNotMatch(text, /PRIVATE|endpoint|PATH/);
   const rows = text.trim().split('\n').map(JSON.parse);
   assert.equal(rows.filter((row) => row.fault === 'compilation').length, 1);
+  assert.ok(rows.some((row) => row.startupStage === 'script-entry' && row.powerShellMajor === 5 &&
+    row.powerShellEdition === 'Desktop' && row.pointerBytes === 8));
   assert.ok(rows.some((row) => row.generation === 2 && row.helperPid === 123 && row.nativeMonoMs === 15 && row.win32Error === 5));
   assert.equal(rows.at(-1).fault, 'owned-close');
 });
@@ -49,7 +70,7 @@ test('native sampler persists one host pulse gap from controlled monotonic fixtu
     `if(-not [GapSink]::Written.Wait(2000)){throw 'Actual native writer did not persist the controlled host-gap record.'}\n` +
     `[ViNativeDiagnostics]::Close()\n`;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(script, 'utf16le').toString('base64')], { timeout: 15000, stdio: 'pipe' });
+    Buffer.from(script, 'utf16le').toString('base64')], { timeout: 15000, stdio: 'pipe', env: nativeHelperEnvironment() });
   const rows = (await fs.readFile(path.join(root, 'native-pointer.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(rows.filter((row) => row.state === 'host-gap').length, 1);
   assert.ok(rows.at(-1).hostGapMs >= 5000);
@@ -100,10 +121,10 @@ test('slow and failing native sinks never block sampling or API-boundary produce
     `$clock=[Diagnostics.Stopwatch]::StartNew();1..30|ForEach-Object {[ViNativeDiagnostics]::Record('SetWindowPos','begin',0);[ViNativeDiagnostics]::Sample()}\n` +
     `if($clock.ElapsedMilliseconds -gt 250){throw 'Sampler/API producer waited for slow sink.'}\n[ViNativeDiagnostics]::Close()\n`;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(script, 'utf16le').toString('base64')], { timeout: 10000, stdio: 'pipe' });
+    Buffer.from(script, 'utf16le').toString('base64')], { timeout: 10000, stdio: 'pipe', env: nativeHelperEnvironment() });
   const failing = script.replace('System.Threading.Thread.Sleep(600);', 'throw new System.IO.IOException("PRIVATE_SYNTHETIC");');
   const result = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(failing, 'utf16le').toString('base64')], { timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+    Buffer.from(failing, 'utf16le').toString('base64')], { timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], env: nativeHelperEnvironment() });
   assert.doesNotMatch(result.toString(), /PRIVATE_SYNTHETIC/);
 });
 
@@ -118,4 +139,27 @@ test('Windows CI helper generation resolves the shared script before optional de
   const injected = await generate(fs, path, assert, 'synthetic-unavailable');
   assert.ok(injected.includes(path.resolve('native', 'windows-diagnostics.ps1')));
   assert.match(injected, /if \(!ReadCursor\(out point\)\)/);
+});
+
+test('attested Windows helper generation resolves every production source from the native directory', async () => {
+  const source = await fs.readFile(path.resolve('scripts', 'overlay-recovery-ui.cjs'), 'utf8');
+  const run = source.indexOf('async function run()');
+  const start = source.indexOf("  if (process.platform === 'win32') {", run);
+  const end = source.indexOf('  const spawn = childProcess.spawn;', start);
+  assert.ok(start > run && end > start);
+  const files = new Map(), directory = path.resolve('synthetic-helper-output');
+  const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+  const generate = new AsyncFunction('fs', 'path', 'assert', 'unavailable', 'expectedDesktop',
+    'directory', 'desktopReceipt', 'process',
+    `let helperFile, deliveryFile;\n${source.slice(start, end)}\nreturn {helperFile,deliveryFile};`);
+  const names = await generate({ readFile: fs.readFile, writeFile: async (file, text) => files.set(file, text) },
+    path, assert, 'synthetic-unavailable', 'vi-ci-1-1-' + 'a'.repeat(32),
+    directory, path.join(directory, 'owned-job'), { platform: 'win32' });
+  const delivery = files.get(names.deliveryFile);
+  for (const name of ['windows-input.ps1', 'windows-diagnostics.ps1', 'windows-clipboard-snapshot.cs']) {
+    assert.ok(delivery.includes(path.resolve('native', name)));
+    assert.ok(!delivery.includes(`Join-Path $PSScriptRoot '${name}'`));
+  }
+  assert.ok(files.get(names.helperFile).includes('VI_STARTUP ci-attest-begin'));
+  assert.ok(delivery.includes('VI_STARTUP ci-attest-end'));
 });

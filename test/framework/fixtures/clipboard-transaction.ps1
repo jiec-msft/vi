@@ -1,11 +1,14 @@
 param([Parameter(Mandatory=$true)][string]$Source)
 $ErrorActionPreference='Stop'
+[Console]::Error.WriteLine("VI_CLIP_STAGE engine $PID $([IntPtr]::Size) $($PSVersionTable.PSVersion.Major)")
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+[Console]::Error.WriteLine('VI_CLIP_STAGE forms-ready')
 $file=[IO.File]::ReadAllText((Join-Path $Source 'windows-delivery.ps1'))
 $match=[regex]::Match($file,"(?s)\`$clipboardSource=@'\r?\n(.*?)\r?\n'@")
 if(-not $match.Success){throw 'Actual clipboard transaction source was not found.'}
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition (
     $match.Groups[1].Value+[IO.File]::ReadAllText((Join-Path $Source 'windows-clipboard-snapshot.cs')))
+[Console]::Error.WriteLine('VI_CLIP_STAGE transaction-compiled')
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -15,7 +18,12 @@ using System.Windows.Forms;
 public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
  public static Func<uint,IntPtr,IntPtr> RealSetter;
- public static int FailAfter=-1, Writes, CaseId;
+ public static int FailAfter=-1, Writes;
+ static int caseId;
+ public static int CaseId {
+  get{return caseId;}
+  set{caseId=value;Console.Error.WriteLine("VI_CLIP_STAGE case "+value);}
+ }
  public static IntPtr RestoreSetter(uint format,IntPtr data){
   if(Writes==FailAfter)throw new InvalidOperationException("Controlled restore setter failure.");
   IntPtr result=RealSetter(format,data);if(result!=IntPtr.Zero)Writes++;return result;
@@ -125,6 +133,7 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  public void Dispose(){Put(new uint[0],new byte[0][]);DestroyHandle();}
 }
 '@
+[Console]::Error.WriteLine('VI_CLIP_STAGE fixture-compiled')
 function Check([bool]$Value,[string]$Message){if(-not $Value){throw $Message}}
 function Fault-Code($Exception){
     while($Exception.InnerException){$Exception=$Exception.InnerException}

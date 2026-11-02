@@ -1,3 +1,8 @@
+function Write-ViStartup([ValidateSet('script-entry','diagnostics-ready','input-begin','input-ready','forms-ready','clipboard-ready','pointer-ready','protocol-ready')][string]$Stage) {
+    $edition = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'Desktop' } elseif ($PSVersionTable.PSEdition -eq 'Core') { 'Core' } else { 'unknown' }
+    [Console]::Error.WriteLine("VI_STARTUP $Stage $PID $([IntPtr]::Size) $($PSVersionTable.PSVersion.Major) $edition")
+}
+Write-ViStartup 'script-entry'
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
@@ -140,3 +145,4 @@ public static class ViNativeDiagnostics {
     }
 }
 '@
+Write-ViStartup 'diagnostics-ready'

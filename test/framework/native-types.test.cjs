@@ -4,11 +4,28 @@ const path = require('node:path');
 const { readFileSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { NativeDelivery } = require('../../app/native-delivery.cjs');
+const { unitInvocations } = require('../../scripts/unit.cjs');
+const { nativeHelperEnvironment } = require('../../app/native-diagnostics.cjs');
+
+test('Windows unit plan proves cold readiness first and runs every remaining file without concurrent native fixtures', () => {
+  const cold = path.join('test', 'framework', 'native-types.test.cjs');
+  const other = path.join('test', 'framework', 'clipboard-transaction.test.cjs');
+  const plan = unitInvocations('win32', [other, cold]);
+  assert.deepEqual(plan, [['--test', '--test-concurrency=1', cold],
+    ['--test', '--test-concurrency=1', other]]);
+  assert.deepEqual(unitInvocations('darwin', [other, cold]), [['--test', ...[other, cold].sort()]]);
+});
 
 test('Windows delivery helper compiles and answers readiness without desktop or clipboard access',
   { skip: process.platform !== 'win32' }, async () => {
     const driver = new NativeDelivery('win32', path.resolve('native'));
     try { assert.deepEqual(await driver.request('ready'), { ready: true }); }
+    catch (error) {
+      console.error(JSON.stringify({ scope: 'cold-native-readiness', startup: driver.trace.startup,
+        launcherArchitecture: process.arch, executable: 'powershell.exe', childModulePathOverride: false,
+        stderrBytes: driver.trace.stderrBytes, stderrClasses: [...driver.trace.stderrClasses] }));
+      throw error;
+    }
     finally { driver.close(); }
   });
 
@@ -37,5 +54,5 @@ if ($mouse.Sample($true, $true, 160, 260) -ne '{"type":"ready"}') { throw 'Long-
 if ($null -ne $mouse.Sample($true, $true, 180, 280)) { throw 'Long-suspension gesture resumed.' }
 `;
     execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-      Buffer.from(script, 'utf16le').toString('base64')], { timeout: 20000, stdio: 'pipe' });
+      Buffer.from(script, 'utf16le').toString('base64')], { timeout: 20000, stdio: 'pipe', env: nativeHelperEnvironment() });
   });

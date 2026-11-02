@@ -123,6 +123,13 @@ class Diagnostics {
       if (Number.isInteger(data[key]) && Math.abs(data[key]) <= 100000) entry[key] = data[key];
     }
     if (components.has(data.component)) entry.component = data.component;
+    if (['script-entry', 'diagnostics-ready', 'input-begin', 'input-ready', 'forms-ready',
+      'clipboard-ready', 'pointer-ready', 'protocol-ready', 'ci-attest-begin', 'ci-attest-end'].includes(data.startupStage)) {
+      entry.startupStage = data.startupStage;
+      if ([4, 8].includes(data.pointerBytes)) entry.pointerBytes = data.pointerBytes;
+      if (Number.isInteger(data.powerShellMajor) && data.powerShellMajor > 0 && data.powerShellMajor < 100) entry.powerShellMajor = data.powerShellMajor;
+      if (['Desktop', 'Core', 'unknown'].includes(data.powerShellEdition)) entry.powerShellEdition = data.powerShellEdition;
+    }
     if (actions.has(data.action)) entry.action = data.action;
     if (faults.has(data.fault)) entry.fault = data.fault;
     if (['SetWindowPos', 'GetCursorPos', 'GetForegroundWindow', 'GetGUIThreadInfo', 'SendInput',

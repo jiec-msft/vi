@@ -1048,7 +1048,24 @@ public static class ViCiDesktop
                 }
                 ObserveJobDesktops(ownedJob, ownedName, directory, descendantDesktops);
             });
-            WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget, observe);
+            report["readinessPhase"] = "owned-root";
+            report["readinessBudgetSeconds"] = readyBudget;
+            try { WaitReady(child, Path.Combine(directory, "ready.json"), readyBudget, observe); }
+            catch {
+                string progress = Path.Combine(directory, "startup-progress.json");
+                if (File.Exists(progress)) {
+                    try {
+                        Require(new FileInfo(progress).Length <= 32768, "Owned startup progress exceeds its byte bound.");
+                        using (var json = JsonDocument.Parse(ReadPublishedText(progress))) {
+                            Require(json.RootElement.GetProperty("pid").GetUInt32() == child.pid &&
+                                Equal(json.RootElement.GetProperty("caseId").GetString(), ownedName),
+                                "Startup progress root/desktop identity mismatch.");
+                            report["readinessProgress"] = json.RootElement.Clone();
+                        }
+                    } catch (Exception error) { report["readinessProgressError"] = error.Message; }
+                } else report["readinessProgressState"] = "not-published";
+                throw;
+            }
             if (entry != "probe") {
                 Require(rootClock.Elapsed.TotalSeconds < timeout, "Root inclusive wall deadline expired during readiness.");
                 var windows = new List<object>();

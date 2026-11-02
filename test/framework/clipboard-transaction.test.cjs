@@ -8,9 +8,18 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
 }, () => {
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.toUpperCase() === 'PSMODULEPATH') delete env[key];
-  const report = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-File',
+  let output;
+  try { output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-File',
     path.resolve('test', 'framework', 'fixtures', 'clipboard-transaction.ps1'), '-Source', path.resolve('native')],
-  { env, encoding: 'utf8', timeout: 20000, maxBuffer: 65536 }));
+  { env, encoding: 'utf8', timeout: 20000, maxBuffer: 65536 }); }
+  catch (error) {
+    const stages = String(error.stderr || '').split(/\r?\n/).filter((line) =>
+      /^VI_CLIP_STAGE (engine \d+ [48] \d+|forms-ready|transaction-compiled|fixture-compiled|case \d{1,2})$/.test(line)).slice(-32);
+    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages,
+      timedOut: error.code === 'ETIMEDOUT', status: error.status, signal: error.signal }));
+    throw error;
+  }
+  const report = JSON.parse(output);
   assert.equal(report.status, 'passed');
   assert.equal(report.inputEventsSent, 0);
   assert.equal(report.checks.length, 13);

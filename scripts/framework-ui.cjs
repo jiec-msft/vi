@@ -95,8 +95,22 @@ async function overlayPixels(overlay, display) {
   }
   return { dark, light, red, sampled, bounds, painted: dark > 100 && light > 10 };
 }
-async function verifyWindowsOverlay() {
+async function confirmOwnedFocus(driver, phase) {
+  report.stage = phase;
+  await until(async () => BrowserWindow.getFocusedWindow() === mainWindow &&
+    !mainWindow.webContents.isLoading() && await evaluate('document.hasFocus()'), phase, 5000);
+  const actual = await driver.capture();
+  assert.equal(actual.pid, process.pid, `${phase}: foreground must belong to this CI process.`);
+  assert.equal(actual.window, mainWindow.getNativeWindowHandle().readBigUInt64LE().toString(),
+    `${phase}: native foreground must remain the owned settings HWND.`);
+  (report.focusChecks ||= []).push({ phase, ownerVerified: true, nativeForegroundVerified: true });
+}
+async function verifyWindowsOverlay(driver) {
   if (process.platform !== 'win32') return;
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
+  mainWindow.focus();
+  await confirmOwnedFocus(driver, 'overlay-owned-foreground-baseline');
   const overlay = BrowserWindow.getAllWindows().find((item) => item.webContents.getURL().endsWith('/overlay.html'));
   assert.ok(overlay);
   const display = screen.getPrimaryDisplay(), area = display.workArea;
@@ -109,7 +123,7 @@ async function verifyWindowsOverlay() {
     underlay.showInactive();
     overlay.setBounds(bounds);
     overlay.moveTop();
-    const focused = BrowserWindow.getFocusedWindow();
+    report.stage = 'overlay-physical-paint';
     await until(async () => (await overlayPixels(overlay, display)).painted, 'actual floating controls desktop pixels');
     const before = await overlayPixels(overlay, display);
     overlay.setBounds({ x: area.x + area.width + 500, y: area.y + area.height + 500, width: 240, height: 80 });
@@ -119,7 +133,7 @@ async function verifyWindowsOverlay() {
       const current = overlay.getBounds();
       return current.width === 224 && current.height === 54 && (await overlayPixels(overlay, display)).painted;
     }, 'display-notification bounds and desktop pixel recovery');
-    assert.equal(BrowserWindow.getFocusedWindow(), focused);
+    await confirmOwnedFocus(driver, 'overlay-bounds-nonactivation');
     assert.notEqual(overlay.webContents.getOSProcessId(), mainWindow.webContents.getOSProcessId(),
       'Renderer-crash fixture must not share the settings/audio renderer.');
     let loadedAgain = false;
@@ -127,7 +141,7 @@ async function verifyWindowsOverlay() {
     overlay.webContents.forcefullyCrashRenderer();
     await until(async () => loadedAgain && !overlay.webContents.isLoading() && (await overlayPixels(overlay, display)).painted,
       'isolated floating renderer recovery and actual desktop pixels');
-    assert.equal(BrowserWindow.getFocusedWindow(), focused);
+    await confirmOwnedFocus(driver, 'overlay-renderer-recovery-nonactivation');
     await overlay.webContents.executeJavaScript('window.floatingVoice.cancel()');
     await until(() => !overlay.isVisible(), 'explicit floating hide');
     screen.emit('display-metrics-changed', {}, display, ['workArea']);
@@ -146,13 +160,13 @@ async function verifyWindowsOverlay() {
     report.checks.push('floating-controls-native-desktop-pixels', 'floating-bounds-recovery', 'floating-renderer-recovery-no-focus');
   } finally { underlay.destroy(); }
 }
-async function verifyWindowsPaste() {
+async function verifyWindowsPaste(driver) {
   if (process.platform !== 'win32') return;
+  report.stage = 'owned-native-caret-paste';
   const area = screen.getPrimaryDisplay().workArea;
   const editor = new BrowserWindow({ x: area.x + area.width - 420, y: area.y + 100, width: 400, height: 240,
     title: 'VI synthetic paste fixture', alwaysOnTop: true,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
-  const driver = new DesktopInput();
   try {
     await editor.loadURL('data:text/html,<textarea aria-label="Owned synthetic text" style="width:95%;height:90%"></textarea>');
     editor.show(); editor.focus();
@@ -162,13 +176,19 @@ async function verifyWindowsPaste() {
     await clipboard.writeText('Owned previous clipboard');
     assert.equal(await clipboard.readText(), 'Owned previous clipboard');
     await driver.warmup();
+    await until(async () => BrowserWindow.getFocusedWindow() === editor &&
+      await editor.webContents.executeJavaScript("document.hasFocus() && document.activeElement.tagName === 'TEXTAREA'"),
+    'owned editor renderer and focus readiness', 5000);
     const target = await driver.capture();
+    assert.equal(target.pid, process.pid, 'Only the CI-owned editor may receive this paste.');
+    assert.equal(target.window, editor.getNativeWindowHandle().readBigUInt64LE().toString(),
+      'Native target must match the CI-owned editor HWND.');
     assert.equal(await driver.paste('Approved final fixture', target), true);
     await until(async () => await editor.webContents.executeJavaScript("document.querySelector('textarea').value") ===
       'Prefix Approved final fixture Suffix', 'one approved caret paste without replacing surrounding text');
     assert.equal(await clipboard.readText(), 'Owned previous clipboard');
     report.checks.push('actual-native-approved-caret-paste-once', 'actual-native-clipboard-restored');
-  } finally { driver.close(); editor.destroy(); }
+  } finally { editor.destroy(); }
 }
 async function verifyFloatingDomControls() {
   if (process.platform !== 'win32') return;
@@ -248,8 +268,11 @@ async function run() {
   await click('#consent');
   await until(async () => (await status()).consent, 'consent');
   report.checks.push('consent-controls-recording');
-  await verifyWindowsOverlay();
-  await verifyWindowsPaste();
+  const nativeProbe = process.platform === 'win32' ? new DesktopInput() : undefined;
+  try {
+    await verifyWindowsOverlay(nativeProbe);
+    await verifyWindowsPaste(nativeProbe);
+  } finally { nativeProbe?.close(); }
   await click('#test-mic');
   await until(() => evaluate("Number(document.getElementById('mic-level').value)>0"), 'local microphone meter');
   assert.equal(service.bytes(), 0);
