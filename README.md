@@ -2,6 +2,53 @@
 
 Voice Input.
 
+## 0.6.4 Windows floating controls and clipboard delivery
+
+Windows 浮窗改用 compact opaque native surface，仍然不激活、不抢焦点，
+不关闭 GPU 或 sandbox。display/work-area 变化会按当前真实 work area
+重新 clamp 224×54 DIP 边界；renderer 退出仅允许一次有界 reload，不重启
+录音。主动 Hide 是独立用户意图，display/status 更新不能撤销；可从
+settings 的 Show floating controls 或 tray 菜单显式恢复。
+诊断只记录 owned overlay 的 show/hide、bounds、display、renderer 状态，
+不记录其它窗口标题、全局光标或内容。Native `IsVisible`/topmost/bounds
+不是实际像素证据；opaque surface 和这些 recovery path 的改变，也不等于
+已证明某次历史窗口消失的唯一 compositor 原因。
+
+Windows paste 在同一个 clipboard lock 内枚举并建立原生 backup，不再依赖
+managed OLE 数据投影/反序列化。已知 bitmap/metafile/palette 按原生类型
+clone；Unicode、rich formats、streams、registered HGLOBAL metadata 保留
+原始 bytes，包括合法零长度 payload。OLE 的 DataObject/Ole Private Data
+仅为原 owner 的 marshalling bookkeeping，不可移交给新 owner；其它可用
+用户格式仍须保留。owner-specific/non-HGLOBAL/不可保留格式明确失败，不
+清空原剪贴板继续粘贴。上限为 256 formats、单项 64 MiB、总 backup
+256 MiB；超限同样保留 preview，不进行不安全的部分 snapshot。
+
+恢复时在同一 lock 内重新检查 owner/sequence，再交还 clone；用户的新 copy
+优先。恢复被暂时阻塞时，helper 保留一个 bounded backup，在下一命令前
+继续恢复，绝不重新发送 paste。helper 被强制结束或系统持续拒绝 clipboard
+访问时不能保证恢复完成，必须报告错误，不宣称成功。busy、unpreservable
+format、snapshot failure、changed 和 restore failure 分开；只有实际 API
+返回的 Win32 code 才记录，0 不作为具体 Windows 故障证据。
+
+Targeted paste 仍经过原有 focus/secure-field/modifier/IME guards，只发送一次
+批准后的结果，不替换整个字段。失败后 approved preview 保留。Auto-copy
+明确仅适用于 preview recording：targeted delivery 后不再额外覆盖 clipboard，
+否则会破坏 native restore 或覆盖用户的新 copy；显式 Copy result 仍可用。
+完整 0.6.4 必须是同源、同版本的三个真实目标：
+`VI-0.6.4-windows-x64.zip`、`VI-0.6.4-windows-arm64.zip`、
+`VI-0.6.4-macos-arm64.zip`。UI/About/tray 显示 runtime architecture，
+`distribution-info.json` 保存版本、target 和 source，不能给旧包改名代替。
+
+CI-only Windows fixture 使用实际 transaction 类测试 empty/Unicode/rich/
+image/zero metadata、暂时/持续占用、不可保留格式、新 copy、early reader
+和 restore failure；没有向真实用户字段发送输入。framework UI 另用 owned
+editor 验证实际 caret 单次粘贴与 clipboard restore；浮窗检查从原生 desktop
+capture 验证实际 controls pixels、受控越界/resize、renderer failure 及主动
+Hide/Show，不把 `isVisible` mock 当成完整验收。display notification 是
+synthetic seam，不宣称真实硬件 DPI/monitor/RDP/compositor incident 已复现。
+这些新 gates 需要在 Windows x64/ARM64 CI 实际运行；旧 head 的 green
+packaging receipts 不证明本功能修复通过，也不授权本机交互测试或发布。
+
 MIT-licensed application and provider-interface experiments. CI uses a local
 fixture service and synthetic audio; no account or external speech service is
 needed. Regular checks do not publish application download packages. The explicit
@@ -149,7 +196,7 @@ executable plugin root，并默认不读取 sibling data；显式 `--provider-co
 `Neutral native distribution bases` 是原“不生成下载包”规则的明确、手动
 CI artifact 例外。它只在 `workflow_dispatch` 执行，使用标准
 Windows x64、Windows ARM64、macOS ARM64 runner，同一次输入版本生成
-三个 neutral bases；默认应用版本为 `0.6.4-preview`。没有自动 release、
+三个 neutral bases；默认应用版本为 `0.6.4`，且必须与 source package version 一致。没有自动 release、
 production endpoint、账户、外部语音请求或额外 repository checkout。
 源码、测试、安装和 native build 仍只在 GitHub Actions 执行。
 

@@ -21,4 +21,6 @@ class TranscriptOutput {
   }
 }
 
-module.exports = { TranscriptOutput };
+function autoCopyPreview(run) { return Boolean(run.autoCopy && !run.target); }
+
+module.exports = { TranscriptOutput, autoCopyPreview };

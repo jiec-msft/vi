@@ -71,6 +71,16 @@ test('an unclicked native press cannot suppress a fresh fallback press', () => {
   assert.equal(f.calls.cancel, 2);
 });
 
+test('a DOM click before native delivery cannot dispatch an opaque-window press twice', () => {
+  const f = fixture();
+  f.status(true);
+  f.click('stop');
+  assert.equal(f.calls.stop, 0);
+  f.nativeDown('stop');
+  f.click('stop');
+  assert.equal(f.calls.stop, 1);
+});
+
 test('provider setup errors have a distinct overlay label and retain the detailed failure', () => {
   const f = fixture();
   const message = "Provider setup failed: Cannot find module './missing-dependency.cjs'";

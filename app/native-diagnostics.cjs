@@ -70,4 +70,10 @@ class NativeTrace {
   }
 }
 
-module.exports = { NativeTrace };
+function nativeHelperEnvironment(supplied = process.env) {
+  const env = { ...supplied };
+  for (const name of Object.keys(env)) if (name.toUpperCase() === 'PSMODULEPATH') delete env[name];
+  return env;
+}
+
+module.exports = { NativeTrace, nativeHelperEnvironment };

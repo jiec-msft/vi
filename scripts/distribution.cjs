@@ -132,6 +132,7 @@ function sealMac(bundle) {
 
 async function main(version, arch) {
   distributionVersion(version);
+  if (version !== require('../package.json').version) throw new Error('Distribution version must match this source revision.');
   if (!['win32', 'darwin'].includes(process.platform) || process.arch !== arch ||
       !['x64', 'arm64'].includes(arch) || (process.platform === 'darwin' && arch !== 'arm64')) {
     throw new Error('Build each supported distribution on its matching native runner.');
@@ -159,9 +160,14 @@ async function main(version, arch) {
   for (const name of ['app', 'native']) fs.cpSync(path.resolve(name), path.join(app, name), { recursive: true });
   fs.copyFileSync('LICENSE', path.join(app, 'LICENSE'));
   fs.writeFileSync(path.join(app, 'package.json'), JSON.stringify({ name: 'vi', productName: 'VI',
-    version, main: 'app/main.cjs', license: 'MIT', private: true }));
+    version, main: 'app/main.cjs', license: 'MIT', private: true,
+    distributionTarget: `${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}` }));
   fs.writeFileSync(path.join(app, 'app', 'build-info.json'), JSON.stringify({
     frameworkRevision: revision, assemblyRevision: revision,
+  }));
+  fs.writeFileSync(path.join(app, 'app', 'distribution-info.json'), JSON.stringify({
+    version, platform: process.platform, architecture: arch,
+    target: `${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}`, sourceRevision: revision,
   }));
   const provider = await distributionProvider(path.join(resources, 'providers', 'default'),
     path.join(output, 'public-provider-download'));
@@ -234,7 +240,7 @@ async function main(version, arch) {
     smoke(executable, resources);
     if (process.platform === 'darwin') execFileSync('codesign', ['--verify', '--deep', '--strict', bundle]);
     const files = fileInventory(staging);
-    const zip = path.join(output, `VI-${version}-${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}-neutral.zip`);
+    const zip = path.join(output, `VI-${version}-${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}.zip`);
     let archiveWriter;
     if (process.platform === 'darwin') execFileSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', bundle, zip],
       { timeout: 120000 });

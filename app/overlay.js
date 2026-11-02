@@ -22,6 +22,8 @@ window.floatingVoice.onStatus((value) => {
   document.getElementById('message').textContent = value.overlayControlError ? 'Mouse fallback'
     : value.phase === 'error' ? ({ 'input-confirmation': 'Input not confirmed', input: 'Input error',
       microphone: 'Audio interrupted', cloud: 'Connection error', provider: 'Provider setup error',
+      'clipboard-busy': 'Clipboard busy', 'clipboard-format': 'Clipboard preserved',
+      'clipboard-snapshot-failed': 'Clipboard unavailable', 'restore-failed': 'Review paste',
       'no-speech': 'No speech detected',
       plugin: 'Result blocked by plugin' }[value.errorKind] || 'Stopped: error')
     : value.phase === 'done' ? value.insertionResult === 'preview'
@@ -56,7 +58,7 @@ async function cancel() {
   if (!reply.ok) document.getElementById('message').textContent = 'Open settings';
 }
 const nativeHandled = (name, event) => {
-  const handled = event?.detail !== 0 && nativeButton?.name === name;
+  const handled = event?.detail !== 0 && (nativePointer || nativeButton?.name === name);
   nativeButton = undefined;
   return handled;
 };

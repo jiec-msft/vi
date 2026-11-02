@@ -5,7 +5,7 @@ on:
       version:
         description: Same application version for all three neutral targets
         required: true
-        default: 0.6.4-preview
+        default: 0.6.4
         type: string
       upload_bases:
         description: Owner has reviewed upstream provider redistribution terms; upload neutral base contents
@@ -53,7 +53,7 @@ jobs:
         with:
           name: neutral-base-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            artifacts-ci/distribution/*-neutral.zip
+            artifacts-ci/distribution/VI-*.zip
             artifacts-ci/distribution/authority.json
             artifacts-ci/distribution/receipt.json
             artifacts-ci/distribution/SHA256SUMS

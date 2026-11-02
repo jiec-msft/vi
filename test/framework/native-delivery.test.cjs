@@ -49,6 +49,29 @@ test('native failures expose only fixed messages, not raw helper content', async
       assert.match(error.message, /clipboard could not be restored/);
       return true;
     });
+
+    test('clipboard preparation failures distinguish lock, unsupported format and backup failure without logging payloads', async () => {
+      for (const [code, message] of [
+        ['clipboard-busy', /holding the clipboard/],
+        ['clipboard-format', /preserve every clipboard format/],
+        ['clipboard-snapshot-failed', /safe clipboard backup/],
+      ]) {
+        const f = fixture();
+        try {
+          const request = f.driver.request('paste', { text: 'Approved fixture result' });
+          await nextTurn();
+          f.reply({ id: 1, ok: false, code, errorNumber: 5, pasteRequested: false, format: 'PRIVATE_FORMAT' });
+          await assert.rejects(request, (error) => {
+            assert.equal(error.code, code);
+            assert.equal(error.errorNumber, 5);
+            assert.equal(error.pasteRequested, false);
+            assert.match(error.message, message);
+            assert.doesNotMatch(error.message, /PRIVATE/);
+            return true;
+          });
+        } finally { f.driver.close(); }
+      }
+    });
   } finally { f.driver.close(); }
 });
 

@@ -2,7 +2,7 @@ const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
-const { NativeTrace } = require('./native-diagnostics.cjs');
+const { NativeTrace, nativeHelperEnvironment } = require('./native-diagnostics.cjs');
 
 class OverlayPointer {
   constructor(window, onEvent, onFailure, spawnProcess = spawn, diagnostics) {
@@ -35,7 +35,8 @@ class OverlayPointer {
       child = this.spawnProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', path.join(__dirname, '..', 'native', 'windows-overlay.ps1').replace('app.asar', 'app.asar.unpacked'),
       '-Window', this.id, '-Parent', String(process.pid), ...this.trace.arguments(process.pid)],
-      { windowsHide: true, stdio: [this.diagnostics ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      { windowsHide: true, stdio: [this.diagnostics ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        env: nativeHelperEnvironment() });
     } catch {
       this.failed = false;
       this.ended = true;

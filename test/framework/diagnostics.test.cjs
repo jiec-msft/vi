@@ -115,6 +115,21 @@ test('provider setup diagnostics retain classification without raw paths or erro
   assert.doesNotMatch(JSON.stringify(entries), /SYNTHETIC_PATH_AND_MODULE/);
 });
 
+test('floating health and clipboard faults retain owned geometry and codes, never payloads or format names', async (t) => {
+  const f = await fixture(t);
+  f.diagnostics.record('overlay-health', { component: 'overlay', state: 'bounds',
+    overlayX: -224, overlayY: 100, overlayWidth: 224, overlayHeight: 54, overlayExpected: true,
+    title: 'PRIVATE_TITLE', cursor: 'PRIVATE_CURSOR' });
+  f.diagnostics.record('input-error', { reason: 'clipboard-format', errorNumber: 5,
+    format: 'PRIVATE_FORMAT', text: 'PRIVATE_CONTENT' });
+  const rows = await f.entries();
+  assert.equal(rows[0].overlayX, -224);
+  assert.equal(rows[0].overlayWidth, 224);
+  assert.equal(rows[1].reason, 'clipboard-format');
+  assert.equal(rows[1].errorNumber, 5);
+  assert.doesNotMatch(JSON.stringify(rows), /PRIVATE/);
+});
+
 test('native pointer faults retain fixed reason and recovery state, never raw errors', async (t) => {
   const f = await fixture(t);
   for (const fault of ['spawn', 'exit', 'timeout', 'stream', 'protocol', 'dispatch', 'termination', 'private-token']) {

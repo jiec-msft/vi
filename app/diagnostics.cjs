@@ -7,12 +7,13 @@ const events = new Set(['app-start', 'turn-start', 'capture-ready', 'cloud-ready
   'input-target', 'input-ready', 'input-fallback', 'input-skipped', 'input-error', 'segment-final',
   'overlay-down', 'drag-start', 'drag-end', 'stop', 'capture-ended', 'done', 'error', 'cancel',
   'input-focus-return', 'window-shown', 'quit-start', 'plugin-call', 'plugin-warning', 'startup-stage',
-  'lifecycle', 'native', 'event-loop', 'diagnostic-drop']);
+  'lifecycle', 'native', 'event-loop', 'diagnostic-drop', 'overlay-health']);
 const reasons = new Set(['user', 'limit', 'microphone', 'cloud', 'provider', 'input', 'cancel', 'unknown',
   'target-changed', 'native-error', 'foreground-changed', 'native-focus-changed', 'field-changed',
   'owned-text-changed', 'caret-changed', 'user-input-active', 'composition-active', 'paste-unconfirmed',
   'transcript-changed', 'no-speech', 'unsupported', 'app-focused', 'no-target', 'cancelled']);
 for (const reason of ['secure-field', 'no-input', 'modifiers-held', 'clipboard-changed', 'clipboard-unavailable',
+  'clipboard-busy', 'clipboard-format', 'clipboard-snapshot-failed',
   'restore-failed', 'permission', 'clipboard-copy', 'window-order', 'plugin']) reasons.add(reason);
 for (const fault of ['spawn', 'exit', 'timeout', 'stream', 'protocol', 'dispatch', 'termination']) {
   reasons.add(`overlay-pointer-${fault}`);
@@ -26,6 +27,7 @@ const states = new Set(['begin', 'end', 'failure', 'spawn', 'spawned', 'request'
   'load-failed', 'process-gone', 'startup-failed', 'uncaught-exception', 'unhandled-rejection', 'quit-complete',
   'stderr', 'native-start', 'compile', 'call', 'host-gap', 'host-resumed', 'context', 'log-write-failed']);
 for (const state of ['boot', 'app-ready', 'lock', 'unlock', 'suspend', 'resume', 'metadata']) states.add(state);
+for (const state of ['hidden', 'bounds', 'display']) states.add(state);
 const actions = new Set(['ready', 'capture', 'held', 'paste', 'settle-window']);
 const faults = new Set(['spawn', 'exit', 'timeout', 'stream', 'protocol', 'dispatch', 'termination', 'pipe',
   'compilation', 'assembly-load', 'access-denied', 'powershell-error', 'unknown', 'invalid-settings',
@@ -106,7 +108,8 @@ class Diagnostics {
     if (this.stages.size) entry.activeStages = [...this.stages.keys()].slice(0, 16);
     if (/^[a-f0-9-]{36}$/.test(data.turn || '')) entry.turn = data.turn;
     if (reasons.has(data.reason)) entry.reason = data.reason;
-    for (const key of ['ownAppFocused', 'mainWindowVisible', 'placedBehind', 'mainFrame']) {
+    for (const key of ['ownAppFocused', 'mainWindowVisible', 'placedBehind', 'mainFrame',
+      'overlayVisible', 'overlayExpected', 'overlayUserHidden', 'overlayTopmost']) {
       if (typeof data[key] === 'boolean') entry[key] = data[key];
     }
     if (['foreground-window', 'foreground-process', 'accessible-focus', 'native-focus'].includes(data.check)) entry.check = data.check;
@@ -115,7 +118,10 @@ class Diagnostics {
       entry.stage = data.stage;
       if (['begin', 'end', 'failure'].includes(data.state)) entry.state = data.state;
     }
-    if (['native', 'lifecycle'].includes(event) && states.has(data.state)) entry.state = data.state;
+    if (['native', 'lifecycle', 'overlay-health'].includes(event) && states.has(data.state)) entry.state = data.state;
+    for (const key of ['overlayX', 'overlayY', 'overlayWidth', 'overlayHeight']) {
+      if (Number.isInteger(data[key]) && Math.abs(data[key]) <= 100000) entry[key] = data[key];
+    }
     if (components.has(data.component)) entry.component = data.component;
     if (actions.has(data.action)) entry.action = data.action;
     if (faults.has(data.fault)) entry.fault = data.fault;
