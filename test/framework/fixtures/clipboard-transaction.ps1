@@ -156,7 +156,13 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
 }
 '@
 [Console]::Error.WriteLine('VI_CLIP_STAGE fixture-compiled')
-function Check([bool]$Value,[string]$Message){if(-not $Value){throw $Message}}
+function Check([bool]$Value,[string]$Message){
+    if(-not $Value){
+        $failure=[InvalidOperationException]::new($Message)
+        $failure.Data['OwnedFixtureAssertion']=$true
+        throw $failure
+    }
+}
 function Fault-Code($Exception){
     while($Exception.InnerException){$Exception=$Exception.InnerException}
     if($Exception -is [ViClipboard.ClipboardPreparationException]){return $Exception.Code}
@@ -169,8 +175,45 @@ function Report-TransactionFault([string]$Phase,$Exception){
         if($Exception.Stage -eq 'restore-sequence'){
             [Console]::Error.WriteLine("VI_CLIP_SEQUENCE expected=$($Exception.ExpectedSequence) current=$($Exception.CurrentSequence) ownerMatch=True")
         }
-    }else{
+    }elseif($Exception.Data['OwnedFixtureAssertion'] -eq $true){
         [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=fixture-assertion")
+    }else{
+        $class=$Exception.GetType().Name
+        if($class -notin @('ExternalException','InvalidOperationException','ArgumentException','OutOfMemoryException','IOException','SystemException','Win32Exception','RuntimeException','Exception')){$class='Other'}
+        $nativeError=0
+        if($Exception -is [ComponentModel.Win32Exception]){$nativeError=$Exception.NativeErrorCode}
+        [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=managed-operation errorClass=$class nativeError=$nativeError hresult=$($Exception.HResult)")
+    }
+}
+function Report-TransactionState([ValidateSet('begin-return','text-read-return','restore-return','operation-failed','cleanup-failed')][string]$Phase,$Transaction){
+    $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+    $type=[TranscriptClipboard]
+    $expected=$type.GetField('sequence',$flags).GetValue($Transaction)
+    $observed=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+    $ownerObserved=$Transaction.Handle -ne [IntPtr]::Zero -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $Transaction.Handle
+    $state="VI_CLIP_STATE $Phase case=$([OwnedClipboardFixture]::CaseId) expected=$expected observed=$observed ownerObserved=$ownerObserved"
+    foreach($name in @('began','rendered','renderFailed','restoreMutated','renderAttempted','renderExpectedSequence','renderObservedSequence','renderWriteStarted','renderWriteCompleted')){
+        $state+=" $name=$($type.GetField($name,$flags).GetValue($Transaction))"
+    }
+    [Console]::Error.WriteLine($state)
+}
+function Report-OperationFailure($Transaction,$Exception){
+    Report-TransactionFault 'operation' $Exception
+    Report-TransactionState 'operation-failed' $Transaction
+}
+function Close-Transaction($Transaction,$OperationFailure,[scriptblock]$BeforeDispose){
+    try{
+        if($BeforeDispose){& $BeforeDispose}
+        $Transaction.Dispose()
+    }catch{
+        $cleanupFailure=$_.Exception
+        Report-TransactionFault 'cleanup' $cleanupFailure
+        Report-TransactionState 'cleanup-failed' $Transaction
+        if($OperationFailure){
+            throw [AggregateException]::new('Owned transaction operation and cleanup both failed.',
+                [Exception[]]@($OperationFailure,$cleanupFailure))
+        }
+        throw
     }
 }
 function Read-Mixed($Fixture,$Metadata,$Rich){
@@ -186,6 +229,7 @@ $html=[Text.Encoding]::UTF8.GetBytes('Owned synthetic HTML fragment')
 $format=[OwnedClipboardFixture]::RegisterClipboardFormat('VI synthetic metadata')
 $rich=[OwnedClipboardFixture]::RegisterClipboardFormat('HTML Format')
 $checks=[Collections.Generic.List[string]]::new()
+$fixtureFailure=$null
 try{
     [OwnedClipboardFixture]::CaseId=1
     $fixture.Put([uint32[]]@(13,$format),[byte[][]]@($text,[byte[]]@(0)))
@@ -197,13 +241,15 @@ try{
     if($zero.SetSucceeded){
         $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
         $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
         try{
             $failed=$false
             try{$transaction.Begin('Must not replace discarded data')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
             Check $failed 'Published discarded metadata was not rejected.'
             Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Discarded metadata rejection changed the clipboard.'
             Check ([OwnedClipboardFixture]::IsClipboardFormatAvailable($format)) 'Discarded metadata was removed.'
-        }finally{$transaction.Dispose()}
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure}
         $zeroOutcome='clipboard-format'
     }
     $checks.Add('zero-allocation-real-setclipboarddata-contract-recorded')
@@ -211,13 +257,15 @@ try{
     $fixture.AdvertiseUnrenderable($format)
     $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $failed=$false
         try{$transaction.Begin('Must not replace unrenderable data')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
         Check $failed 'Unbacked delayed metadata was not rejected.'
         Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Unrenderable metadata rejection changed the clipboard.'
         Check ([OwnedClipboardFixture]::IsClipboardFormatAvailable($format)) 'Unrenderable metadata was removed.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('unbacked-metadata-fails-closed-without-mutation')
     foreach($empty in @($false,$true)){
         [OwnedClipboardFixture]::CaseId=3+[int]$empty
@@ -227,10 +275,15 @@ try{
             $expected=Read-Mixed $fixture $format $rich
         }
         $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
         try{
             $transaction.Begin('Approved fixture result')
-            Check ([Windows.Forms.Clipboard]::GetText() -eq 'Approved fixture result') 'Delayed render did not expose the approved text.'
+            Report-TransactionState 'begin-return' $transaction
+            $temporaryText=[Windows.Forms.Clipboard]::GetText()
+            Report-TransactionState 'text-read-return' $transaction
+            Check ($temporaryText -eq 'Approved fixture result') 'Delayed render did not expose the approved text.'
             $transaction.Restore()
+            Report-TransactionState 'restore-return' $transaction
             if($empty){Check ([OwnedClipboardFixture]::CountClipboardFormats() -eq 0) 'Empty clipboard formats were not restored.'}
             else{
                 $restored=Read-Mixed $fixture $format $rich
@@ -238,7 +291,8 @@ try{
                 Check ($restored.metadata -eq $expected.metadata) 'Zero-valued registered metadata bytes changed.'
                 Check ($restored.rich -eq $expected.rich) 'Rich format bytes changed.'
             }
-        }finally{$transaction.Dispose()}
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure}
         if($empty){Check ([OwnedClipboardFixture]::CountClipboardFormats() -eq 0) 'Disposal reintroduced clipboard formats.'}
         else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expected.text) 'Disposal changed the restored Unicode bytes.'}
     }
@@ -274,18 +328,10 @@ try{
             $transaction.Restore()
         }catch{
             $operationFailure=$_.Exception
-            Report-TransactionFault 'operation' $operationFailure
+            Report-OperationFailure $transaction $operationFailure
             throw
         }finally{
-            try{$transaction.Dispose()}catch{
-                $cleanupFailure=$_.Exception
-                Report-TransactionFault 'cleanup' $cleanupFailure
-                if($operationFailure){
-                    throw [AggregateException]::new('Owned transaction operation and cleanup both failed.',
-                        [Exception[]]@($operationFailure,$cleanupFailure))
-                }
-                throw
-            }
+            Close-Transaction $transaction $operationFailure
         }
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned OLE text') 'Actual OLE text producer was not preserved.'
         Check ([Windows.Forms.Clipboard]::GetDataObject().GetData([Windows.Forms.DataFormats]::Rtf,$false) -eq '{\rtf1 Owned OLE rich text}') 'Actual OLE RTF producer was not preserved.'
@@ -305,12 +351,14 @@ try{
     [Windows.Forms.Clipboard]::SetDataObject($virtual,$true)
     $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $failed=$false
         try{$transaction.Begin('Must not replace virtual file data')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
         Check $failed 'Declared OLE virtual-file data did not fail closed.'
         Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Rejected OLE producer was modified.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('ole-virtual-file-contract-fails-closed-before-data-access')
     [OwnedClipboardFixture]::CaseId=7
     $bitmap=[Drawing.Bitmap]::new(8,8)
@@ -318,7 +366,10 @@ try{
     try{
         [Windows.Forms.Clipboard]::SetImage($bitmap)
         $transaction=[TranscriptClipboard]::new()
-        try{$transaction.Begin('Approved image fixture');$transaction.Restore()}finally{$transaction.Dispose()}
+        $operationFailure=$null
+        try{$transaction.Begin('Approved image fixture');$transaction.Restore()}
+        catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure}
         $image=[Windows.Forms.Clipboard]::GetImage()
         try{Check ($image.GetPixel(3,3).ToArgb() -eq $bitmap.GetPixel(3,3).ToArgb()) 'Image pixels were not preserved.'}
         finally{$image.Dispose()}
@@ -329,17 +380,22 @@ try{
     $expectedText=[Convert]::ToBase64String($fixture.Read(13))
     $fixture.Hold(80)
     $transaction=[TranscriptClipboard]::new()
-    try{$transaction.Begin('Approved after transient lock');$transaction.Restore()}finally{$transaction.Dispose()}
+    $operationFailure=$null
+    try{$transaction.Begin('Approved after transient lock');$transaction.Restore()}
+    catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Transient lock recovery changed clipboard bytes.'
     $checks.Add('transient-lock-recovers-without-content-loss')
     [OwnedClipboardFixture]::CaseId=9
     $fixture.Hold(600)
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $failed=$false
         try{$transaction.Begin('Must not replace busy clipboard')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-busy'}
         Check $failed 'Persistent lock was not classified busy.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     Start-Sleep -Milliseconds 650
     Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Busy failure changed clipboard bytes.'
     $checks.Add('busy-fails-closed')
@@ -347,16 +403,19 @@ try{
     $fixture.Put([uint32[]]@(13,0x200),[byte[][]]@($text,[byte[]]@(1,2,3)))
     $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $failed=$false
         try{$transaction.Begin('Must not replace unpreservable clipboard')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
         Check $failed 'Unpreservable owner-specific format was not rejected.'
         Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Unsupported-format failure changed the clipboard.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('unsupported-format-fails-without-mutation')
     [OwnedClipboardFixture]::CaseId=11
     $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $transaction.Begin('Approved cancelled result')
         [void][Windows.Forms.Clipboard]::GetText()
@@ -368,10 +427,12 @@ try{
         $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New user copy`0")))
         $transaction.Restore()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New user copy') 'A newer clipboard copy was overwritten.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('early-reader-and-new-copy-win')
     [OwnedClipboardFixture]::CaseId=12
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $transaction.Begin('Approved restore failure result')
         $fixture.Hold(400)
@@ -382,7 +443,8 @@ try{
         Start-Sleep -Milliseconds 450
         [TranscriptClipboard]::RecoverPending()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New user copy') 'Busy restore recovery did not restore the full saved text.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('restore-failure-is-explicit-and-backup-retained')
     $flags=[Reflection.BindingFlags]'Static,NonPublic'
     $setter=[ViClipboard.ClipboardSnapshot].GetField('write',$flags)
@@ -394,6 +456,7 @@ try{
         $expected=Read-Mixed $fixture $format $rich
         $expectedLocale=[Convert]::ToBase64String($fixture.Read(16))
         $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
         try{
             $transaction.Begin('Approved partial restore fixture')
             [OwnedClipboardFixture]::FailAfter=$after
@@ -420,12 +483,14 @@ try{
             Check ($restored.metadata -eq $expected.metadata) 'Mid-restore recovery lost zero-valued metadata bytes.'
             Check ($restored.rich -eq $expected.rich) 'Mid-restore recovery lost rich bytes.'
             Check ([Convert]::ToBase64String($fixture.Read(16)) -eq $expectedLocale) 'Mid-restore recovery lost the original locale bytes.'
-        }finally{$setter.SetValue($null,$original);$transaction.Dispose()}
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $setter.SetValue($null,$original) }}
     }
     $checks.Add('actual-empty-and-first-format-restore-faults-recover-all-original-bytes')
     [OwnedClipboardFixture]::CaseId=16
     $fixture.Put([uint32[]]@(13,$rich,16),[byte[][]]@($text,$html,[BitConverter]::GetBytes([uint32]1031)))
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $transaction.Begin('Must never be repasted')
         [OwnedClipboardFixture]::FailAfter=2
@@ -437,11 +502,13 @@ try{
         $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New external copy wins`0")))
         [TranscriptClipboard]::RecoverPending()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New external copy wins') 'Deferred backup overwrote a genuinely newer external copy.'
-    }finally{$setter.SetValue($null,$original);$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure { $setter.SetValue($null,$original) }}
     $checks.Add('external-new-copy-wins-after-partial-restore')
     [OwnedClipboardFixture]::CaseId=17
     $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
     $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
     try{
         $transaction.Begin('Must not overwrite unknown mutation')
         Check (-not [TranscriptClipboard].GetField('rendered',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($transaction)) 'Unknown-mutation fixture requires an unrendered transcript.'
@@ -463,7 +530,20 @@ try{
         $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New copy after unknown mutation`0")))
         [TranscriptClipboard]::RecoverPending()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy after unknown mutation') 'Pending backup overwrote a newer external copy.'
-    }finally{$transaction.Dispose()}
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('unknown-same-owner-mutation-is-not-laundered-by-own-rendering')
-    @{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}|ConvertTo-Json -Compress
-}finally{$fixture.Dispose()}
+    $report=@{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}
+}catch{$fixtureFailure=$_.Exception;throw}
+finally{
+    try{$fixture.Dispose()}catch{
+        $cleanupFailure=$_.Exception
+        Report-TransactionFault 'fixture-cleanup' $cleanupFailure
+        if($fixtureFailure){
+            throw [AggregateException]::new('Owned fixture operation and cleanup both failed.',
+                [Exception[]]@($fixtureFailure,$cleanupFailure))
+        }
+        throw
+    }
+}
+$report|ConvertTo-Json -Compress

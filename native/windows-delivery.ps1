@@ -44,6 +44,8 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     string text;
     uint sequence;
     bool rendered, renderFailed, began, restoring, restoreMutated;
+    bool renderAttempted, renderWriteStarted, renderWriteCompleted;
+    uint renderExpectedSequence, renderObservedSequence;
     readonly Stopwatch clock = new Stopwatch();
     long renderedAt;
     long pasteAt = -1;
@@ -76,8 +78,14 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     }
     void Render() {
         if (!began || restoring || restoreMutated || rendered || GetClipboardOwner() != Handle) return;
-        if (GetClipboardSequenceNumber() != sequence) { renderFailed = true; return; }
+        renderAttempted = true;
+        renderWriteStarted = renderWriteCompleted = false;
+        renderExpectedSequence = sequence;
+        renderObservedSequence = GetClipboardSequenceNumber();
+        if (renderObservedSequence != sequence) { renderFailed = true; return; }
+        renderWriteStarted = true;
         SetBytes(13, Encoding.Unicode.GetBytes(text + "\0"));
+        renderWriteCompleted = true;
         uint reader;
         GetWindowThreadProcessId(GetOpenClipboardWindow(),out reader);
         ReaderMatched = reader == TargetOwner;

@@ -118,6 +118,15 @@ CI-only observer 在 5 s 内核对该 helper
 与 Dispose 异常分别保留；两者都失败时保留 aggregate，而不是用 cleanup 覆盖
 原始故障。没有证明的 restore failure 仍使 fixture/CI 失败：不会吞错、跳过 OLE、
 放宽 owner/sequence 检查、释放 pending backup 或再次发送 paste。
+所有 transaction 分支统一独立保留 operation／cleanup 异常，而不仅是 OLE 分支；
+setter fault 的 hook 仍先恢复再 Dispose，最终 fixture cleanup 也不能覆盖原始异常。
+成功 JSON 只在完整 cleanup 后输出。assertion 有明确的内部标记；其它 managed/API
+异常按白名单 class、实际 HRESULT／可用的 Win32 code 记录，不一律归为断言失败。
+最早 mixed-format 分支分别记录 Begin 返回、原有一次临时 text 读取返回、
+Restore 返回及异常点的只读状态。observed sequence／owner 是分开采样的观察，
+不是原子 ownership 证明；render 的 expected/observed sequence 与写入开始／完成
+标量只描述最近一次 eligible callback，不额外调用 GetClipboardData 或发起 render。
+若该分支先失败，后面的 OLE 与其余分组属于未执行，不能沿用旧失败阶段推断。
 临时 Unicode clipboard 现在在同一 owned lock 内显式发布当前输入语言的
 `CF_LOCALE`，再采样 sequence。Windows 能从 Unicode 合成 ANSI/OEM text，
 并可在 `CloseClipboard` 时补充缺失的 locale；不能把这类自有发布边界上的
@@ -135,6 +144,8 @@ Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实
 失败后 CloseClipboard 也不会因已恢复 text 但尚缺 locale 而额外合成 metadata。
 真实故障 seam 覆盖 empty、locale 首项、首个 text 三个 mutation 边界，之后
 RecoverPending 必须恢复完整原始 bytes；外部新 copy 的负例也经过首个 text。
+上述 locale／sequence 处理仍需实际全分组通过；更早边界的失败仍是 blocker，
+不能仅凭契约解释、源码通过或新增日志就声称原始恢复问题已解决。
 
 diagnostic `flush()` 是 200 ms bounded best effort，不是文件存在或持久化 ACK。
 native privacy/content fixture 复用已有真实 writer fixture，先等 initialization
