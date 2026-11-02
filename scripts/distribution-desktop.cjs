@@ -1,34 +1,33 @@
 const fs = require('node:fs');
-const stages = new Set(['js-entry', 'imports-ready', 'host-verified', 'sources-verified', 'modules-loaded',
-  'app-ready', 'editor-ready', 'helper-ready', 'target-verified', 'paste-verified', 'cleanup', 'complete', 'deadline']);
+const { FinalDesktopLifecycle, stages } = require('./distribution-desktop-lifecycle.cjs');
+const report = { status: 'failed', scope: 'final-extracted-module/native-path on matching generic Electron host',
+  appMainExercised: false, actualUserApplicationUsed: false, microphoneUsed: false, externalServiceCalled: false };
+let driver, editor, timer, app;
 let published = 0;
+const lifecycle = new FinalDesktopLifecycle({
+  report, driver: () => driver, editor: () => editor,
+  publish(stage) {
+    if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_FIXTURE_PROGRESS ||
+        !stages.has(stage) || ++published > 16) throw new Error('Invalid final desktop progress publication.');
+    fs.appendFileSync(process.env.VI_FIXTURE_PROGRESS, `${JSON.stringify({ pid: process.pid, stage })}\n`);
+  },
+  output: (value) => console.log(JSON.stringify(value)),
+  exit: (code) => { process.exitCode = code; app.exit(code); },
+  clearDeadline: () => clearTimeout(timer),
+});
 function progress(stage) {
-  if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_FIXTURE_PROGRESS ||
-      !stages.has(stage) || ++published > 16) throw new Error('Invalid final desktop progress publication.');
-  fs.appendFileSync(process.env.VI_FIXTURE_PROGRESS, `${JSON.stringify({ pid: process.pid, stage })}\n`);
+  if (!lifecycle.publish(stage)) throw lifecycle.failure();
 }
-progress('js-entry');
-const { app, BrowserWindow, clipboard } = require('electron');
+lifecycle.publish('js-entry');
+const electron = require('electron');
+app = electron.app;
+const { BrowserWindow, clipboard } = electron;
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { createHash } = require('node:crypto');
-const { once } = require('node:events');
-progress('imports-ready');
-const marker = process.argv.indexOf('--ci-final-native-delivery');
-if (process.env.GITHUB_ACTIONS !== 'true' || marker < 0 || !process.env.VI_FIXTURE_PROFILE) {
-  throw new Error('Final native delivery fixtures require an isolated CI host.');
-}
-const resources = fs.realpathSync(process.argv[marker + 1]);
-const authority = JSON.parse(fs.readFileSync(process.argv[marker + 2], 'utf8'));
-const appRoot = path.join(resources, 'app');
-const nativeRoot = path.join(appRoot, 'native');
-assert.equal(app.commandLine.getSwitchValue('user-data-dir'), process.env.VI_FIXTURE_PROFILE,
-  'The isolated browser profile must be selected before the final fixture enters JavaScript.');
+lifecycle.publish('imports-ready');
 app.commandLine.appendSwitch('force-renderer-accessibility');
-const report = { status: 'failed', scope: 'final-extracted-module/native-path on matching generic Electron host',
-  appMainExercised: false, actualUserApplicationUsed: false, microphoneUsed: false, externalServiceCalled: false };
-let driver, editor, timer;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(action, label) {
   const end = Date.now() + 10000;
@@ -36,6 +35,18 @@ async function until(action, label) {
   throw new Error(`Final native delivery did not confirm ${label}.`);
 }
 async function run() {
+  const publicationError = lifecycle.failure();
+  if (publicationError) throw publicationError;
+  const marker = process.argv.indexOf('--ci-final-native-delivery');
+  if (process.env.GITHUB_ACTIONS !== 'true' || marker < 0 || !process.env.VI_FIXTURE_PROFILE) {
+    throw new Error('Final native delivery fixtures require an isolated CI host.');
+  }
+  const resources = fs.realpathSync(process.argv[marker + 1]);
+  const authority = JSON.parse(fs.readFileSync(process.argv[marker + 2], 'utf8'));
+  const appRoot = path.join(resources, 'app');
+  const nativeRoot = path.join(appRoot, 'native');
+  assert.equal(app.commandLine.getSwitchValue('user-data-dir'), process.env.VI_FIXTURE_PROFILE,
+    'The isolated browser profile must be selected before the final fixture enters JavaScript.');
   assert.equal(process.platform, 'win32');
   assert.equal(process.arch, authority.architecture);
   assert.equal(process.versions.electron, authority.electron);
@@ -94,19 +105,11 @@ async function run() {
   progress('paste-verified');
   report.status = 'passed';
 }
-timer = setTimeout(() => { progress('deadline'); driver?.close(); app.exit(1); }, 60000);
-run().catch((error) => { report.error = error.message; process.exitCode = 1; }).finally(async () => {
-  try {
-    progress('cleanup');
-    const child = driver?.driver?.process;
-    const exited = child && child.exitCode === null && child.signalCode === null ? once(child, 'exit') : undefined;
-    driver?.close();
-    if (exited) await Promise.race([exited, pause(2500).then(() => { throw new Error('Owned final native helper did not exit.'); })]);
-    report.helperExited = !child || child.exitCode !== null || child.signalCode !== null;
-    editor?.destroy();
-  } catch (error) { report.status = 'failed'; report.cleanupError = error.message; process.exitCode = 1; }
-  clearTimeout(timer);
-  progress('complete');
-  console.log(JSON.stringify(report));
-  app.exit(process.exitCode || (report.status === 'passed' ? 0 : 1));
+timer = setTimeout(() => {
+  try { lifecycle.deadline(); }
+  catch { process.exitCode = 1; console.error('Final desktop deadline failed.'); }
+}, 60000);
+run().then(() => lifecycle.finish(), (error) => lifecycle.finish(error)).catch(() => {
+  process.exitCode = 1;
+  console.error('Final desktop operation, publication or cleanup failed.');
 });

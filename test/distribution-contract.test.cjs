@@ -212,12 +212,16 @@ test('final desktop launch diagnostics distinguish absent JS entry from native l
 
 test('final extracted gate retains entry stages, exact native HWND and all delivery and cleanup assertions', () => {
   const source = fs.readFileSync(path.resolve('scripts', 'distribution-desktop.cjs'), 'utf8');
-  assert.ok(source.indexOf("progress('js-entry')") < source.indexOf("require('electron')"));
+  const lifecycle = fs.readFileSync(path.resolve('scripts', 'distribution-desktop-lifecycle.cjs'), 'utf8');
+  const entry = source.indexOf("lifecycle.publish('js-entry')");
+  assert.ok(entry >= 0 && entry < source.indexOf("require('electron')"));
   for (const text of ['authority.electronSourceExecutableSha256', 'authority.sourceFiles',
     'target.pid, process.pid', 'target.window, editor.getNativeWindowHandle()', "progress('paste-verified')",
-    "progress('complete')", 'report.helperExited', 'actualMixedClipboardRestored', 'appMainExercised: false']) {
+    'actualMixedClipboardRestored', 'appMainExercised: false', 'new FinalDesktopLifecycle',
+    'lifecycle.finish(error)', 'lifecycle.deadline()']) {
     assert.ok(source.includes(text));
   }
+  for (const text of ["this.publish('complete')", 'this.report.helperExited', '2500']) assert.ok(lifecycle.includes(text));
   assert.ok(source.includes('60000'));
   assert.ok(source.includes("app.commandLine.getSwitchValue('user-data-dir'), process.env.VI_FIXTURE_PROFILE"));
   assert.ok(!source.includes("app.commandLine.appendSwitch('user-data-dir'"));

@@ -538,6 +538,16 @@ empty／absent、无原生日志、unknown nonzero status 都是证据边界，�
 helper、clipboard、架构或网络成因；诊断不触发 retry 或提供成功 fallback。
 文件读取错误以固定类别显式记录，不覆盖原始 process status；空 marker 文件也不能
 证明 JS 从未执行，只能说明未观察到该 entry publication。
+stage publication 与 mandatory lifecycle 共用实际执行、可注入故障的 cleanup 路径：
+append 失败不能阻止 helper close／最多 2500 ms exit wait、editor destroy、final
+JSON 和明确 app.exit 被分别尝试；任一项 cleanup 失败也不能跳过后面的项。
+60 s deadline 则独立尝试 close、destroy、失败输出与 exit，不为等待 helper 而延长
+该 deadline，也不伪称 helper 已退出。正常完成仍必须实际观察 helper exit。
+所有原始 operation／publication／cleanup error 对象在内存中按身份保留，多个
+故障用 AggregateError 返回；输出仅含固定 stage/phase、error class/code，不含
+原始 message/profile/path。append 或 cleanup 失败始终使 status=failed、exit=1，
+complete stage 不替代成功 JSON 或真实 native proof，也不会用 65 s parent kill
+替代本应发生的 JS deadline／cleanup。
 原始 Chromium log 不进入 artifacts，profile 按既有 finally 清理。JS 60 s／父进程
 65 s deadline、sandbox/GPU、安全策略、fresh-extraction inventory 和全部实际
 delivery gates 保持；零退出还须有完整 JSON、最后 complete 阶段、精确 owned HWND、
