@@ -17,14 +17,16 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
       /^VI_CLIP_STAGE (engine \d+ [48] \d+|forms-ready|transaction-compiled|fixture-compiled|case \d{1,2})$/.test(line)).slice(-32);
     const faults = String(error.stderr || '').split(/\r?\n/).filter((line) =>
       /^VI_CLIP_FAILURE (operation|cleanup) case=\d{1,2} code=(fixture-assertion|[a-z-]+)( stage=[a-z-]+ format=\d{1,5} nativeError=-?\d{1,10})?$/.test(line)).slice(-8);
-    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages, faults,
+    const sequences = String(error.stderr || '').split(/\r?\n/).filter((line) =>
+      /^VI_CLIP_SEQUENCE expected=\d{1,10} current=\d{1,10} ownerMatch=True$/.test(line)).slice(-4);
+    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages, faults, sequences,
       timedOut: error.code === 'ETIMEDOUT', status: error.status, signal: error.signal }));
     throw error;
   }
   const report = JSON.parse(output);
   assert.equal(report.status, 'passed');
   assert.equal(report.inputEventsSent, 0);
-  assert.equal(report.checks.length, 13);
+  assert.equal(report.checks.length, 14);
   assert.ok(report.zeroAllocation.Format >= 0xc000);
   assert.ok((report.zeroAllocation.Flags & 0x4000) !== 0);
   assert.equal(report.zeroAllocation.Bytes, 0);

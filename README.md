@@ -104,11 +104,12 @@ discovery 影响内部 helper；不修改用户、父进程或 registry。规则
 
 `Windows native startup comparison (nonrelease)` 是单独的有限诊断，不是发布：
 由维护者 push `ci/windows-native-probe` 或在 workflow 注册后手动触发。
-ARM 的 inherited、deleted、inbox-autoload 和 candidate 各用独立 hosted VM，
-另有 x64 candidate，共五格、每格 3 min；不在同一个 runner 依次预热后冒充对照。
-control 只做 8 s assembly/cmdlet/type probe，失败如实使该格失败。candidate 首先
+默认只运行 x64／ARM64 两个 candidate，各用独立 hosted VM、每格 3 min。
+早先 inherited／deleted／inbox-autoload 对照属于其原 source head 的测量，
+不因无关根修复重新执行，也不迁移成当前版本的通过证据。candidate 首先
 启动真实生产 `NativeDelivery`，保留原始 20 s READY deadline，再运行实际 clipboard、
-native-diagnostics、native-types selectors。CI-only observer 在 5 s 内核对该 helper
+native-diagnostics、native-types、diagnostics selectors。早期失败仍使整格失败。
+CI-only observer 在 5 s 内核对该 helper
 的真实 PID/parent/creation/image/PE machine；该观察与 readiness 重叠，会明确记录，
 不宣称 uncached OS/disk 或最终 app GUI 测试。只准备源码不等于已执行此比较。
 
@@ -117,6 +118,30 @@ native-diagnostics、native-types selectors。CI-only observer 在 5 s 内核对
 与 Dispose 异常分别保留；两者都失败时保留 aggregate，而不是用 cleanup 覆盖
 原始故障。没有证明的 restore failure 仍使 fixture/CI 失败：不会吞错、跳过 OLE、
 放宽 owner/sequence 检查、释放 pending backup 或再次发送 paste。
+临时 Unicode clipboard 现在在同一 owned lock 内显式发布当前输入语言的
+`CF_LOCALE`，再采样 sequence。Windows 能从 Unicode 合成 ANSI/OEM text，
+并可在 `CloseClipboard` 时补充缺失的 locale；不能把这类自有发布边界上的
+系统写入当作未知 user copy，也不能简单在 Restore 时重置 sequence。
+参见 [系统格式转换](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats)
+与 [CF_LOCALE 的 close 契约](https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats)。
+restore 仍严格检查 owner/sequence；delayed renderer 在任何写入前也检查
+expected sequence，避免自有 render 掩盖先前未知修改。14 项真实 fixture 保留
+原 13 项，并增加实际 same-owner mutation：render 不得覆盖／归属该变化，
+backup 必须仍 pending，随后真正的新 copy 优先。OLE case 保留
+Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实读取后恢复；两条路径都检查
+发布后的 sequence 与实际 locale，额外保留原始 HTML/locale bytes。
+恢复时先交还 snapshot 中已有的原始 locale，再按原顺序交还其它格式；
+不制造或改写原始 locale，也不改变其它格式间的优先顺序。这样在部分 setter
+失败后 CloseClipboard 也不会因已恢复 text 但尚缺 locale 而额外合成 metadata。
+真实故障 seam 覆盖 empty、locale 首项、首个 text 三个 mutation 边界，之后
+RecoverPending 必须恢复完整原始 bytes；外部新 copy 的负例也经过首个 text。
+
+diagnostic `flush()` 是 200 ms bounded best effort，不是文件存在或持久化 ACK。
+native privacy/content fixture 复用已有真实 writer fixture，先等 initialization
+与目标 write sequence 的实际 ACK，再调用原来的 flush 和读取文件。测试故意
+延迟消息 300 ms，验证不是靠固定 sleep 或 worker 启动快才通过；writer 错误、
+exit 或 fixture ACK deadline 都明确失败。生产 checkpoint 25 ms／flush 200 ms
+及失败通知不变，不把缺文件当空日志，不清除 warning。
 
 Windows UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/focus 状态；
 每个 overlay recovery 边界仍须由真实 native capture 确认 foreground PID/HWND

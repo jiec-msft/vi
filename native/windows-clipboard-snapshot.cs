@@ -9,8 +9,11 @@ public sealed class ClipboardPreparationException : Exception {
     public readonly int NativeCode;
     public readonly string Stage;
     public readonly uint Format;
-    public ClipboardPreparationException(string code, int nativeCode = 0, string stage = "unspecified", uint format = 0) : base(code) {
+    public readonly uint ExpectedSequence, CurrentSequence;
+    public ClipboardPreparationException(string code, int nativeCode = 0, string stage = "unspecified", uint format = 0,
+        uint expectedSequence = 0, uint currentSequence = 0) : base(code) {
         Code = code; NativeCode = nativeCode; Stage = stage; Format = format;
+        ExpectedSequence = expectedSequence; CurrentSequence = currentSequence;
     }
 }
 
@@ -199,7 +202,12 @@ public sealed class ClipboardSnapshot : IDisposable {
         string stage = "restore-copy";
         uint format = 0;
         try {
-            foreach (var item in items) { format = item.Format; copies.Add(Clone(item.Format, item.Handle)); }
+            foreach (var item in items) {
+                format = item.Format;
+                var copy = Clone(item.Format, item.Handle);
+                // Publish saved locale before text, including when a later setter fails.
+                if (item.Format == 16) copies.Insert(0, copy); else copies.Add(copy);
+            }
             format = 0;
             stage = "restore-empty";
             if (!EmptyClipboard()) throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), stage);

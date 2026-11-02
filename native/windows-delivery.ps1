@@ -29,6 +29,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     [DllImport("user32.dll")] static extern IntPtr GetOpenClipboardWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
     [DllImport("user32.dll")] static extern int CountClipboardFormats();
     [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
@@ -75,6 +76,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     }
     void Render() {
         if (!began || restoring || restoreMutated || rendered || GetClipboardOwner() != Handle) return;
+        if (GetClipboardSequenceNumber() != sequence) { renderFailed = true; return; }
         SetBytes(13, Encoding.Unicode.GetBytes(text + "\0"));
         uint reader;
         GetWindowThreadProcessId(GetOpenClipboardWindow(),out reader);
@@ -113,10 +115,14 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             catch (ClipboardPreparationException) { throw; }
             catch { throw new ClipboardPreparationException("clipboard-snapshot-failed"); }
             if (GetClipboardOwner() != snapshotOwner) throw new ClipboardPreparationException("clipboard-changed");
+            uint locale = (uint)(GetKeyboardLayout(0).ToInt64() & 0xffff);
+            if (locale == 0) throw new ClipboardPreparationException("clipboard-snapshot-failed");
             if (!EmptyClipboard()) throw new InvalidOperationException("Clipboard unavailable.");
             text = value;
             began = true;
             SetClipboardData(13, IntPtr.Zero);
+            // Otherwise CloseClipboard may synthesize CF_LOCALE after our sequence sample.
+            SetBytes(16, BitConverter.GetBytes(locale));
             SetBytes(RegisterClipboardFormat("CanIncludeInClipboardHistory"), BitConverter.GetBytes(0));
             SetBytes(RegisterClipboardFormat("CanUploadToCloudClipboard"), BitConverter.GetBytes(0));
             clock.Start();
@@ -150,7 +156,8 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
         try {
             // Check ownership under the same lock as restoration so a newer copy cannot be overwritten.
             if (GetClipboardOwner() != Handle) { began = false; return; }
-            if (GetClipboardSequenceNumber() != sequence) throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence");
+            uint current = GetClipboardSequenceNumber();
+            if (current != sequence) throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence", 0, sequence, current);
             restoring = true;
             try {
                 saved.RestoreWhileOpen(() => {

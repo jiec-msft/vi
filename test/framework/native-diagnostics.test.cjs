@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { NativeTrace, parseNativeStartup, nativeHelperEnvironment } = require('../../app/native-diagnostics.cjs');
-const { Diagnostics } = require('../../app/diagnostics.cjs');
+const { diagnosticsFixture } = require('./fixtures/diagnostics.cjs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -28,9 +28,8 @@ test('bootstrap progress accepts only finite stages and the actual child identit
 });
 
 test('native diagnostics retain correlation and safe categories, never raw stderr or payload', async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-native-log-'));
-  const diagnostics = new Diagnostics(root, assert.fail);
-  t.after(async () => { diagnostics.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const fixture = await diagnosticsFixture(t, 300);
+  const { diagnostics } = fixture;
   const trace = new NativeTrace(diagnostics, 'pointer', 2);
   const child = Object.assign(new EventEmitter(), { pid: 123, stderr: new PassThrough() });
   trace.attach(child);
@@ -44,10 +43,9 @@ test('native diagnostics retain correlation and safe categories, never raw stder
     inputDesktop: 'unavailable', win32Error: 5, endpoint: 'PRIVATE_ENDPOINT' })}\n`);
   trace.closing = true;
   child.emit('exit', 0, null);
-  await diagnostics.flush();
-  const text = await fs.readFile(diagnostics.file, 'utf8');
+  const rows = await fixture.entries();
+  const text = JSON.stringify(rows);
   assert.doesNotMatch(text, /PRIVATE|endpoint|PATH/);
-  const rows = text.trim().split('\n').map(JSON.parse);
   assert.equal(rows.filter((row) => row.fault === 'compilation').length, 1);
   assert.ok(rows.some((row) => row.clipboardStage === 'restore-write' && row.clipboardFormat === 49465));
   assert.ok(rows.some((row) => row.startupStage === 'script-entry' && row.powerShellMajor === 5 &&
@@ -98,17 +96,15 @@ test('malformed native metadata is an explicit protocol category, not a trusted 
 });
 
 test('a failed native sidecar remains component-local and does not disable lifecycle or fatal records', async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-sidecar-failure-'));
-  const diagnostics = new Diagnostics(root, assert.fail);
-  t.after(async () => { diagnostics.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const fixture = await diagnosticsFixture(t);
+  const { diagnostics } = fixture;
   const trace = new NativeTrace(diagnostics, 'pointer', 1);
   const child = Object.assign(new EventEmitter(), { pid: 42, stderr: new PassThrough() });
   trace.attach(child);
   child.stderr.write('VI_DIAGNOSTIC_FAILURE\nVI_DIAGNOSTIC_FAILURE\n');
   diagnostics.checkpoint('lifecycle', { component: 'main', state: 'uncaught-exception' });
-  await diagnostics.flush();
   assert.equal(diagnostics.failed, undefined);
-  const records = (await fs.readFile(diagnostics.file, 'utf8')).trim().split('\n').map(JSON.parse);
+  const records = await fixture.entries();
   assert.equal(records.filter((row) => row.state === 'log-write-failed').length, 1);
   assert.ok(records.some((row) => row.state === 'uncaught-exception'));
 });

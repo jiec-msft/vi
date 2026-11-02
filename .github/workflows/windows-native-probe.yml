@@ -14,9 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: windows-11-arm, arch: arm64, variant: legacy-inherited}
-          - {runner: windows-11-arm, arch: arm64, variant: legacy-cleared}
-          - {runner: windows-11-arm, arch: arm64, variant: inbox-autoload}
           - {runner: windows-11-arm, arch: arm64, variant: candidate}
           - {runner: windows-2025, arch: x64, variant: candidate}
     env:
@@ -34,7 +31,7 @@ jobs:
       - name: Actual owned clipboard and native diagnostic fixtures
         if: always() && matrix.variant == 'candidate'
         run: |
-          node --test --test-concurrency=1 test/framework/clipboard-transaction.test.cjs test/framework/native-diagnostics.test.cjs test/framework/native-types.test.cjs 2>&1 |
+          node --test --test-concurrency=1 test/framework/clipboard-transaction.test.cjs test/framework/native-diagnostics.test.cjs test/framework/native-types.test.cjs test/framework/diagnostics.test.cjs 2>&1 |
             Tee-Object -FilePath artifacts-ci/native-startup/candidate/fixtures.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
