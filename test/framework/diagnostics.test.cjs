@@ -7,12 +7,48 @@ const { Diagnostics, safeError } = require('../../app/diagnostics.cjs');
 const { EventEmitter } = require('node:events');
 const { spawn } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
+const { Worker } = require('node:worker_threads');
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-diagnostics-'));
   const failures = [];
-  const diagnostics = new Diagnostics(root, (error) => failures.push(error));
-  t.after(async () => { diagnostics.close(); await fs.rm(root, { recursive: true, force: true }); });
+  let writer, ready;
+  const diagnostics = new Diagnostics(root, (error) => failures.push(error), 524288, {
+    createWriter(data) {
+      const module = require.resolve('../../app/diagnostics-writer.cjs');
+      writer = new Worker(`require(${JSON.stringify(module)});
+        const {parentPort,workerData}=require('node:worker_threads');
+        if(Atomics.load(new Int32Array(workerData.control),2))throw new Error('Content writer initialization failed.');
+        parentPort.postMessage({fixtureReady:true});`, { eval: true, workerData: data });
+      ready = new Promise((resolve, reject) => {
+        const finish = (error) => {
+          clearTimeout(timer);
+          writer.off('message', message);
+          writer.off('error', failed);
+          writer.off('exit', exited);
+          if (error) reject(error); else resolve();
+        };
+        const message = (value) => {
+          if (value.failed) finish(new Error('Content writer initialization failed.'));
+          else if (value.fixtureReady) finish();
+        };
+        const failed = (error) => finish(error);
+        const exited = (code) => finish(new Error(`Content writer exited before readiness (${code}).`));
+        const timer = setTimeout(() => finish(new Error('Content writer readiness exceeded 2000 ms.')), 2000);
+        writer.on('message', message);
+        writer.on('error', failed);
+        writer.on('exit', exited);
+      });
+      return writer;
+    },
+  });
+  t.after(async () => {
+    diagnostics.close();
+    if (writer) await writer.terminate();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  assert.ok(ready, 'Content writer was not created.');
+  await ready;
   return { diagnostics, async entries() {
     await diagnostics.flush();
     assert.deepEqual(failures, []);
