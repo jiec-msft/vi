@@ -16,7 +16,7 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
     const stages = String(error.stderr || '').split(/\r?\n/).filter((line) =>
       /^VI_CLIP_STAGE (engine \d+ [48] \d+|forms-ready|transaction-compiled|fixture-compiled|case \d{1,2})$/.test(line)).slice(-32);
     const faults = String(error.stderr || '').split(/\r?\n/).filter((line) =>
-      /^VI_CLIP_FAILURE (operation|cleanup|fixture-cleanup) case=\d{1,2} code=(fixture-assertion|[a-z-]+)( stage=[a-z-]+ format=\d{1,5} nativeError=-?\d{1,10}| errorClass=(ExternalException|InvalidOperationException|ArgumentException|OutOfMemoryException|IOException|SystemException|Win32Exception|RuntimeException|Exception|Other) nativeError=-?\d{1,10} hresult=-?\d{1,10})?$/.test(line)).slice(-8);
+      /^VI_CLIP_FAILURE (operation|cleanup|fixture-cleanup) case=\d{1,2} code=(fixture-assertion|[a-z-]+)( check=partial-(failure|writes|sequence|locale|text)| stage=[a-z-]+ format=\d{1,5} nativeError=-?\d{1,10}| errorClass=(ExternalException|InvalidOperationException|ArgumentException|OutOfMemoryException|IOException|SystemException|Win32Exception|RuntimeException|Exception|Other) nativeError=-?\d{1,10} hresult=-?\d{1,10})?$/.test(line)).slice(-8);
     const sequences = String(error.stderr || '').split(/\r?\n/).filter((line) =>
       /^VI_CLIP_SEQUENCE expected=\d{1,10} current=\d{1,10} ownerMatch=True$/.test(line)).slice(-4);
     const states = String(error.stderr || '').split(/\r?\n/).filter((line) =>

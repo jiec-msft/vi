@@ -122,6 +122,12 @@ CI-only observer 在 5 s 内核对该 helper
 setter fault 的 hook 仍先恢复再 Dispose，最终 fixture cleanup 也不能覆盖原始异常。
 成功 JSON 只在完整 cleanup 后输出。assertion 有明确的内部标记；其它 managed/API
 异常按白名单 class、实际 HRESULT／可用的 Win32 code 记录，不一律归为断言失败。
+fixture 的 case ID 不是 checks 分组序号：case 13/14/15 分别是 partial-restore
+的 0/1/2 setter 边界，均属于第 12 组；seal-race 的第 15 组在 case 18–21。
+partial-restore 尚未恢复完成时的五个断言仅附固定 `partial-failure/writes/sequence/locale/text`
+check ID，随已有 fixture-assertion 记录传递；不输出 assertion message 或 payload，
+不新增 native call、不改变条件或调用顺序。该 ID 用来区分失败检查，不能将已观察到的
+sequence 漂移自行归因为 Close、格式合成或外部修改，也不是恢复问题已修复的证明。
 最早 mixed-format 分支分别记录 Begin 返回、原有一次临时 text 读取返回、
 Restore 返回及异常点的只读状态。observed sequence／owner 是分开采样的观察，
 不是原子 ownership 证明；render 的 expected/observed sequence 与写入开始／完成

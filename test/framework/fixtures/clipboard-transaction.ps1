@@ -240,10 +240,12 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
 }
 '@
 [Console]::Error.WriteLine('VI_CLIP_STAGE fixture-compiled')
-function Check([bool]$Value,[string]$Message){
+function Check([bool]$Value,[string]$Message,
+    [ValidateSet('none','partial-failure','partial-writes','partial-sequence','partial-locale','partial-text')][string]$CheckId='none'){
     if(-not $Value){
         $failure=[InvalidOperationException]::new($Message)
         $failure.Data['OwnedFixtureAssertion']=$true
+        if($CheckId -ne 'none'){$failure.Data['OwnedFixtureCheck']=$CheckId}
         throw $failure
     }
 }
@@ -263,7 +265,11 @@ function Report-TransactionFault([string]$Phase,$Exception){
                 [Console]::Error.WriteLine("VI_CLIP_SEQUENCE expected=$($Exception.ExpectedSequence) current=$($Exception.CurrentSequence) ownerMatch=True")
             }
         }elseif($Exception.Data['OwnedFixtureAssertion'] -eq $true){
-            [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=fixture-assertion")
+            $check=''
+            if($Exception.Data['OwnedFixtureCheck'] -in @('partial-failure','partial-writes','partial-sequence','partial-locale','partial-text')){
+                $check=" check=$($Exception.Data['OwnedFixtureCheck'])"
+            }
+            [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=fixture-assertion$check")
         }else{
             $class=$Exception.GetType().Name
             if($class -notin @('ExternalException','InvalidOperationException','ArgumentException','OutOfMemoryException','IOException','SystemException','Win32Exception','RuntimeException','Exception')){$class='Other'}
@@ -583,17 +589,17 @@ try{
             $setter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('RestoreSetter')))
             $failed=$false
             try{$transaction.Dispose()}catch{$failed=(Fault-Code $_.Exception) -eq 'restore-failed'}
-            Check $failed 'Controlled mid-restore failure did not retain the transaction.'
-            Check ([OwnedClipboardFixture]::Writes -eq $after) 'Restore seam failed at a different mutation boundary.'
+            Check $failed 'Controlled mid-restore failure did not retain the transaction.' 'partial-failure'
+            Check ([OwnedClipboardFixture]::Writes -eq $after) 'Restore seam failed at a different mutation boundary.' 'partial-writes'
             $sequence=[TranscriptClipboard].GetField('sequence',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($transaction)
-            Check ($sequence -eq [OwnedClipboardFixture]::GetClipboardSequenceNumber()) 'Own partial restoration was not attributed under the lock.'
+            Check ($sequence -eq [OwnedClipboardFixture]::GetClipboardSequenceNumber()) 'Own partial restoration was not attributed under the lock.' 'partial-sequence'
             [OwnedClipboardFixture]::RenderAll($transaction.Handle)
             if($after -eq 0){
                 Check ([OwnedClipboardFixture]::CountClipboardFormats() -eq 0) 'Late rendering reintroduced data after empty restore.'
             }else{
-                Check ([Convert]::ToBase64String($fixture.Read(16)) -eq $expectedLocale) 'Partial restoration did not preserve the saved locale prelude.'
+                Check ([Convert]::ToBase64String($fixture.Read(16)) -eq $expectedLocale) 'Partial restoration did not preserve the saved locale prelude.' 'partial-locale'
                 if($after -eq 1){Check (-not [OwnedClipboardFixture]::IsClipboardFormatAvailable(13)) 'Late rendering reintroduced the temporary transcript after the locale prelude.'}
-                else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expected.text) 'Late rendering changed the restored first text format.'}
+                else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expected.text) 'Late rendering changed the restored first text format.' 'partial-text'}
             }
             $setter.SetValue($null,$original)
             [TranscriptClipboard]::RecoverPending()
@@ -838,6 +844,14 @@ try{
         $logged=@($capturedError.ToString() -split '\r?\n'|Where-Object {$_ -like 'VI_CLIP_FAILURE *'})
         $capturedError.Dispose()
         Check ($logged.Count -eq 2 -and $logged[0] -like '*stage=publication-state*' -and $logged[1] -like '*stage=publication-close*') 'Fixture logging lost one aggregate member.'
+        $assertion=$null
+        try{Check $false 'PRIVATE_ASSERTION_MESSAGE' 'partial-sequence'}catch{$assertion=$_.Exception}
+        $capturedAssertion=[IO.StringWriter]::new()
+        try{[Console]::SetError($capturedAssertion);Report-TransactionFault 'operation' $assertion}
+        finally{[Console]::SetError($originalError)}
+        $assertionLog=$capturedAssertion.ToString().Trim()
+        $capturedAssertion.Dispose()
+        Check ($assertionLog -eq 'VI_CLIP_FAILURE operation case=35 code=fixture-assertion check=partial-sequence') 'Fixture assertion reporting lost its fixed check identity or exposed raw content.'
         $extra=[AggregateException]::new('Synthetic bounded aggregate',[Exception[]]@($caught,[InvalidOperationException]::new('PRIVATE_SYNTHETIC_CAUSE')))
         $bounded=ConvertTo-ClipboardFailure $extra
         Check ($bounded.causes.Count -eq 2 -and $bounded.truncated) 'Excess aggregate members were silently discarded.'
