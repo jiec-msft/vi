@@ -174,6 +174,13 @@ provider 和 helper，再 inside-out ad-hoc signing、strict verification；
 后续服务地址 JSON 只能放 bundle 外，不能修改 sealed macOS bundle，
 也不能将 macOS archive 用 Windows ZIP 工具重新打包。
 
+Electron 45 的 npm package 可以在首次调用公开 `require('electron')` loader
+时才准备 runtime。producer 必须先调用该 loader，再按返回的实际 executable
+确认 Windows runtime directory 或 `Electron.app`，不能将 `npm ci` 成功或
+固定的 `node_modules/electron/dist` 路径当成 binary 已存在的证据。
+receipt 同时记录输入 Electron executable hash 与最终输出 hash；
+不接受 dist override、另一份 runtime 或缺失 binary 的 fallback。
+
 每个平台都用实际 packaged Electron 的 Node mode 加载完整 provider、
 两种 factory 和共享 config loader，通过公开 fixture 的 loopback transport
 发送 synthetic PCM。测试不使用真实麦克风、credential lookup 或外部服务；
@@ -215,6 +222,12 @@ The main log has a bounded off-main writer (512 KiB per file, four files). Criti
 markers are sent before synchronous operations, with at most a 25 ms acknowledgement
 wait; queued ordinary records are batched. Pending memory is limited to 128 records
 / 32 KiB and exit flushing to 200 ms. Drops and write failures are explicit.
+内容型 unit fixtures 先等待真实 writer 的持久化 sequence acknowledgement，
+再调用原有 200 ms flush；不会清空错误或延长生产 deadline。专门的 stalled/
+blocked/rotation/filesystem 测试仍独立验证原来的边界。native host-gap 内容测试
+仅控制 fixture 的 pulse/sample bookkeeping，走真实 sampler 和 writer，
+保留 5 秒生产阈值、重复通知断言与原 child deadline；它不把 PowerShell
+cold-start 加上固定 sleep 的总时长冒充 sampler 性能或真实 OS 停顿验收。
 An OS/filesystem stall can still prevent a marker from reaching disk; logging
 cannot guarantee evidence through a power loss or a system-wide freeze.
 `window-shown` is the completed native-order receipt, not the first rendered pixel.

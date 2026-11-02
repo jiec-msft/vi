@@ -25,6 +25,23 @@ function childEnv(profile) {
   return env;
 }
 
+function electronDistribution(platform, loadExecutable = () => require('electron')) {
+  // Electron's public loader initializes its lazy binary installation.
+  const supplied = loadExecutable();
+  if (typeof supplied !== 'string') throw new Error('Electron did not return an executable path.');
+  const executable = fs.realpathSync(supplied);
+  if (!fs.statSync(executable).isFile()) throw new Error('Electron executable is missing.');
+  if (platform === 'win32' && path.basename(executable).toLowerCase() === 'electron.exe') {
+    return { executable, source: path.dirname(executable) };
+  }
+  const bundle = path.dirname(path.dirname(path.dirname(executable)));
+  if (platform === 'darwin' && path.basename(executable) === 'Electron' &&
+      path.basename(path.dirname(executable)) === 'MacOS' &&
+      path.basename(path.dirname(path.dirname(executable))) === 'Contents' &&
+      path.basename(bundle) === 'Electron.app') return { executable, source: bundle };
+  throw new Error('Unexpected public Electron runtime layout.');
+}
+
 function architecture(file, arch) {
   const fd = fs.openSync(file, 'r');
   try {
@@ -79,12 +96,13 @@ async function main(version, arch) {
   fs.mkdirSync(output, { recursive: true });
   const staging = path.join(output, 'staging');
   fs.mkdirSync(staging);
-  const electronDist = path.join(path.dirname(require.resolve('electron/package.json')), 'dist');
+  if (process.env.ELECTRON_OVERRIDE_DIST_PATH) throw new Error('Neutral bases require the locked public Electron installation.');
+  const electronSource = electronDistribution(process.platform);
   const bundle = process.platform === 'darwin' ? path.join(staging, 'VI.app') : staging;
-  if (process.platform === 'darwin') fs.cpSync(path.join(electronDist, 'Electron.app'), bundle,
+  if (process.platform === 'darwin') fs.cpSync(electronSource.source, bundle,
     { recursive: true, verbatimSymlinks: true });
   else {
-    fs.cpSync(electronDist, staging, { recursive: true });
+    fs.cpSync(electronSource.source, staging, { recursive: true });
     fs.renameSync(path.join(staging, 'electron.exe'), path.join(staging, 'VI.exe'));
   }
   const contents = process.platform === 'darwin' ? path.join(bundle, 'Contents') : bundle;
@@ -128,7 +146,8 @@ async function main(version, arch) {
       { encoding: 'utf8' }).trim() };
   }
   const authority = { sourceRevision: revision, version, architecture: arch,
-    electron: require('../package.json').devDependencies.electron, sourceFiles, provider };
+    electron: require('../package.json').devDependencies.electron,
+    electronSourceExecutableSha256: digest(electronSource.executable), sourceFiles, provider };
   const authorityFile = path.join(output, 'authority.json');
   fs.writeFileSync(authorityFile, JSON.stringify(authority, null, 2));
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'vi-native-base-'));
@@ -195,7 +214,7 @@ async function main(version, arch) {
   } finally { fs.rmSync(profile, { recursive: true, force: true }); }
 }
 
-module.exports = { distributionVersion, childEnv };
+module.exports = { distributionVersion, childEnv, electronDistribution };
 if (require.main === module) main(process.argv[2], process.argv[3]).catch((error) => {
   console.error(error.stack); process.exitCode = 1;
 });

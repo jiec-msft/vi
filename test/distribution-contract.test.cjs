@@ -2,7 +2,31 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { distributionVersion, childEnv } = require('../scripts/distribution.cjs');
+const os = require('node:os');
+const { distributionVersion, childEnv, electronDistribution } = require('../scripts/distribution.cjs');
+
+test('native distribution initializes the public Electron loader before reading its binary layout', (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vi-electron-layout-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const platform of ['win32', 'darwin']) {
+    const source = platform === 'win32' ? path.join(root, 'win-runtime') : path.join(root, 'Electron.app');
+    const executable = platform === 'win32' ? path.join(source, 'electron.exe')
+      : path.join(source, 'Contents', 'MacOS', 'Electron');
+    let called = 0;
+    const actual = electronDistribution(platform, () => {
+      called++;
+      fs.mkdirSync(path.dirname(executable), { recursive: true });
+      fs.writeFileSync(executable, 'Non-executed runtime layout fixture.');
+      return executable;
+    });
+    assert.equal(called, 1);
+    assert.deepEqual(actual, { executable, source });
+  }
+  assert.throws(() => electronDistribution('win32', () => path.join(root, 'missing.exe')), /ENOENT/);
+  const invalid = path.join(root, 'other.exe');
+  fs.writeFileSync(invalid, '');
+  assert.throws(() => electronDistribution('win32', () => invalid), /Unexpected/);
+});
 
 test('neutral distribution versions are explicit bounded semver values, not command fragments', () => {
   for (const version of ['0.6.4-preview', '0.6.4-preview.1', '1.2.3']) assert.equal(distributionVersion(version), version);
