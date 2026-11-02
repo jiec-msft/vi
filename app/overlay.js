@@ -21,7 +21,8 @@ window.floatingVoice.onStatus((value) => {
   const elapsed = `${Math.floor(value.elapsedSeconds / 60)}:${String(value.elapsedSeconds % 60).padStart(2, '0')}`;
   document.getElementById('message').textContent = value.overlayControlError ? 'Mouse fallback'
     : value.phase === 'error' ? ({ 'input-confirmation': 'Input not confirmed', input: 'Input error',
-      microphone: 'Audio interrupted', cloud: 'Connection error', 'no-speech': 'No speech detected',
+      microphone: 'Audio interrupted', cloud: 'Connection error', provider: 'Provider setup error',
+      'no-speech': 'No speech detected',
       plugin: 'Result blocked by plugin' }[value.errorKind] || 'Stopped: error')
     : value.phase === 'done' ? value.insertionResult === 'preview'
       ? value.origin === 'preview' ? 'Preview ready' : 'Not pasted; copy' : 'Ready'

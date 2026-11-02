@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { app } = require('electron');
+const { providerSetup } = require('./provider-error.cjs');
 
 function directory() {
   const supplied = app.commandLine.getSwitchValue('provider-dir');
@@ -17,6 +18,10 @@ function readOverride() {
 }
 
 function createSession() {
+  return providerSetup(loadSession);
+}
+
+function loadSession() {
   const root = directory();
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
   if (manifest.apiVersion !== 1 || manifest.kind !== 'service-provider' ||

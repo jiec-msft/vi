@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { Diagnostics } = require('../../app/diagnostics.cjs');
+const { Diagnostics, safeError } = require('../../app/diagnostics.cjs');
 const { EventEmitter } = require('node:events');
 const { spawn } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
@@ -27,6 +27,16 @@ test('startup diagnostics retain stable, preview and build versions without arbi
   }
   assert.deepEqual((await f.entries()).map((entry) => entry.version),
     ['0.6.1', '0.6.1-vi-preview', '0.6.1-preview.2+build.3', undefined, undefined]);
+});
+
+test('provider setup diagnostics retain classification without raw paths or error content', async (t) => {
+  const f = await fixture(t);
+  const error = Object.assign(new Error('SYNTHETIC_PATH_AND_MODULE'), { code: 'ERR_PROVIDER_SETUP' });
+  f.diagnostics.record('error', { reason: 'provider', ...safeError(error), message: error.message });
+  const entries = await f.entries();
+  assert.equal(entries[0].reason, 'provider');
+  assert.equal(entries[0].errorCode, 'ERR_PROVIDER_SETUP');
+  assert.doesNotMatch(JSON.stringify(entries), /SYNTHETIC_PATH_AND_MODULE/);
 });
 
 test('native pointer faults retain fixed reason and recovery state, never raw errors', async (t) => {

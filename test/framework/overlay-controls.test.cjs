@@ -33,7 +33,9 @@ function fixture() {
     window: { floatingVoice: bridge },
   });
   const status = (nativePointer) => listeners.status({ nativePointer, phase: 'idle', elapsedSeconds: 0 });
-  return { calls, status, interrupt: () => listeners.cancel(),
+  return { calls, status, report: listeners.status,
+    message: () => elements.get('message').textContent,
+    detail: () => elements.get('.pill').title, interrupt: () => listeners.cancel(),
     nativeDown(name) { target = elements.get(name); listeners.down({ x: 0, y: 0 }); },
     click(name) { elements.get(name).onclick({ detail: 1 }); },
     freshPress(name) {
@@ -67,4 +69,15 @@ test('an unclicked native press cannot suppress a fresh fallback press', () => {
   f.status(false);
   f.freshPress('cancel');
   assert.equal(f.calls.cancel, 2);
+});
+
+test('provider setup errors have a distinct overlay label and retain the detailed failure', () => {
+  const f = fixture();
+  const message = "Provider setup failed: Cannot find module './missing-dependency.cjs'";
+  f.report({ phase: 'error', errorKind: 'provider', message, elapsedSeconds: 0, nativePointer: false });
+  assert.equal(f.message(), 'Provider setup error');
+  assert.equal(f.detail(), message);
+  f.report({ phase: 'error', errorKind: 'cloud', message: 'Connection refused',
+    elapsedSeconds: 0, nativePointer: false });
+  assert.equal(f.message(), 'Connection error');
 });

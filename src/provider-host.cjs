@@ -1,7 +1,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { providerSetup } = require('../app/provider-error.cjs');
 
 function loadProvider(directory, options) {
+  return providerSetup(() => instantiateProvider(directory, options));
+}
+
+function instantiateProvider(directory, options) {
   const root = path.resolve(directory);
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
   if (manifest.kind !== 'service-provider' || manifest.apiVersion !== 1 ||
