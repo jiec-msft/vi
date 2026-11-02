@@ -30,7 +30,7 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
   const report = JSON.parse(output);
   assert.equal(report.status, 'passed');
   assert.equal(report.inputEventsSent, 0);
-  assert.equal(report.checks.length, 22);
+  assert.equal(report.checks.length, 24);
   assert.ok(report.zeroAllocation.Format >= 0xc000);
   assert.ok((report.zeroAllocation.Flags & 0x4000) !== 0);
   assert.equal(report.zeroAllocation.Bytes, 0);

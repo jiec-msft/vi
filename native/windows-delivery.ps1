@@ -54,6 +54,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     static Action<IntPtr> publicationClosed = null;
     static Action<IntPtr> sealBeforeCommit = null;
     static Func<bool> sealClose = CloseClipboard;
+    static Func<bool> restoreClose = CloseClipboard;
     static Func<uint, IntPtr> publicationRead = GetClipboardData;
     PublicationProbe activeProbe;
     bool publishing, publicationSealed;
@@ -353,23 +354,52 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             if (!opened) { openError = Marshal.GetLastWin32Error(); Application.DoEvents(); Thread.Sleep(20); }
         }
         if (!opened) throw new ClipboardPreparationException("restore-failed", openError, "restore-open");
+        bool authorized = false, restored = false, abandoned = false;
+        Exception primary = null;
         try {
             // Check ownership under the same lock as restoration so a newer copy cannot be overwritten.
-            if (GetClipboardOwner() != Handle) { began = false; return; }
+            if (GetClipboardOwner() != Handle) { abandoned = true; return; }
             uint current = GetClipboardSequenceNumber();
             if (current != sequence) throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence", 0, sequence, current);
+            authorized = true;
             restoring = true;
             try {
                 saved.RestoreWhileOpen(() => {
                     restoreMutated = true;
                     sequence = GetClipboardSequenceNumber();
                 });
-                began = false;
+                restored = true;
             } finally {
                 sequence = GetClipboardSequenceNumber();
-                restoring = false;
             }
-        } finally { CloseClipboard(); }
+        } catch (Exception failure) {
+            primary = failure;
+            throw;
+        } finally {
+            uint candidate = sequence;
+            ClipboardPreparationException cleanup = null;
+            try {
+                SetLastError(0);
+                if (!restoreClose()) throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), "restore-close");
+                if (abandoned) began = false;
+                else if (authorized) {
+                    if (GetClipboardOwner() != Handle) began = false;
+                    else {
+                        uint current = GetClipboardSequenceNumber();
+                        if (current != candidate)
+                            throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence", 0, candidate, current);
+                        if (restored) began = false;
+                    }
+                }
+            } catch (ClipboardPreparationException failure) { cleanup = failure; }
+            catch (Exception failure) {
+                cleanup = new ClipboardPreparationException("restore-failed", 0, "restore-close", 0, 0, 0, failure);
+            } finally { restoring = false; }
+            if (cleanup != null) {
+                if (primary != null) throw new AggregateException("Clipboard restore and close both failed.", primary, cleanup);
+                throw cleanup;
+            }
+        }
     }
     public void Dispose() {
         if (disposed) return;

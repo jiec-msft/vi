@@ -66,6 +66,7 @@ public sealed class ClipboardSnapshot : IDisposable {
     }
     readonly List<Item> items = new List<Item>();
     static Func<uint, IntPtr, IntPtr> write = SetClipboardData;
+    static Func<uint, IntPtr, IntPtr> completeTextWrite = SetClipboardData;
     static Action<IntPtr, int> copyCheckpoint = null;
     static Func<IntPtr, IntPtr> releaseCopy = GlobalFree;
     static Func<uint, StringBuilder, int, int> readFormatName = GetClipboardFormatName;
@@ -260,18 +261,43 @@ public sealed class ClipboardSnapshot : IDisposable {
             if (!EmptyClipboard()) throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), stage);
             changed();
             stage = "restore-write";
-            foreach (var copy in copies) {
-                format = copy.Format;
+            bool wroteText = false;
+            try {
+                foreach (var copy in copies) {
+                    format = copy.Format;
+                    try {
+                        if (write(copy.Format, copy.Handle) == IntPtr.Zero)
+                            throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), stage, format);
+                        copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
+                        if (format == 1 || format == 7 || format == 13) wroteText = true;
+                    } finally { changed(); }
+                }
+            } catch (Exception failure) {
                 try {
-                    if (write(copy.Format, copy.Handle) == IntPtr.Zero)
-                        throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), stage, format);
-                    copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
-                } finally { changed(); }
+                    // Finish only already-backed text representations before releasing this lock.
+                    if (wroteText) foreach (var copy in copies) {
+                        if (copy.Handle == IntPtr.Zero || !(copy.Format == 1 || copy.Format == 7 || copy.Format == 13)) continue;
+                        try {
+                            SetLastError(0);
+                            if (completeTextWrite(copy.Format, copy.Handle) == IntPtr.Zero)
+                                throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), "restore-text", copy.Format);
+                            copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
+                        } finally { changed(); }
+                    }
+                } catch (Exception cleanup) {
+                    var original = failure as ClipboardPreparationException;
+                    var completion = cleanup as ClipboardPreparationException;
+                    throw new AggregateException("Clipboard restore and text publication both failed.",
+                        original ?? new ClipboardPreparationException("restore-failed", 0, stage, format, 0, 0, failure),
+                        completion ?? new ClipboardPreparationException("restore-failed", 0, "restore-text", 0, 0, 0, cleanup));
+                }
+                throw;
             }
         } catch (AggregateException failure) {
             var causes = new List<Exception>();
             foreach (var cause in failure.InnerExceptions) {
                 var preparation = cause as ClipboardPreparationException;
+                if (preparation != null && preparation.Code == "restore-failed") { causes.Add(preparation); continue; }
                 causes.Add(new ClipboardPreparationException("restore-failed", preparation == null ? 0 : preparation.NativeCode,
                     preparation != null && preparation.Stage == "snapshot-release" ? "snapshot-release" : stage, format, 0, 0, cause));
             }

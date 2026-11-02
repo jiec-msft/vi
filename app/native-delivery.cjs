@@ -40,7 +40,7 @@ class NativeDelivery {
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
-        const clipboardStage = ['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write',
+        const clipboardStage = ['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write', 'restore-text', 'restore-close',
           'publication-open', 'publication-close', 'publication-owner', 'publication-sequence', 'publication-state', 'publication-write',
           'snapshot-format', 'snapshot-format-name', 'snapshot-copy', 'snapshot-release']
           .includes(reply.clipboardStage) ? reply.clipboardStage : undefined;

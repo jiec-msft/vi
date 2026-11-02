@@ -113,7 +113,7 @@ CI-only observer 在 5 s 内核对该 helper
 的真实 PID/parent/creation/image/PE machine；该观察与 readiness 重叠，会明确记录，
 不宣称 uncached OS/disk 或最终 app GUI 测试。只准备源码不等于已执行此比较。
 
-恢复失败新增固定 `restore-open/sequence/copy/empty/write` stage、numeric format
+恢复失败使用固定 `restore-open/sequence/copy/empty/write/text/close` stage、numeric format
 和实际 Win32 code，绝不记录 format names/bytes。OLE roundtrip 的 operation
 与 Dispose 异常分别保留；两者都失败时保留 aggregate，而不是用 cleanup 覆盖
 原始故障。没有证明的 restore failure 仍使 fixture/CI 失败：不会吞错、跳过 OLE、
@@ -174,7 +174,7 @@ materialized text、nonce 改写和外部新 copy，验证这些竞争不能被�
 参见 [系统格式转换](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats)
 与 [CF_LOCALE 的 close 契约](https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats)。
 restore 仍严格检查 owner/sequence；delayed renderer 在任何写入前也检查
-expected sequence，避免自有 render 掩盖先前未知修改。22 项真实 fixture 保留
+expected sequence，避免自有 render 掩盖先前未知修改。24 项真实 fixture 保留
 原 13 项，并增加实际 same-owner mutation：render 不得覆盖／归属该变化，
 backup 必须仍 pending，随后真正的新 copy 优先。OLE case 保留
 Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实读取后恢复；两条路径都检查
@@ -197,6 +197,33 @@ GlobalCopy 的 post-allocation/post-lock 控制故障与实际 free 一次证明
 真实注册 ID 相等、unsupported virtual/embed/link 拒绝及原生名称查询失败；
 capture/restore 两条 copy 路径上，post-allocation/post-lock 故障与 release
 异常／受控非零返回的双因保留。所有组必须实际执行通过，新增源码不是运行证据。
+
+partial restore 已交还任一 text 表示、随后 setter 失败时，在同一 lock 内完成
+snapshot 中**已经复制并备份**、尚未移交的原始 text 表示（仅实际存在的 1/7/13，
+最多其余两项）。这是独立 cleanup 写入，不改变原 0/1/2 setter seam 的计数与失败
+结果；新增 fixture 单独核对 cleanup 的实际 transfer 次数与格式。不重试完整恢复、
+不发送第二次 paste，不自行编码，不读取临时 transcript 或调用 GetClipboardData
+来强制转换，也不补造 snapshot 没有的格式。非 text/raw metadata 仍留给 pending
+master 的后续完整恢复。每次成功 transfer 后清空 copy handle，失败的 copy 仍由本地
+finally 释放；私有 master 不移交。completion 本身失败时保留原 write 与 cleanup
+两因，原操作绝不因为 cleanup 成功而变为成功。
+
+Restore 的 renderer 在 Close 及最终检查期间仍禁写；只比较持锁结束时的不变
+candidate，不采用 Close 后的 current sequence。Close false（包括 error0）明确
+失败；Close 或 post-close 校验不能覆盖原始故障。只有完整恢复并验证成功，或确认
+真正新 owner 优先，才提交 began=false。未知 same-owner format/text/bytes/nonce
+修改仍以严格 sequence guard 拒绝，保留 exact master；不增加 post-close adoption
+或容许固定增量。这一候选针对未完成 text publication 的持锁生命周期，不把观察到
+的增量归因于特定 OS 格式或 actor。
+
+原 22 组之后追加两组，共 24 组：partial text 原始 native bytes／额外 transfer
+计数、恢复 Close 窗口的四类 same-owner mutation 与真正新 copy；completion／Close
+故障双因，以及完整恢复后 Close 失败仍不能提交 began=false 或丢失 master。
+新增 byte 对照只在 Begin 前采样 CI-owned 原始数据；原 case 15 不增加任何读取。
+Close 控制先实际成功关闭，再返回受控 false+error0，
+不声称真实 Win32 Close 失败，也不留下测试锁。completion 故障控制在 transfer 前
+返回 NULL+error0；若随后另有 sequence 故障，bounded projection 显式 truncated，
+不能假称只有两因。所有原始强断言、初始 seal 与 legacy native 13/1/7 读者保留。
 
 注册格式的身份按 Win32 case-insensitive 契约分类：OLE owner bookkeeping 不
 跨 owner 克隆，virtual/embed/link 无论大小写均拒绝。名称查询返回 0 同样拒绝，
@@ -226,7 +253,7 @@ Put 在任何 Open/Empty/native allocation 前校验 format/payload 数量、非
 byte[]，以及 Unicode 的偶数字节数和末尾双零；不填充、转码或重写原始 payload。
 case 8 保留原 transient-lock 路径，并先断言完整单元素 byte[][] 的类型、原 byte[]
 引用和精确长度；旧 flattening、null row、单字节、奇数字节、缺 terminator 输入
-必须明确拒绝，owner/sequence 与原始完整 allocation bytes 不变。22 组及顺序不变。
+必须明确拒绝，owner/sequence 与原始完整 allocation bytes 不变。原 22 组及顺序不变。
 参见 [PowerShell comma/array operators](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_operators?view=powershell-5.1)。
 异常投影最多遍历 32 个节点，每个 operation/cleanup phase 各保留两个 leaf，
 越界显式标记 truncated；Aggregate 的两个成员不会被 InnerException 首项替代。

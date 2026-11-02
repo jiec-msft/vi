@@ -53,6 +53,14 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage: 'snapshot-copy',
     clipboardFormat: 13, clipboardCauses: copyCauses.map((cause) => ({ ...cause,
       message: 'PRIVATE_COPY_RELEASE', innerException: { message: 'PRIVATE_ORIGINAL' } })) });
+  for (const stage of ['restore-text', 'restore-close']) {
+    diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage: stage,
+      clipboardFormat: stage === 'restore-text' ? 1 : 0, clipboardCauses: [
+        { code: 'restore-failed', stage: 'restore-write', format: 49467, errorNumber: 0 },
+        { code: 'restore-failed', stage, format: stage === 'restore-text' ? 1 : 0, errorNumber: 0,
+          message: 'PRIVATE_RESTORE_CLEANUP' },
+      ] });
+  }
   for (const [clipboardStage, clipboardFormat] of [
     ['snapshot-format', 49467], ['snapshot-format-name', 49468], ['snapshot-release', 13],
   ]) diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage, clipboardFormat,
@@ -77,6 +85,12 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   assert.deepEqual(copy.clipboardCauses, copyCauses);
   assert.equal(copy.clipboardStage, 'snapshot-copy');
   assert.equal(copy.clipboardFormat, 13);
+  for (const stage of ['restore-text', 'restore-close']) {
+    const cleanup = rows.find((row) => row.clipboardStage === stage);
+    assert.equal(cleanup.clipboardCauses[0].stage, 'restore-write');
+    assert.equal(cleanup.clipboardCauses[1].stage, stage);
+    assert.equal(cleanup.clipboardCauses[1].errorNumber, 0);
+  }
   for (const [stage, format] of [['snapshot-format', 49467], ['snapshot-format-name', 49468], ['snapshot-release', 13]]) {
     assert.ok(rows.some((row) => row.clipboardStage === stage && row.clipboardFormat === format));
   }

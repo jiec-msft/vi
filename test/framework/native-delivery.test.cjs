@@ -78,7 +78,7 @@ test('clipboard preparation failures distinguish lock, unsupported format and ba
 });
 
 test('clipboard fault metadata retains only fixed stages and numeric formats', async () => {
-  for (const [stage, format] of [['restore-write', 49123], ['publication-state', 49124],
+  for (const [stage, format] of [['restore-write', 49123], ['restore-text', 1], ['restore-close', 0], ['publication-state', 49124],
     ['snapshot-format', 49125], ['snapshot-format-name', 49126], ['snapshot-copy', 13], ['snapshot-release', 13],
     ['PRIVATE_FORMAT', 'PRIVATE_CONTENT']]) {
     const f = fixture();
@@ -131,6 +131,14 @@ test('snapshot classification and copy release causes retain fixed policy and bo
     [
       { code: 'restore-failed', stage: 'restore-copy', format: 13, errorNumber: 0 },
       { code: 'restore-failed', stage: 'snapshot-release', format: 13, errorNumber: 0 },
+    ],
+    [
+      { code: 'restore-failed', stage: 'restore-write', format: 49125, errorNumber: 0 },
+      { code: 'restore-failed', stage: 'restore-text', format: 1, errorNumber: 0 },
+    ],
+    [
+      { code: 'restore-failed', stage: 'restore-write', format: 49125, errorNumber: 0 },
+      { code: 'restore-failed', stage: 'restore-close', format: 0, errorNumber: 0 },
     ],
   ]) {
     const f = fixture();

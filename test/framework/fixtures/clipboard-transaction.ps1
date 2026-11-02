@@ -23,6 +23,12 @@ using System.Windows.Forms;
 public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
  public static Func<uint,IntPtr,IntPtr> RealSetter;
+ public static Func<uint,IntPtr,IntPtr> RealCompletionSetter;
+ public static Func<bool> RealRestoreClose;
+ public static int CompletionAttempts, CompletionWrites, RestoreCloseMode;
+ public static readonly List<uint> CompletionFormats=new List<uint>();
+ public static bool CompletionFails, NativeRestoreClosed;
+ public static IntPtr RestoreWindow;
  public static int FailAfter=-1, Writes;
  public static OwnedClipboardFixture PublicationFixture;
  public static uint PublicationFormat;
@@ -97,6 +103,24 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  public static IntPtr RestoreSetter(uint format,IntPtr data){
   if(Writes==FailAfter)throw new InvalidOperationException("Controlled restore setter failure.");
   IntPtr result=RealSetter(format,data);if(result!=IntPtr.Zero)Writes++;return result;
+ }
+ public static IntPtr CompletionSetter(uint format,IntPtr data){
+  CompletionAttempts++;
+  if(CompletionFails){SetControlledStatusError(0);return IntPtr.Zero;}
+  IntPtr result=RealCompletionSetter(format,data);
+  if(result!=IntPtr.Zero){CompletionWrites++;CompletionFormats.Add(format);}
+  return result;
+ }
+ public static bool RestoreCloseBoundary(){
+  NativeRestoreClosed=RealRestoreClose();
+  if(!NativeRestoreClosed)return false;
+  if(RestoreCloseMode==6){SetControlledStatusError(0);return false;}
+  if(RestoreCloseMode==5)PublicationFixture.Put(new uint[]{13},new byte[][]{System.Text.Encoding.Unicode.GetBytes("New copy during restore close\0")});
+  else if(RestoreCloseMode==1)PublicationFixture.AddWhileOwned(RestoreWindow,PublicationFormat,new byte[]{9,8,7});
+  else if(RestoreCloseMode==2)PublicationFixture.AddWhileOwned(RestoreWindow,13,System.Text.Encoding.Unicode.GetBytes("Unknown text during restore close\0"));
+  else if(RestoreCloseMode==3)PublicationFixture.AddWhileOwned(RestoreWindow,16,BitConverter.GetBytes((uint)1041));
+  else if(RestoreCloseMode==4)PublicationFixture.AddWhileOwned(RestoreWindow,RegisterClipboardFormat("VI.NativeDelivery.Transaction"),new byte[16]);
+  return true;
  }
  [DllImport("user32.dll",SetLastError=true)]static extern bool OpenClipboard(IntPtr owner);
  [DllImport("user32.dll")]static extern bool CloseClipboard();
@@ -995,6 +1019,124 @@ try{
         }
     }
     $checks.Add('capture-and-restore-copy-release-failures-preserve-primary-and-cleanup-with-one-real-free')
+    $completionSetter=[ViClipboard.ClipboardSnapshot].GetField('completeTextWrite',$static)
+    $realCompletion=$completionSetter.GetValue($null)
+    $restoreCloser=[TranscriptClipboard].GetField('restoreClose',$static)
+    $realRestoreClose=$restoreCloser.GetValue($null)
+    $savedField=[TranscriptClipboard].GetField('saved',[Reflection.BindingFlags]'Instance,NonPublic')
+    [OwnedClipboardFixture]::RealCompletionSetter=$realCompletion
+    [OwnedClipboardFixture]::RealRestoreClose=$realRestoreClose
+    foreach($mode in @(0,1,2,3,4,5)){
+        [OwnedClipboardFixture]::CaseId=46+$mode
+        $fixture.Put([uint32[]]@(13,$format,$rich,16),[byte[][]]@($text,[byte[]]@(0),$html,[BitConverter]::GetBytes([uint32]1031)))
+        $expected=Read-Mixed $fixture $format $rich
+        $expectedLocale=[Convert]::ToBase64String($fixture.Read(16))
+        $expectedAnsi=[Convert]::ToBase64String($fixture.Read(1))
+        $expectedOem=[Convert]::ToBase64String($fixture.Read(7))
+        $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
+        try{
+            $transaction.Begin('Must retain partial text publication authority')
+            $master=$savedField.GetValue($transaction)
+            [OwnedClipboardFixture]::RestoreWindow=$transaction.Handle
+            [OwnedClipboardFixture]::RestoreCloseMode=$mode
+            [OwnedClipboardFixture]::NativeRestoreClosed=$false
+            [OwnedClipboardFixture]::CompletionFails=$false
+            [OwnedClipboardFixture]::CompletionAttempts=0
+            [OwnedClipboardFixture]::CompletionWrites=0
+            [OwnedClipboardFixture]::CompletionFormats.Clear()
+            [OwnedClipboardFixture]::FailAfter=2
+            [OwnedClipboardFixture]::Writes=0
+            $setter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('RestoreSetter')))
+            $completionSetter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('CompletionSetter')))
+            $restoreCloser.SetValue($null,[Delegate]::CreateDelegate([Func[bool]],[OwnedClipboardFixture].GetMethod('RestoreCloseBoundary')))
+            $caught=$null
+            try{$transaction.Dispose()}catch{$caught=$_.Exception}
+            Check ($null -ne $caught) 'Original partial restore failure was hidden by text completion.'
+            Check ([OwnedClipboardFixture]::Writes -eq 2) 'Original first-text fault boundary changed.'
+            Check ([OwnedClipboardFixture]::CompletionAttempts -eq 2 -and [OwnedClipboardFixture]::CompletionWrites -eq 2 -and [OwnedClipboardFixture]::CompletionFormats.Contains(1) -and [OwnedClipboardFixture]::CompletionFormats.Contains(7)) 'Text cleanup did not separately transfer the two prepared native representations.'
+            Check ([OwnedClipboardFixture]::NativeRestoreClosed -and -not $transaction.RenderAttempted) 'Partial completion did not close its lock or rendered the temporary transcript.'
+            $causes=ConvertTo-ClipboardFailure $caught
+            Check ($causes.causes[0].code -eq 'restore-failed' -and $causes.causes[0].stage -eq 'restore-write') 'Text completion replaced the original failure cause.'
+            $setter.SetValue($null,$original)
+            $completionSetter.SetValue($null,$realCompletion)
+            $restoreCloser.SetValue($null,$realRestoreClose)
+            if($mode -eq 5){
+                Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy during restore close') 'Restore close overwrote a genuinely newer owner.'
+            }else{
+                Check ([Object]::ReferenceEquals($savedField.GetValue($transaction),$master) -and [Object]::ReferenceEquals([TranscriptClipboard].GetField('deferred',$static).GetValue($null),$transaction)) 'Partial restore discarded or replaced its pending master.'
+                if($mode -eq 0){
+                    $sequence=[TranscriptClipboard].GetField('sequence',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($transaction)
+                    Check ($sequence -eq [OwnedClipboardFixture]::GetClipboardSequenceNumber() -and $causes.causes.Count -eq 1 -and -not $causes.truncated) 'Completed text publication did not preserve its pre-close sequence.'
+                    Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expected.text -and [Convert]::ToBase64String($fixture.Read(16)) -eq $expectedLocale -and [Convert]::ToBase64String($fixture.Read(1)) -eq $expectedAnsi -and [Convert]::ToBase64String($fixture.Read(7)) -eq $expectedOem) 'Partial text completion changed saved native bytes.'
+                    Check (-not [OwnedClipboardFixture]::IsClipboardFormatAvailable($format) -and -not [OwnedClipboardFixture]::IsClipboardFormatAvailable($rich)) 'Text completion retried the failed full restoration.'
+                }else{
+                    Check ($causes.causes.Count -eq 2 -and -not $causes.truncated -and $causes.causes[1].stage -eq 'restore-sequence') 'Restore close accepted unknown same-owner mutation.'
+                    $failed=$false
+                    try{$transaction.Restore()}catch{$failed=(Fault-Code $_.Exception) -eq 'restore-failed'}
+                    Check $failed 'Recovery adopted unknown same-owner close-window changes.'
+                    Check ([Object]::ReferenceEquals($savedField.GetValue($transaction),$master)) 'Rejected close-window changes lost the original master.'
+                    $fixture.Put([uint32[]]@(13),[byte[][]](,[Text.Encoding]::Unicode.GetBytes("New copy after restore conflict`0")))
+                }
+            }
+            [TranscriptClipboard]::RecoverPending()
+            if($mode -eq 0){
+                $restored=Read-Mixed $fixture $format $rich
+                Check ($restored.text -eq $expected.text -and $restored.metadata -eq $expected.metadata -and $restored.rich -eq $expected.rich -and [Convert]::ToBase64String($fixture.Read(16)) -eq $expectedLocale) 'Partial text recovery did not restore the full saved formats.'
+            }elseif($mode -eq 5){Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy during restore close') 'Recovery replaced the newer close-window copy.'}
+            else{Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy after restore conflict') 'Recovery replaced a newer copy after a same-owner conflict.'}
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $setter.SetValue($null,$original);$completionSetter.SetValue($null,$realCompletion);$restoreCloser.SetValue($null,$realRestoreClose) }}
+    }
+    $checks.Add('partial-text-completion-preserves-pre-close-authority-and-rejects-close-window-mutations')
+    foreach($mode in @(0,1,2)){
+        [OwnedClipboardFixture]::CaseId=52+$mode
+        $fixture.Put([uint32[]]@(13,$format,$rich,16),[byte[][]]@($text,[byte[]]@(0),$html,[BitConverter]::GetBytes([uint32]1031)))
+        $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
+        try{
+            $transaction.Begin('Must retain text completion and close failures')
+            $master=$savedField.GetValue($transaction)
+            [OwnedClipboardFixture]::RestoreWindow=$transaction.Handle
+            [OwnedClipboardFixture]::RestoreCloseMode=0
+            if($mode -ne 0){[OwnedClipboardFixture]::RestoreCloseMode=6}
+            [OwnedClipboardFixture]::NativeRestoreClosed=$false
+            [OwnedClipboardFixture]::CompletionFails=$mode -eq 0
+            [OwnedClipboardFixture]::CompletionAttempts=0
+            [OwnedClipboardFixture]::CompletionWrites=0
+            [OwnedClipboardFixture]::CompletionFormats.Clear()
+            [OwnedClipboardFixture]::FailAfter=2
+            if($mode -eq 2){[OwnedClipboardFixture]::FailAfter=-1}
+            [OwnedClipboardFixture]::Writes=0
+            $setter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('RestoreSetter')))
+            $completionSetter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('CompletionSetter')))
+            $restoreCloser.SetValue($null,[Delegate]::CreateDelegate([Func[bool]],[OwnedClipboardFixture].GetMethod('RestoreCloseBoundary')))
+            $caught=$null
+            try{$transaction.Dispose()}catch{$caught=$_.Exception}
+            Check ($null -ne $caught -and [OwnedClipboardFixture]::NativeRestoreClosed -and ($mode -eq 2 -or [OwnedClipboardFixture]::Writes -eq 2)) 'Controlled cleanup failure lost the original boundary or left a native lock open.'
+            $projection=ConvertTo-ClipboardFailure $caught
+            $wire=$projection|ConvertTo-Json -Compress -Depth 6|ConvertFrom-Json
+            $expectedStage='restore-text'
+            if($mode -ne 0){$expectedStage='restore-close'}
+            if($mode -eq 2){
+                Check ($wire.causes.Count -eq 1 -and -not $wire.truncated -and $wire.causes[0].stage -eq 'restore-close' -and $wire.causes[0].errorNumber -eq 0 -and [OwnedClipboardFixture]::CompletionAttempts -eq 0) 'A full restore fabricated an original write failure or ignored Close failure.'
+            }else{
+                Check ($wire.causes.Count -eq 2 -and $wire.causes[0].stage -eq 'restore-write' -and $wire.causes[1].stage -eq $expectedStage -and $wire.causes[1].errorNumber -eq 0) 'Original write and cleanup failure did not survive bounded scalar projection.'
+            }
+            if($mode -eq 0){Check ([OwnedClipboardFixture]::CompletionAttempts -eq 1 -and [OwnedClipboardFixture]::CompletionWrites -eq 0) 'Failed text completion retried or falsely claimed transfer.'}
+            elseif($mode -eq 1){Check ([OwnedClipboardFixture]::CompletionAttempts -eq 2 -and [OwnedClipboardFixture]::CompletionWrites -eq 2 -and -not $wire.truncated) 'Close failure lost completed transfers or fabricated additional causes.'}
+            Check ([TranscriptClipboard].GetField('began',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($transaction) -and [Object]::ReferenceEquals($savedField.GetValue($transaction),$master) -and [Object]::ReferenceEquals([TranscriptClipboard].GetField('deferred',$static).GetValue($null),$transaction)) 'Cleanup failure committed completion or discarded the pending original master.'
+            $setter.SetValue($null,$original)
+            $completionSetter.SetValue($null,$realCompletion)
+            $restoreCloser.SetValue($null,$realRestoreClose)
+            [OwnedClipboardFixture]::CompletionFails=$false
+            $fixture.Put([uint32[]]@(13),[byte[][]](,[Text.Encoding]::Unicode.GetBytes("New copy after cleanup failure`0")))
+            [TranscriptClipboard]::RecoverPending()
+            Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy after cleanup failure') 'Cleanup recovery overwrote the newer copy.'
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $setter.SetValue($null,$original);$completionSetter.SetValue($null,$realCompletion);$restoreCloser.SetValue($null,$realRestoreClose);[OwnedClipboardFixture]::CompletionFails=$false }}
+    }
+    $checks.Add('partial-restore-text-and-close-cleanup-errors-preserve-original-cause-and-master')
     $report=@{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}
 }catch{$fixtureFailure=$_.Exception;throw}
 finally{

@@ -124,7 +124,7 @@ class Diagnostics {
       if (Number.isInteger(data[key]) && Math.abs(data[key]) <= 100000) entry[key] = data[key];
     }
     if (components.has(data.component)) entry.component = data.component;
-    if (['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write',
+    if (['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write', 'restore-text', 'restore-close',
       'publication-open', 'publication-close', 'publication-owner', 'publication-sequence', 'publication-state', 'publication-write',
       'snapshot-format', 'snapshot-format-name', 'snapshot-copy', 'snapshot-release'].includes(data.clipboardStage)) {
       entry.clipboardStage = data.clipboardStage;
