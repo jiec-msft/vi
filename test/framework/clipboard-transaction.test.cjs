@@ -21,7 +21,9 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
       /^VI_CLIP_SEQUENCE expected=\d{1,10} current=\d{1,10} ownerMatch=True$/.test(line)).slice(-4);
     const states = String(error.stderr || '').split(/\r?\n/).filter((line) =>
       /^VI_CLIP_STATE (begin-return|text-read-return|restore-return|operation-failed|cleanup-failed) case=\d{1,2} expected=\d{1,10} observed=\d{1,10} ownerObserved=(True|False) began=(True|False) rendered=(True|False) renderFailed=(True|False) restoreMutated=(True|False) renderAttempted=(True|False) renderExpectedSequence=\d{1,10} renderObservedSequence=\d{1,10} renderWriteStarted=(True|False) renderWriteCompleted=(True|False)$/.test(line)).slice(-12);
-    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages, faults, sequences, states,
+    const publication = String(error.stderr || '').split(/\r?\n/).filter((line) =>
+      /^VI_CLIP_PUBLICATION case=\d{1,2} beforeClose=\d{1,10} closeSucceeded=(True|False) closeNativeError=-?\d{1,10} afterClose=\d{1,10} ownerObserved=(True|False)$/.test(line)).slice(-2);
+    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages, faults, sequences, states, publication,
       timedOut: error.code === 'ETIMEDOUT', status: error.status, signal: error.signal }));
     throw error;
   }

@@ -130,6 +130,10 @@ Restore 返回及异常点的只读状态。observed sequence／owner 是分开�
 不能仅用 reflection 读取 private 字段，让严格 PS5 Add-Type 将其判为未使用字段，
 也不能通过忽略 compiler warning 来绕过真实 helper 编译门槛。
 若该分支先失败，后面的 OLE 与其余分组属于未执行，不能沿用旧失败阶段推断。
+初始 publication 另保留 CloseClipboard 调用前／返回后的序列、真实 BOOL 返回、
+失败时立即捕获的 Win32 error，以及返回后的 owner 观察。它们只回答变化是否
+跨越 close 边界，均为只读诊断，绝不回填 authoritative sequence 或构成原子
+ownership 证明；不能仅凭固定增量就认定某种合成格式、补偿计数或接受未知变化。
 临时 Unicode clipboard 现在在同一 owned lock 内显式发布当前输入语言的
 `CF_LOCALE`，再采样 sequence。Windows 能从 Unicode 合成 ANSI/OEM text，
 并可在 `CloseClipboard` 时补充缺失的 locale；不能把这类自有发布边界上的

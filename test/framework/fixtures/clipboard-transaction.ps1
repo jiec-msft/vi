@@ -279,6 +279,8 @@ try{
         $operationFailure=$null
         try{
             $transaction.Begin('Approved fixture result')
+            [Console]::Error.WriteLine("VI_CLIP_PUBLICATION case=$([OwnedClipboardFixture]::CaseId) beforeClose=$($transaction.PublicationBeforeCloseSequence) closeSucceeded=$($transaction.PublicationCloseSucceeded) closeNativeError=$($transaction.PublicationCloseNativeError) afterClose=$($transaction.PublicationAfterCloseSequence) ownerObserved=$($transaction.PublicationOwnerObservedAfterClose)")
+            Check $transaction.PublicationCloseSucceeded 'Owned initial publication did not close the clipboard successfully.'
             Report-TransactionState 'begin-return' $transaction
             $temporaryText=[Windows.Forms.Clipboard]::GetText()
             Report-TransactionState 'text-read-return' $transaction

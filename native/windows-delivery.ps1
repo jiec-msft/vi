@@ -22,7 +22,7 @@ using ViClipboard;
 
 public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr owner);
-    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll", SetLastError=true)] static extern bool CloseClipboard();
     [DllImport("user32.dll")] static extern bool EmptyClipboard();
     [DllImport("user32.dll")] static extern IntPtr SetClipboardData(uint format, IntPtr data);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
@@ -46,6 +46,9 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     bool rendered, renderFailed, began, restoring, restoreMutated;
     bool renderAttempted, renderWriteStarted, renderWriteCompleted;
     uint renderExpectedSequence, renderObservedSequence;
+    uint publicationBeforeCloseSequence, publicationAfterCloseSequence;
+    bool publicationCloseSucceeded, publicationOwnerObservedAfterClose;
+    int publicationCloseNativeError;
     readonly Stopwatch clock = new Stopwatch();
     long renderedAt;
     long pasteAt = -1;
@@ -57,6 +60,11 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     public uint RenderObservedSequence { get { return renderObservedSequence; } }
     public bool RenderWriteStarted { get { return renderWriteStarted; } }
     public bool RenderWriteCompleted { get { return renderWriteCompleted; } }
+    public uint PublicationBeforeCloseSequence { get { return publicationBeforeCloseSequence; } }
+    public uint PublicationAfterCloseSequence { get { return publicationAfterCloseSequence; } }
+    public bool PublicationCloseSucceeded { get { return publicationCloseSucceeded; } }
+    public int PublicationCloseNativeError { get { return publicationCloseNativeError; } }
+    public bool PublicationOwnerObservedAfterClose { get { return publicationOwnerObservedAfterClose; } }
     public bool RenderedBeforePaste { get { return rendered && (pasteAt < 0 || renderedAt < pasteAt); } }
     public long HoldMilliseconds { get { return holdAt < 0 ? 0 : clock.ElapsedMilliseconds - holdAt; } }
     public void PasteStarted() { pasteAt = clock.ElapsedMilliseconds; }
@@ -141,7 +149,11 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             clock.Start();
         } finally {
             if (began) sequence = GetClipboardSequenceNumber();
-            CloseClipboard();
+            publicationBeforeCloseSequence = GetClipboardSequenceNumber();
+            publicationCloseSucceeded = CloseClipboard();
+            publicationCloseNativeError = publicationCloseSucceeded ? 0 : Marshal.GetLastWin32Error();
+            publicationAfterCloseSequence = GetClipboardSequenceNumber();
+            publicationOwnerObservedAfterClose = Handle != IntPtr.Zero && GetClipboardOwner() == Handle;
         }
     }
     public bool WaitForRead() {
