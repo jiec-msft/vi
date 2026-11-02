@@ -23,6 +23,15 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
  public static Func<uint,IntPtr,IntPtr> RealSetter;
  public static int FailAfter=-1, Writes;
+ public static OwnedClipboardFixture PublicationFixture;
+ public static uint PublicationFormat;
+ public static int PublicationMutation;
+ public static void MutatePublication(IntPtr owner){
+  if(PublicationMutation==3)PublicationFixture.Put(new uint[]{13},new byte[][]{System.Text.Encoding.Unicode.GetBytes("New copy during seal\0")});
+  else if(PublicationMutation==1)PublicationFixture.AddWhileOwned(owner,13,System.Text.Encoding.Unicode.GetBytes("Unknown text during seal\0"));
+  else if(PublicationMutation==2)PublicationFixture.AddWhileOwned(owner,RegisterClipboardFormat("VI.NativeDelivery.Transaction"),new byte[16]);
+  else PublicationFixture.AddWhileOwned(owner,PublicationFormat,new byte[]{9,8,7});
+ }
  static int caseId;
  public static int CaseId {
   get{return caseId;}
@@ -279,8 +288,10 @@ try{
         $operationFailure=$null
         try{
             $transaction.Begin('Approved fixture result')
-            [Console]::Error.WriteLine("VI_CLIP_PUBLICATION case=$([OwnedClipboardFixture]::CaseId) beforeClose=$($transaction.PublicationBeforeCloseSequence) closeSucceeded=$($transaction.PublicationCloseSucceeded) closeNativeError=$($transaction.PublicationCloseNativeError) afterClose=$($transaction.PublicationAfterCloseSequence) ownerObserved=$($transaction.PublicationOwnerObservedAfterClose)")
+            [Console]::Error.WriteLine("VI_CLIP_PUBLICATION case=$([OwnedClipboardFixture]::CaseId) beforeClose=$($transaction.PublicationBeforeCloseSequence) closeSucceeded=$($transaction.PublicationCloseSucceeded) closeNativeError=$($transaction.PublicationCloseNativeError) afterClose=$($transaction.PublicationAfterCloseSequence) ownerObserved=$($transaction.PublicationOwnerObservedAfterClose) sealed=$($transaction.PublicationSealed) blockedRenderRequests=$($transaction.PublicationBlockedRenderRequests)")
             Check $transaction.PublicationCloseSucceeded 'Owned initial publication did not close the clipboard successfully.'
+            Check $transaction.PublicationSealed 'Initial publication was not verified under the reacquired lock.'
+            Check (-not $transaction.RenderAttempted) 'Sealing materialized the temporary transcript.'
             Report-TransactionState 'begin-return' $transaction
             $temporaryText=[Windows.Forms.Clipboard]::GetText()
             Report-TransactionState 'text-read-return' $transaction
@@ -319,6 +330,7 @@ try{
         $operationFailure=$null
         try{
             $transaction.Begin('Approved OLE result')
+            Check ($transaction.PublicationSealed -and -not $transaction.RenderAttempted) 'OLE publication did not stay unrendered through sealing.'
             $expectedSequence=[TranscriptClipboard].GetField('sequence',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($transaction)
             Check ($expectedSequence -eq [OwnedClipboardFixture]::GetClipboardSequenceNumber()) 'Own publication changed sequence on CloseClipboard.'
             Check ([BitConverter]::ToUInt32($fixture.Read(16),0) -eq ([OwnedClipboardFixture]::GetKeyboardLayout(0).ToInt64() -band 65535)) 'Temporary locale does not match the owned publisher input language.'
@@ -536,6 +548,60 @@ try{
     }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
     finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('unknown-same-owner-mutation-is-not-laundered-by-own-rendering')
+    $publicationHook=[TranscriptClipboard].GetField('publicationClosed',[Reflection.BindingFlags]'Static,NonPublic')
+    [OwnedClipboardFixture]::PublicationFixture=$fixture
+    [OwnedClipboardFixture]::PublicationFormat=$format
+    foreach($mutation in @(0,1,2,3)){
+        [OwnedClipboardFixture]::CaseId=18+$mutation
+        $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+        [OwnedClipboardFixture]::PublicationMutation=$mutation
+        $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
+        try{
+            $publicationHook.SetValue($null,[Delegate]::CreateDelegate([Action[IntPtr]],[OwnedClipboardFixture].GetMethod('MutatePublication')))
+            $failed=$false
+            try{$transaction.Begin('Must not overwrite seal-window changes')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-changed'}
+            Check $failed 'A seal-window mutation was accepted as the initial baseline.'
+            Check (-not $transaction.PublicationSealed) 'A changed publication was marked sealed.'
+            $publicationHook.SetValue($null,$null)
+            if($mutation -eq 3){
+                Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy during seal') 'A newer external copy was overwritten during sealing.'
+            }else{
+                Check ([OwnedClipboardFixture]::GetClipboardOwner() -eq $transaction.Handle) 'Same-owner seal fixture lost ownership.'
+                try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected retained seal failure.'}
+                $pending=[TranscriptClipboard].GetField('deferred',[Reflection.BindingFlags]'Static,NonPublic').GetValue($null)
+                Check ([Object]::ReferenceEquals($pending,$transaction)) 'Unknown seal mutation discarded its pending backup.'
+                $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New copy after seal failure`0")))
+                [TranscriptClipboard]::RecoverPending()
+                Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy after seal failure') 'Pending seal backup overwrote a genuine new copy.'
+            }
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $publicationHook.SetValue($null,$null) }}
+    }
+    $checks.Add('initial-seal-rejects-unknown-format-text-token-and-new-copy-races')
+    foreach($requestedFormat in @(13,1,7)){
+        [OwnedClipboardFixture]::CaseId=22
+        $fixture.Put([uint32[]]@(13,$format,$rich,16),[byte[][]]@($text,[byte[]]@(0),$html,[BitConverter]::GetBytes([uint32]1031)))
+        $expected=Read-Mixed $fixture $format $rich
+        $approved='Approved '+[char]0x4e2d+[char]0x00e9
+        $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
+        try{
+            $transaction.Begin($approved)
+            Check ($transaction.PublicationSealed -and -not $transaction.RenderAttempted) 'Native text-family fixture was rendered before a reader requested data.'
+            $nativeBytes=$fixture.Read([uint32]$requestedFormat)
+            Check ($nativeBytes.Length -gt 1) 'Native text-family conversion returned empty data.'
+            if($requestedFormat -ne 13){
+                Check ([Text.Encoding]::ASCII.GetString($nativeBytes).StartsWith('Approved ')) 'Native ANSI/OEM conversion lost its ASCII prefix.'
+            }
+            Check ([Windows.Forms.Clipboard]::GetText() -eq $approved) 'Native text-family conversion changed canonical Unicode.'
+            $transaction.Restore()
+            $restored=Read-Mixed $fixture $format $rich
+            Check ($restored.text -eq $expected.text -and $restored.metadata -eq $expected.metadata -and $restored.rich -eq $expected.rich) 'Native text-family restore changed original bytes.'
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure}
+    }
+    $checks.Add('native-unicode-ansi-oem-readers-preserve-canonical-result-and-backup')
     $report=@{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}
 }catch{$fixtureFailure=$_.Exception;throw}
 finally{

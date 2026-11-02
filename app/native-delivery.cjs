@@ -34,7 +34,8 @@ class NativeDelivery {
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
-        const clipboardStage = ['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write']
+        const clipboardStage = ['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write',
+          'publication-open', 'publication-close', 'publication-owner', 'publication-sequence', 'publication-state', 'publication-write']
           .includes(reply.clipboardStage) ? reply.clipboardStage : undefined;
         const clipboardFormat = clipboardStage && Number.isInteger(reply.clipboardFormat) && reply.clipboardFormat >= 0 && reply.clipboardFormat <= 65535
           ? reply.clipboardFormat : undefined;

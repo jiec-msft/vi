@@ -108,7 +108,7 @@ discovery 影响内部 helper；不修改用户、父进程或 registry。规则
 早先 inherited／deleted／inbox-autoload 对照属于其原 source head 的测量，
 不因无关根修复重新执行，也不迁移成当前版本的通过证据。candidate 首先
 启动真实生产 `NativeDelivery`，保留原始 20 s READY deadline，再运行实际 clipboard、
-native-diagnostics、native-types、diagnostics selectors。早期失败仍使整格失败。
+native-diagnostics、native-types、diagnostics、native-delivery selectors。早期失败仍使整格失败。
 CI-only observer 在 5 s 内核对该 helper
 的真实 PID/parent/creation/image/PE machine；该观察与 readiness 重叠，会明确记录，
 不宣称 uncached OS/disk 或最终 app GUI 测试。只准备源码不等于已执行此比较。
@@ -132,8 +132,28 @@ Restore 返回及异常点的只读状态。observed sequence／owner 是分开�
 若该分支先失败，后面的 OLE 与其余分组属于未执行，不能沿用旧失败阶段推断。
 初始 publication 另保留 CloseClipboard 调用前／返回后的序列、真实 BOOL 返回、
 失败时立即捕获的 Win32 error，以及返回后的 owner 观察。它们只回答变化是否
-跨越 close 边界，均为只读诊断，绝不回填 authoritative sequence 或构成原子
-ownership 证明；不能仅凭固定增量就认定某种合成格式、补偿计数或接受未知变化。
+跨越 close 边界，单独不能成为 authority；不能仅凭固定增量就认定某种合成格式、
+补偿计数或接受未知变化。Close 观察值仅是一次 provisional receipt。
+
+初始 publication 现在有明确的 publishing→sealed 阶段。持锁写入临时 locale、
+history/cloud flags 和每次新建的 opaque transaction nonce，保留实际发布的完整
+metadata bytes；Unicode 仍延迟提供。Close 后重新取得 lock，必须同时确认：
+owner 是本 transaction，sequence 仍等于 receipt，格式集合只有这些 metadata
+及 Unicode/系统 ANSI/OEM text aliases，metadata 的完整 bytes（包括 nonce）
+逐项相等，三个 text format 尚无 materialized handle。metadata 最大 4 KiB/项、
+格式数严格有界，不反序列化任何内容，也不读取／记录未知 text bytes。
+验证 text handle 是否为空时 publishing renderer 明确拒绝生成数据，可能发生的
+blocked callback 单独计数，不伪称没有请求；直到验证完成都不会生成 transcript。
+同一 lock 内验证前后 owner/sequence 必须不变，之后才建立初始 sequence authority；
+只读 seal Close 后若再次漂移仍失败，不再次采用 current。后续 render/Restore
+仍使用原严格 owner/sequence checks，不以 nonce 或内容一致为由接受后续漂移。
+
+这不是把任意 post-close sequence 作为 baseline，也不推断 Close 的增量来源。
+新 owner 表示真实新 copy，原样保留；同 owner 的未知格式、已写入 text、
+nonce/metadata 改动或 receipt 后的 sequence 改动均明确失败并保留 pending backup。
+失败时不 clear/re-paste。fixture 在真实 Close 与 receipt 之间注入未知格式、
+materialized text、nonce 改写和外部新 copy，验证这些竞争不能被初始 seal 吞掉。
+所有 token/bytes 都不进入日志，只有固定 stage、numeric format 和验证结果。
 临时 Unicode clipboard 现在在同一 owned lock 内显式发布当前输入语言的
 `CF_LOCALE`，再采样 sequence。Windows 能从 Unicode 合成 ANSI/OEM text，
 并可在 `CloseClipboard` 时补充缺失的 locale；不能把这类自有发布边界上的
@@ -141,7 +161,7 @@ ownership 证明；不能仅凭固定增量就认定某种合成格式、补偿�
 参见 [系统格式转换](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats)
 与 [CF_LOCALE 的 close 契约](https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats)。
 restore 仍严格检查 owner/sequence；delayed renderer 在任何写入前也检查
-expected sequence，避免自有 render 掩盖先前未知修改。14 项真实 fixture 保留
+expected sequence，避免自有 render 掩盖先前未知修改。16 项真实 fixture 保留
 原 13 项，并增加实际 same-owner mutation：render 不得覆盖／归属该变化，
 backup 必须仍 pending，随后真正的新 copy 优先。OLE case 保留
 Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实读取后恢复；两条路径都检查
@@ -153,6 +173,9 @@ Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实
 RecoverPending 必须恢复完整原始 bytes；外部新 copy 的负例也经过首个 text。
 上述 locale／sequence 处理仍需实际全分组通过；更早边界的失败仍是 blocker，
 不能仅凭契约解释、源码通过或新增日志就声称原始恢复问题已解决。
+另外两个新增组覆盖 seal-window 的四类真实 Win32 竞争，以及 Unicode/ANSI/OEM
+读者。转换仍交给 Windows，没有自行选择编码或改变原始 locale；测试保留
+非 ASCII 的 canonical Unicode、ANSI/OEM ASCII prefix 和完整原始 backup bytes。
 
 diagnostic `flush()` 是 200 ms bounded best effort，不是文件存在或持久化 ACK。
 native privacy/content fixture 复用已有真实 writer fixture，先等 initialization

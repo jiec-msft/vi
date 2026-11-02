@@ -31,7 +31,7 @@ jobs:
       - name: Actual owned clipboard and native diagnostic fixtures
         if: always() && matrix.variant == 'candidate'
         run: |
-          node --test --test-concurrency=1 test/framework/clipboard-transaction.test.cjs test/framework/native-diagnostics.test.cjs test/framework/native-types.test.cjs test/framework/diagnostics.test.cjs 2>&1 |
+          node --test --test-concurrency=1 test/framework/clipboard-transaction.test.cjs test/framework/native-diagnostics.test.cjs test/framework/native-types.test.cjs test/framework/diagnostics.test.cjs test/framework/native-delivery.test.cjs 2>&1 |
             Tee-Object -FilePath artifacts-ci/native-startup/candidate/fixtures.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4

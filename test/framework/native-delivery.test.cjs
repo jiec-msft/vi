@@ -77,14 +77,14 @@ test('clipboard preparation failures distinguish lock, unsupported format and ba
 });
 
 test('restore fault metadata retains only fixed stages and numeric formats', async () => {
-  for (const [stage, format] of [['restore-write', 49123], ['PRIVATE_FORMAT', 'PRIVATE_CONTENT']]) {
+  for (const [stage, format] of [['restore-write', 49123], ['publication-state', 49124], ['PRIVATE_FORMAT', 'PRIVATE_CONTENT']]) {
     const f = fixture();
     try {
       const request = f.driver.request('paste');
       await nextTurn();
       f.reply({ id: 1, ok: false, code: 'restore-failed', clipboardStage: stage, clipboardFormat: format });
       await assert.rejects(request, (error) => {
-        assert.equal(error.clipboardStage, stage === 'restore-write' ? stage : undefined);
+        assert.equal(error.clipboardStage, stage === 'restore-write' || stage === 'publication-state' ? stage : undefined);
         assert.equal(error.clipboardFormat, typeof format === 'number' ? format : undefined);
         assert.doesNotMatch(error.message, /PRIVATE/);
         return true;

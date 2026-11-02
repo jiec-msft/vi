@@ -38,6 +38,8 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   child.stderr.write('VI_STARTUP script-entry 123 8 5 Desktop\n');
   diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage: 'restore-write',
     clipboardFormat: 49465, formatName: 'PRIVATE_NATIVE_FORMAT' });
+  diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage: 'publication-state',
+    clipboardFormat: 49466, formatName: 'PRIVATE_PUBLICATION_FORMAT' });
   child.stderr.write(`VI_DIAG ${JSON.stringify({ run: diagnostics.runId, pid: 123, generation: 2,
     state: 'suspended', monoMs: 15, time: '2026-01-01T00:00:00.000Z', birthFileTime: '134380000000000000',
     inputDesktop: 'unavailable', win32Error: 5, endpoint: 'PRIVATE_ENDPOINT' })}\n`);
@@ -48,6 +50,7 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   assert.doesNotMatch(text, /PRIVATE|endpoint|PATH/);
   assert.equal(rows.filter((row) => row.fault === 'compilation').length, 1);
   assert.ok(rows.some((row) => row.clipboardStage === 'restore-write' && row.clipboardFormat === 49465));
+  assert.ok(rows.some((row) => row.clipboardStage === 'publication-state' && row.clipboardFormat === 49466));
   assert.ok(rows.some((row) => row.startupStage === 'script-entry' && row.powerShellMajor === 5 &&
     row.powerShellEdition === 'Desktop' && row.pointerBytes === 8));
   assert.ok(rows.some((row) => row.generation === 2 && row.helperPid === 123 && row.nativeMonoMs === 15 && row.win32Error === 5));
