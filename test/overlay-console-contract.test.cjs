@@ -4,7 +4,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { packagingShellContext } = require('../scripts/distribution.cjs');
 
-test('console probe exit and failure witness contracts reject wrong paths without registry or child actions', {
+test('console completion, exit and failure witness contracts reject wrong paths without registry or child actions', {
   skip: process.platform !== 'win32',
 }, () => {
   const shell = packagingShellContext();
@@ -14,5 +14,5 @@ test('console probe exit and failure witness contracts reject wrong paths withou
   const report = JSON.parse(output.trim());
   assert.equal(report.status, 'passed');
   assert.equal(report.scope, 'pure-functions-only-no-registry-or-child-launch');
-  assert.equal(report.checks.length, 10);
+  assert.equal(report.checks.length, 21);
 });

@@ -314,6 +314,15 @@ ready receipt 不等于 clean exit；旧 coarse error 不能据此推断 timeout
 也不能将通用 negative failure 总标题误读为 live rollback 已失败。所有 probe、
 registry restore、五个负例及原见证强度不变；pure contract 只提取指定函数并用
 mock probe 验证，不运行真实 console prepare／restore 或访问用户终端设置。
+console probe 不再以固定 5 s sleep 作为退出协议：fresh、session-local manual-reset
+event 在 child ready 前打开，child 以原 5000 ms 存活 lease 等待请求；parent 完成
+原 live host/client PID、birth、session／parent 采样后才 signal，随后仍只等原
+5000 ms clean exit。这样 exit budget 不再同时支付人为存活 padding 与 teardown。
+signal／lease 失败、真实非零 exit 或 timeout 都仍失败，不能 kill 成成功或造 exit0；
+ready 20 s、host absence 2 s、child/reap budgets 不变。事件仅是一次 owned completion
+协议，不代替 actor identity 证明；parent 与 child handle 分别独立清理，cleanup
+故障仍与原 prepare 故障保留。纯控制执行同一 parent completion 与实际生成的 child
+wait 函数，覆盖未验证身份、signal failure、lease expiry、nonzero 与 timeout。
 execFile 已失败时，partial JSON、缺失／损坏／不匹配的 ACK 或 pipe/commit 不一致
 均继续抛同一个原始 process error；validation error 以非枚举属性另存，公开事件只
 增加固定 rejection stage。只有全部 receipt 验证完成才附 nativeReceipt；Windows
