@@ -46,6 +46,17 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   ], clipboardCausesTruncated: false, clipboardCleanupCauses: [
     { code: 'restore-failed', stage: 'restore-sequence', format: 0, errorNumber: 0 },
   ], clipboardCleanupCausesTruncated: true });
+  const copyCauses = [
+    { code: 'clipboard-snapshot-failed', stage: 'snapshot-copy', format: 13, errorNumber: 0 },
+    { code: 'clipboard-snapshot-failed', stage: 'snapshot-release', format: 13, errorNumber: 0 },
+  ];
+  diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage: 'snapshot-copy',
+    clipboardFormat: 13, clipboardCauses: copyCauses.map((cause) => ({ ...cause,
+      message: 'PRIVATE_COPY_RELEASE', innerException: { message: 'PRIVATE_ORIGINAL' } })) });
+  for (const [clipboardStage, clipboardFormat] of [
+    ['snapshot-format', 49467], ['snapshot-format-name', 49468], ['snapshot-release', 13],
+  ]) diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage, clipboardFormat,
+    formatName: 'PRIVATE_REGISTERED_FORMAT' });
   child.stderr.write(`VI_DIAG ${JSON.stringify({ run: diagnostics.runId, pid: 123, generation: 2,
     state: 'suspended', monoMs: 15, time: '2026-01-01T00:00:00.000Z', birthFileTime: '134380000000000000',
     inputDesktop: 'unavailable', win32Error: 5, endpoint: 'PRIVATE_ENDPOINT' })}\n`);
@@ -62,6 +73,13 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   assert.equal(aggregate.clipboardCauses[1].stage, 'publication-close');
   assert.equal(aggregate.clipboardCleanupCauses[0].stage, 'restore-sequence');
   assert.equal(aggregate.clipboardCleanupCausesTruncated, true);
+  const copy = rows.find((row) => row.clipboardCauses?.[0]?.stage === 'snapshot-copy');
+  assert.deepEqual(copy.clipboardCauses, copyCauses);
+  assert.equal(copy.clipboardStage, 'snapshot-copy');
+  assert.equal(copy.clipboardFormat, 13);
+  for (const [stage, format] of [['snapshot-format', 49467], ['snapshot-format-name', 49468], ['snapshot-release', 13]]) {
+    assert.ok(rows.some((row) => row.clipboardStage === stage && row.clipboardFormat === format));
+  }
   assert.ok(rows.some((row) => row.startupStage === 'script-entry' && row.powerShellMajor === 5 &&
     row.powerShellEdition === 'Desktop' && row.pointerBytes === 8));
   assert.ok(rows.some((row) => row.generation === 2 && row.helperPid === 123 && row.nativeMonoMs === 15 && row.win32Error === 5));

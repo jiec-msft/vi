@@ -303,6 +303,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             IntPtr snapshotOwner = GetClipboardOwner();
             try { saved = ClipboardSnapshot.Capture(); }
             catch (ClipboardPreparationException) { throw; }
+            catch (AggregateException) { throw; }
             catch { throw new ClipboardPreparationException("clipboard-snapshot-failed"); }
             if (GetClipboardOwner() != snapshotOwner) throw new ClipboardPreparationException("clipboard-changed");
             uint locale = (uint)(GetKeyboardLayout(0).ToInt64() & 0xffff);

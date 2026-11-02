@@ -11,7 +11,7 @@ public sealed class ClipboardPreparationException : Exception {
     public readonly uint Format;
     public readonly uint ExpectedSequence, CurrentSequence;
     public ClipboardPreparationException(string code, int nativeCode = 0, string stage = "unspecified", uint format = 0,
-        uint expectedSequence = 0, uint currentSequence = 0) : base(code) {
+        uint expectedSequence = 0, uint currentSequence = 0, Exception inner = null) : base(code, inner) {
         Code = code; NativeCode = nativeCode; Stage = stage; Format = format;
         ExpectedSequence = expectedSequence; CurrentSequence = currentSequence;
     }
@@ -24,14 +24,14 @@ public sealed class ClipboardSnapshot : IDisposable {
     [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SetClipboardData(uint format, IntPtr data);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetClipboardData(uint format);
     [DllImport("user32.dll", SetLastError=true)] static extern uint EnumClipboardFormats(uint previous);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClipboardFormatName(uint format, StringBuilder name, int length);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern int GetClipboardFormatName(uint format, StringBuilder name, int length);
     [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
     [DllImport("kernel32.dll", SetLastError=true)] static extern UIntPtr GlobalSize(IntPtr data);
     [DllImport("kernel32.dll", SetLastError=true)] static extern uint GlobalFlags(IntPtr data);
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GlobalLock(IntPtr data);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr data);
-    [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr data);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GlobalFree(IntPtr data);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr CopyImage(IntPtr image, uint type, int x, int y, uint flags);
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr image);
     [DllImport("gdi32.dll", SetLastError=true)] static extern int GetObject(IntPtr image, int size, out BitmapInfo data);
@@ -68,14 +68,28 @@ public sealed class ClipboardSnapshot : IDisposable {
     static Func<uint, IntPtr, IntPtr> write = SetClipboardData;
     static Action<IntPtr, int> copyCheckpoint = null;
     static Func<IntPtr, IntPtr> releaseCopy = GlobalFree;
+    static Func<uint, StringBuilder, int, int> readFormatName = GetClipboardFormatName;
     static ClipboardPreparationException Fault(string code) {
         return new ClipboardPreparationException(code, Marshal.GetLastWin32Error());
     }
-    static IntPtr GlobalCopy(IntPtr source, int length) {
+    static int ClassifyRegisteredName(string name) {
+        if (String.Equals(name, "Ole Private Data", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "DataObject", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (String.Equals(name, "FileContents", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "FileGroupDescriptor", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "FileGroupDescriptorW", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "Embed Source", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "Embedded Object", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "Link Source", StringComparison.OrdinalIgnoreCase)) return 2;
+        return 0;
+    }
+    static IntPtr GlobalCopy(uint format, IntPtr source, int length) {
         if (length == 0) throw new ClipboardPreparationException("clipboard-format");
         IntPtr copy = GlobalAlloc(0x42, new UIntPtr((uint)length));
-        if (copy == IntPtr.Zero) throw Fault("clipboard-snapshot-failed");
+        if (copy == IntPtr.Zero)
+            throw new ClipboardPreparationException("clipboard-snapshot-failed", Marshal.GetLastWin32Error(), "snapshot-copy", format);
         bool transferred = false;
+        ClipboardPreparationException primary = null;
         try {
             if (copyCheckpoint != null) copyCheckpoint(copy, 0);
             IntPtr input = GlobalLock(source);
@@ -91,8 +105,28 @@ public sealed class ClipboardSnapshot : IDisposable {
             } finally { GlobalUnlock(source); }
             transferred = true;
             return copy;
+        } catch (Exception failure) {
+            var native = failure as ClipboardPreparationException;
+            primary = new ClipboardPreparationException("clipboard-snapshot-failed", native == null ? 0 : native.NativeCode,
+                "snapshot-copy", format, 0, 0, failure);
+            throw primary;
         } finally {
-            if (!transferred) releaseCopy(copy);
+            if (!transferred) {
+                ClipboardPreparationException cleanup = null;
+                try {
+                    SetLastError(0);
+                    IntPtr remaining = releaseCopy(copy);
+                    int error = Marshal.GetLastWin32Error();
+                    if (remaining != IntPtr.Zero)
+                        cleanup = new ClipboardPreparationException("clipboard-snapshot-failed", error, "snapshot-release", format);
+                } catch (Exception failure) {
+                    cleanup = new ClipboardPreparationException("clipboard-snapshot-failed", 0, "snapshot-release", format, 0, 0, failure);
+                }
+                if (cleanup != null) {
+                    if (primary != null) throw new AggregateException("Clipboard copy and release both failed.", primary, cleanup);
+                    throw cleanup;
+                }
+            }
         }
     }
     static Item Clone(uint format, IntPtr data) {
@@ -153,7 +187,7 @@ public sealed class ClipboardSnapshot : IDisposable {
                 if (error != 0) throw new ClipboardPreparationException("clipboard-snapshot-failed", error);
                 if (length == 0 || length > 67108864) throw new ClipboardPreparationException("clipboard-format");
                 item.Bytes = length;
-                item.Handle = GlobalCopy(data, (int)length);
+                item.Handle = GlobalCopy(format, data, (int)length);
             }
             if (item.Handle == IntPtr.Zero) throw Fault("clipboard-snapshot-failed");
             return item;
@@ -176,15 +210,18 @@ public sealed class ClipboardSnapshot : IDisposable {
                 if (++seen > 256) throw new ClipboardPreparationException("clipboard-format");
                 if (format >= 0xc000) {
                     var name = new StringBuilder(256);
-                    GetClipboardFormatName(format, name, name.Capacity);
+                    SetLastError(0);
+                    int count = readFormatName(format, name, name.Capacity);
+                    int nameError = Marshal.GetLastWin32Error();
+                    if (count <= 0)
+                        throw new ClipboardPreparationException("clipboard-snapshot-failed", nameError, "snapshot-format-name", format);
+                    int classification = ClassifyRegisteredName(name.ToString());
                     // OLE ownership/marshalling bookkeeping cannot be transferred to a different owner.
-                    if (name.ToString() == "Ole Private Data" || name.ToString() == "DataObject") {
+                    if (classification == 1) {
                         previous = format; continue;
                     }
-                    if (name.ToString() == "FileContents" || name.ToString() == "FileGroupDescriptor" ||
-                        name.ToString() == "FileGroupDescriptorW" || name.ToString() == "Embed Source" ||
-                        name.ToString() == "Embedded Object" || name.ToString() == "Link Source") {
-                        throw new ClipboardPreparationException("clipboard-format");
+                    if (classification == 2) {
+                        throw new ClipboardPreparationException("clipboard-format", 0, "snapshot-format", format);
                     }
                 }
                 if (!(format >= 1 && format <= 17 || format == 129 || format == 130 ||
@@ -231,6 +268,14 @@ public sealed class ClipboardSnapshot : IDisposable {
                     copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
                 } finally { changed(); }
             }
+        } catch (AggregateException failure) {
+            var causes = new List<Exception>();
+            foreach (var cause in failure.InnerExceptions) {
+                var preparation = cause as ClipboardPreparationException;
+                causes.Add(new ClipboardPreparationException("restore-failed", preparation == null ? 0 : preparation.NativeCode,
+                    preparation != null && preparation.Stage == "snapshot-release" ? "snapshot-release" : stage, format, 0, 0, cause));
+            }
+            throw new AggregateException("Clipboard restore copy and release both failed.", causes);
         } catch (ClipboardPreparationException error) {
             if (error.Code == "restore-failed") throw;
             throw new ClipboardPreparationException("restore-failed", error.NativeCode, stage, format);

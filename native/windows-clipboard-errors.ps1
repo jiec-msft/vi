@@ -12,6 +12,9 @@ function Get-ClipboardExceptionLeaves([Exception]$Exception){
             $take=[Math]::Min($current.InnerExceptions.Count,32-$pending.Count)
             if($take -lt $current.InnerExceptions.Count){$truncated=$true}
             for($i=$take-1;$i -ge 0;$i--){$pending.Push($current.InnerExceptions[$i])}
+        }elseif($current -is [ViClipboard.ClipboardPreparationException]){
+            # Retain original exceptions in memory, but project only this typed scalar boundary.
+            if($leaves.Count -lt 2){$leaves.Add($current)}else{$truncated=$true}
         }elseif($current.InnerException){
             $pending.Push($current.InnerException)
         }elseif($leaves.Count -lt 2){
@@ -29,7 +32,8 @@ function ConvertTo-ClipboardFailure([Exception]$Exception){
     $codes=@('native-error','window-order','target-changed','secure-field','no-input','clipboard-changed','clipboard-unavailable',
         'clipboard-busy','clipboard-format','clipboard-snapshot-failed','modifiers-held','composition-active','paste-unconfirmed','restore-failed')
     $stages=@('unspecified','restore-open','restore-sequence','restore-copy','restore-empty','restore-write',
-        'publication-open','publication-close','publication-owner','publication-sequence','publication-state','publication-write')
+        'publication-open','publication-close','publication-owner','publication-sequence','publication-state','publication-write',
+        'snapshot-format','snapshot-format-name','snapshot-copy','snapshot-release')
     foreach($leaf in $description.leaves){
         $code='native-error'
         $stage='unspecified'

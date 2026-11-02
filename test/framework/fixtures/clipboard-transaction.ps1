@@ -29,10 +29,18 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  public static int PublicationMutation;
  public static Func<uint,IntPtr> RealPublicationRead;
  public static Func<bool> RealSealClose;
- public static int ProbeMode, FinalSealMode, CopyFailureStage, CopyFreeCount;
+ public static int ProbeMode, FinalSealMode, CopyFailureStage, CopyFreeCount, CopyReleaseMode, NameFailureError;
+ public static uint NameFailureFormat;
  public static IntPtr ProbeWindow, FailedCopy;
  public static Func<IntPtr,IntPtr> RealCopyRelease;
- public static bool CopyUnlocked, CopyFreed, CopyIdentity, ManagedFailureClosed;
+ public static Func<uint,System.Text.StringBuilder,int,int> RealFormatNameRead;
+ public static Exception CopyPrimaryFailure, CopyReleaseFailure;
+ public static bool CopyUnlocked, CopyFreed, CopyIdentity, ManagedFailureClosed, NativeNameFailure;
+ public static int FailRegisteredName(uint format,System.Text.StringBuilder name,int length){
+  if(format!=NameFailureFormat)return RealFormatNameRead(format,name,length);
+  int count=RealFormatNameRead(13,name,length);
+  NameFailureError=Marshal.GetLastWin32Error();NativeNameFailure=count==0;return count;
+ }
  public static void RenderFormat(IntPtr window,uint format){SendMessage(window,0x305,new IntPtr((long)format),IntPtr.Zero);}
  public static void StaleProbe(IntPtr window){RenderFormat(window,13);}
  public static IntPtr ControlledProbe(uint format){
@@ -62,11 +70,18 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  }
  public static void CopyCheckpoint(IntPtr copy,int stage){
   if(stage!=CopyFailureStage)return;
-  FailedCopy=copy;throw new InvalidOperationException("Controlled copy failure.");
+  FailedCopy=copy;CopyPrimaryFailure=new InvalidOperationException("Controlled copy failure.");throw CopyPrimaryFailure;
  }
  public static IntPtr ObserveCopyRelease(IntPtr copy){
   CopyFreeCount++;CopyIdentity=copy==FailedCopy;CopyUnlocked=(GlobalFlags(copy)&255)==0;
-  IntPtr result=RealCopyRelease(copy);CopyFreed=result==IntPtr.Zero;return result;
+  IntPtr result=RealCopyRelease(copy);CopyFreed=result==IntPtr.Zero;
+  if(CopyFreed&&CopyReleaseMode==1){
+   CopyReleaseFailure=new InvalidOperationException("Controlled release failure after successful native free.");
+   throw CopyReleaseFailure;
+  }
+  // Return a controlled failure status only; the freed handle is never dereferenced or freed again.
+  if(CopyFreed&&CopyReleaseMode==2){SetControlledStatusError(0);return copy;}
+  return result;
  }
  public static void MutatePublication(IntPtr owner){
   if(PublicationMutation==3)PublicationFixture.Put(new uint[]{13},new byte[][]{System.Text.Encoding.Unicode.GetBytes("New copy during seal\0")});
@@ -97,6 +112,7 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  [DllImport("user32.dll")]public static extern int CountClipboardFormats();
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern uint RegisterClipboardFormat(string name);
  [DllImport("kernel32.dll")]static extern void SetLastError(uint error);
+ [DllImport("kernel32.dll",EntryPoint="SetLastError",SetLastError=true)]static extern void SetControlledStatusError(uint error);
  [DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr GlobalAlloc(uint flags,UIntPtr size);
  [DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr GlobalLock(IntPtr data);
  [DllImport("kernel32.dll")]static extern uint GlobalFlags(IntPtr data);
@@ -800,6 +816,138 @@ try{
     }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
     finally{Close-Transaction $transaction $operationFailure { $probeReader.SetValue($null,$realProbe);$closeSetter.SetValue($null,$realClose) }}
     $checks.Add('combined-native-validation-and-close-failure-preserves-two-scalar-causes')
+    [OwnedClipboardFixture]::CaseId=36
+    $classify=[ViClipboard.ClipboardSnapshot].GetMethod('ClassifyRegisteredName',$static)
+    $knownNames=@('Ole Private Data','DataObject','FileContents','FileGroupDescriptor','FileGroupDescriptorW','Embed Source','Embedded Object','Link Source')
+    for($i=0;$i -lt $knownNames.Count;$i++){
+        $lower=$knownNames[$i].ToLowerInvariant()
+        $upper=$knownNames[$i].ToUpperInvariant()
+        $lowerId=[OwnedClipboardFixture]::RegisterClipboardFormat($lower)
+        $upperId=[OwnedClipboardFixture]::RegisterClipboardFormat($upper)
+        Check ($lowerId -ge 0xc000 -and $lowerId -eq $upperId) 'Native registered format identity changed with casing.'
+        $classification=2
+        if($i -lt 2){$classification=1}
+        foreach($variant in @($knownNames[$i],$lower,$upper)){
+            Check ($classify.Invoke($null,[object[]]@($variant)) -eq $classification) 'Known registered format classification changed with casing.'
+        }
+    }
+    Check ($classify.Invoke($null,[object[]]@('VI synthetic metadata')) -eq 0) 'Supported registered metadata was misclassified.'
+    foreach($name in $knownNames[2..7]){
+        foreach($variant in @($name.ToLowerInvariant(),$name.ToUpperInvariant())){
+            $virtual=[OwnedClipboardFixture]::RegisterClipboardFormat($variant)
+            $fixture.Put([uint32[]]@(13,$format,$rich,$virtual),[byte[][]]@($text,[byte[]]@(0),$html,[byte[]]@(0,0,0,0)))
+            $expected=Read-Mixed $fixture $format $rich
+            $virtualBytes=[Convert]::ToBase64String($fixture.Read($virtual))
+            $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+            $owner=[OwnedClipboardFixture]::GetClipboardOwner()
+            $transaction=[TranscriptClipboard]::new()
+            $operationFailure=$null
+            try{
+                $caught=$null
+                try{$transaction.Begin('Must reject unsupported registered formats')}catch{$caught=$_.Exception}
+                Check ($null -ne $caught) 'Unsupported registered format was captured.'
+                $description=Get-ClipboardExceptionLeaves $caught
+                Check ($description.leaves.Count -eq 1 -and -not $description.truncated) 'Unsupported format fault lost its identity.'
+                $cause=$description.leaves[0]
+                Check ($cause.Code -eq 'clipboard-format' -and $cause.Stage -eq 'snapshot-format' -and $cause.Format -eq $virtual -and $cause.NativeCode -eq 0) 'Unsupported format did not fail before copying with a numeric format only.'
+                Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner) 'Unsupported format rejection changed original clipboard identity.'
+                $after=Read-Mixed $fixture $format $rich
+                Check ($after.text -eq $expected.text -and $after.metadata -eq $expected.metadata -and $after.rich -eq $expected.rich -and [Convert]::ToBase64String($fixture.Read($virtual)) -eq $virtualBytes) 'Unsupported format rejection changed full original payloads.'
+            }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+            finally{Close-Transaction $transaction $operationFailure}
+        }
+    }
+    [OwnedClipboardFixture]::CaseId=37
+    $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(0),$html))
+    $expected=Read-Mixed $fixture $format $rich
+    $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+    $owner=[OwnedClipboardFixture]::GetClipboardOwner()
+    $nameReader=[ViClipboard.ClipboardSnapshot].GetField('readFormatName',$static)
+    $realNameReader=$nameReader.GetValue($null)
+    [OwnedClipboardFixture]::RealFormatNameRead=$realNameReader
+    [OwnedClipboardFixture]::NameFailureFormat=$format
+    [OwnedClipboardFixture]::NativeNameFailure=$false
+    $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
+    try{
+        $nameReader.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,Text.StringBuilder,int,int]],[OwnedClipboardFixture].GetMethod('FailRegisteredName')))
+        $caught=$null
+        try{$transaction.Begin('Must reject unresolved registered names')}catch{$caught=$_.Exception}
+        Check ($null -ne $caught -and [OwnedClipboardFixture]::NativeNameFailure) 'Native format name failure did not reject capture.'
+        $description=Get-ClipboardExceptionLeaves $caught
+        Check ($description.leaves.Count -eq 1 -and -not $description.truncated) 'Native format name failure lost its identity.'
+        $cause=$description.leaves[0]
+        Check ($cause.Code -eq 'clipboard-snapshot-failed' -and $cause.Stage -eq 'snapshot-format-name' -and $cause.Format -eq $format -and $cause.NativeCode -eq [OwnedClipboardFixture]::NameFailureError) 'Format name failure lost its actual numeric native error.'
+        Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner) 'Format name failure changed original clipboard identity.'
+        $after=Read-Mixed $fixture $format $rich
+        Check ($after.text -eq $expected.text -and $after.metadata -eq $expected.metadata -and $after.rich -eq $expected.rich) 'Format name failure changed full original payloads.'
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure { $nameReader.SetValue($null,$realNameReader) }}
+    $checks.Add('registered-format-case-identity-and-native-name-failure-reject-before-mutation')
+    foreach($restoreCopy in @($false,$true)){
+        foreach($stage in @(0,1)){
+            foreach($mode in @(1,2)){
+                [OwnedClipboardFixture]::CaseId=38+([int]$restoreCopy*4)+($stage*2)+$mode-1
+                $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(0),$html))
+                $expected=Read-Mixed $fixture $format $rich
+                $transaction=[TranscriptClipboard]::new()
+                $operationFailure=$null
+                try{
+                    if($restoreCopy){$transaction.Begin('Must preserve master on copy release failure')}
+                    $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+                    $owner=[OwnedClipboardFixture]::GetClipboardOwner()
+                    [OwnedClipboardFixture]::CopyFailureStage=$stage
+                    [OwnedClipboardFixture]::CopyReleaseMode=$mode
+                    [OwnedClipboardFixture]::CopyFreeCount=0
+                    [OwnedClipboardFixture]::CopyFreed=$false
+                    [OwnedClipboardFixture]::CopyPrimaryFailure=$null
+                    [OwnedClipboardFixture]::CopyReleaseFailure=$null
+                    $copyHook.SetValue($null,[Delegate]::CreateDelegate([Action[IntPtr,int]],[OwnedClipboardFixture].GetMethod('CopyCheckpoint')))
+                    $copyRelease.SetValue($null,[Delegate]::CreateDelegate([Func[IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('ObserveCopyRelease')))
+                    $caught=$null
+                    try{
+                        if($restoreCopy){$transaction.Restore()}else{$transaction.Begin('Must preserve copy and release faults')}
+                    }catch{$caught=$_.Exception}
+                    Check ($null -ne $caught) 'Copy/release fault control unexpectedly succeeded.'
+                    $description=Get-ClipboardExceptionLeaves $caught
+                    Check ($description.leaves.Count -eq 2 -and -not $description.truncated) 'Copy failure or release cleanup was replaced.'
+                    $primary=$description.leaves[0]
+                    $cleanup=$description.leaves[1]
+                    $expectedCode='clipboard-snapshot-failed'
+                    $expectedStage='snapshot-copy'
+                    if($restoreCopy){$expectedCode='restore-failed';$expectedStage='restore-copy'}
+                    Check ($primary.Code -eq $expectedCode -and $primary.Stage -eq $expectedStage -and $cleanup.Code -eq $expectedCode -and $cleanup.Stage -eq 'snapshot-release') 'Copy/release phases or top-level failure policy were lost.'
+                    $originalPrimary=$primary.InnerException
+                    $originalCleanup=$cleanup
+                    if($restoreCopy){$originalPrimary=$originalPrimary.InnerException;$originalCleanup=$cleanup.InnerException}
+                    Check ([Object]::ReferenceEquals($originalPrimary,[OwnedClipboardFixture]::CopyPrimaryFailure)) 'Original primary exception was replaced.'
+                    Check ([Object]::ReferenceEquals($originalCleanup.InnerException,[OwnedClipboardFixture]::CopyReleaseFailure)) 'Release exception identity or explicit returned-failure status was lost.'
+                    Check ([OwnedClipboardFixture]::CopyFreeCount -eq 1 -and [OwnedClipboardFixture]::CopyFreed -and [OwnedClipboardFixture]::CopyIdentity -and [OwnedClipboardFixture]::CopyUnlocked) 'Release control did not actually free exactly its unlocked copy once.'
+                    Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner) 'Copy/release failure changed clipboard identity.'
+                    $projection=ConvertTo-ClipboardFailure $caught
+                    $wire=$projection|ConvertTo-Json -Compress -Depth 6|ConvertFrom-Json
+                    Check ($wire.causes.Count -eq 2 -and -not $wire.truncated -and $wire.causes[0].stage -eq $expectedStage -and $wire.causes[1].stage -eq 'snapshot-release') 'Copy/release pair did not survive scalar wire projection.'
+                    Check ($wire.causes[0].errorNumber -eq 0 -and $wire.causes[1].errorNumber -eq 0 -and $wire.causes[0].format -eq 13 -and $wire.causes[1].format -eq 13) 'Controlled managed/status failure fabricated a native error or lost its format.'
+                    Check (($wire|ConvertTo-Json -Depth 6) -notmatch 'Controlled|successful native free|InnerException|Message') 'Copy/release projection exposed original raw exceptions.'
+                    $originalError=[Console]::Error
+                    $capturedError=[IO.StringWriter]::new()
+                    try{[Console]::SetError($capturedError);Report-TransactionFault 'operation' $caught}
+                    finally{[Console]::SetError($originalError)}
+                    $logged=@($capturedError.ToString() -split '\r?\n'|Where-Object {$_ -like 'VI_CLIP_FAILURE *'})
+                    $capturedError.Dispose()
+                    Check ($logged.Count -eq 2 -and $logged[0] -like "*stage=$expectedStage*" -and $logged[1] -like '*stage=snapshot-release*') 'Fixture logging lost the primary or release failure.'
+                    $copyHook.SetValue($null,$null)
+                    $copyRelease.SetValue($null,$realRelease)
+                    if($restoreCopy){$transaction.Restore()}
+                    Check ($fixture.LockCount(13) -eq 0) 'Copy/release failure left the original source locked.'
+                    $after=Read-Mixed $fixture $format $rich
+                    Check ($after.text -eq $expected.text -and $after.metadata -eq $expected.metadata -and $after.rich -eq $expected.rich) 'Copy/release failure lost full original master payloads.'
+                }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+                finally{Close-Transaction $transaction $operationFailure { $copyHook.SetValue($null,$null);$copyRelease.SetValue($null,$realRelease);[OwnedClipboardFixture]::CopyReleaseMode=0 }}
+            }
+        }
+    }
+    $checks.Add('capture-and-restore-copy-release-failures-preserve-primary-and-cleanup-with-one-real-free')
     $report=@{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}
 }catch{$fixtureFailure=$_.Exception;throw}
 finally{

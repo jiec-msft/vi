@@ -125,7 +125,8 @@ class Diagnostics {
     }
     if (components.has(data.component)) entry.component = data.component;
     if (['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write',
-      'publication-open', 'publication-close', 'publication-owner', 'publication-sequence', 'publication-state', 'publication-write'].includes(data.clipboardStage)) {
+      'publication-open', 'publication-close', 'publication-owner', 'publication-sequence', 'publication-state', 'publication-write',
+      'snapshot-format', 'snapshot-format-name', 'snapshot-copy', 'snapshot-release'].includes(data.clipboardStage)) {
       entry.clipboardStage = data.clipboardStage;
       if (Number.isInteger(data.clipboardFormat) && data.clipboardFormat >= 0 && data.clipboardFormat <= 65535) entry.clipboardFormat = data.clipboardFormat;
     }

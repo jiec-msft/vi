@@ -168,7 +168,7 @@ materialized text、nonce 改写和外部新 copy，验证这些竞争不能被�
 参见 [系统格式转换](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats)
 与 [CF_LOCALE 的 close 契约](https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats)。
 restore 仍严格检查 owner/sequence；delayed renderer 在任何写入前也检查
-expected sequence，避免自有 render 掩盖先前未知修改。20 项真实 fixture 保留
+expected sequence，避免自有 render 掩盖先前未知修改。22 项真实 fixture 保留
 原 13 项，并增加实际 same-owner mutation：render 不得覆盖／归属该变化，
 backup 必须仍 pending，随后真正的新 copy 优先。OLE case 保留
 Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实读取后恢复；两条路径都检查
@@ -187,10 +187,33 @@ RecoverPending 必须恢复完整原始 bytes；外部新 copy 的负例也经�
 负例；第二次 readonly Close 与最终 seal 的真实 render/新 owner 竞争；
 GlobalCopy 的 post-allocation/post-lock 控制故障与实际 free 一次证明；
 真实 validation+readonly-close 双失败的恰好两个 scalar causes。
+这 20 组顺序保持，再追加两组：全部已知 registered format 的大小写分类与
+真实注册 ID 相等、unsupported virtual/embed/link 拒绝及原生名称查询失败；
+capture/restore 两条 copy 路径上，post-allocation/post-lock 故障与 release
+异常／受控非零返回的双因保留。所有组必须实际执行通过，新增源码不是运行证据。
+
+注册格式的身份按 Win32 case-insensitive 契约分类：OLE owner bookkeeping 不
+跨 owner 克隆，virtual/embed/link 无论大小写均拒绝。名称查询返回 0 同样拒绝，
+保留立即捕获的真实 numeric error/format，不以空名称进入 generic HGLOBAL 分支。
+fixture 只注册 bookkeeping 名称来验证 ID，不构造假的 OLE bookkeeping payload；
+unsupported 格式拒绝前后检查 owner、sequence 和全部原始 allocation bytes。
+参见 [注册格式身份](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerclipboardformatw)
+与 [名称查询返回值](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboardformatnamew)。
 
 GlobalCopy 从 GlobalAlloc 到成功完成两个 unlock 始终持有 allocation，任何
-异常都在解锁后由唯一 finally 释放；成功返回才移交给 snapshot Item。故障
-fixture 只使用小型 owned buffer 与真实 GlobalFree，不制造 OOM 或巨大分配。
+异常都在解锁后由唯一 finally 尝试一次释放；成功返回才移交给 snapshot Item。
+释放抛异常或返回非 NULL 都明确失败，不重试、不声称已释放；copy 主因与 release
+cleanup 组成两个 typed causes，原 exception 对象仍由各自 InnerException 保留。
+Begin 不把此 pair 压成单因，Restore 也保留 copy/release 两因及原 restore-failed
+策略；PS 投影把 typed exception 作为固定 scalar 边界，不向日志展开其原始 inner。
+`snapshot-format`、`snapshot-format-name`、`snapshot-copy`、`snapshot-release`
+固定 stage 同步经过 wire、JS error 和 privacy log。
+故障 fixture 只用小型 owned buffer，真实 GlobalFree 必须恰好成功一次后才注入
+managed error 或非零返回；受控状态只覆盖返回值处理，不宣称原生 free 真实失败，
+也不把 managed fault 伪造为 Win32 code。Win32 明确允许释放 locked object，
+不能用加锁制造 failed-free 对照；见 [GlobalFree 契约](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalfree)。
+名称查询负例则调用真实查询 API 的 predefined-format 失败路径，保留实际 error。
+不制造 OOM、巨大分配、double-free 或无效 native pointer。
 异常投影最多遍历 32 个节点，每个 operation/cleanup phase 各保留两个 leaf，
 越界显式标记 truncated；Aggregate 的两个成员不会被 InnerException 首项替代。
 wire、JS error 和 privacy log 只接受固定 code/stage、numeric format/native code，

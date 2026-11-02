@@ -77,15 +77,17 @@ test('clipboard preparation failures distinguish lock, unsupported format and ba
   }
 });
 
-test('restore fault metadata retains only fixed stages and numeric formats', async () => {
-  for (const [stage, format] of [['restore-write', 49123], ['publication-state', 49124], ['PRIVATE_FORMAT', 'PRIVATE_CONTENT']]) {
+test('clipboard fault metadata retains only fixed stages and numeric formats', async () => {
+  for (const [stage, format] of [['restore-write', 49123], ['publication-state', 49124],
+    ['snapshot-format', 49125], ['snapshot-format-name', 49126], ['snapshot-copy', 13], ['snapshot-release', 13],
+    ['PRIVATE_FORMAT', 'PRIVATE_CONTENT']]) {
     const f = fixture();
     try {
       const request = f.driver.request('paste');
       await nextTurn();
       f.reply({ id: 1, ok: false, code: 'restore-failed', clipboardStage: stage, clipboardFormat: format });
       await assert.rejects(request, (error) => {
-        assert.equal(error.clipboardStage, stage === 'restore-write' || stage === 'publication-state' ? stage : undefined);
+        assert.equal(error.clipboardStage, stage === 'PRIVATE_FORMAT' ? undefined : stage);
         assert.equal(error.clipboardFormat, typeof format === 'number' ? format : undefined);
         assert.doesNotMatch(error.message, /PRIVATE/);
         return true;
@@ -116,6 +118,40 @@ test('validation and close causes survive the wire separately from cleanup witho
       return true;
     });
   } finally { f.driver.close(); }
+});
+
+test('snapshot classification and copy release causes retain fixed policy and both errors without raw fields', async () => {
+  for (const causes of [
+    [{ code: 'clipboard-format', stage: 'snapshot-format', format: 49125, errorNumber: 0 }],
+    [{ code: 'clipboard-snapshot-failed', stage: 'snapshot-format-name', format: 49126, errorNumber: 87 }],
+    [
+      { code: 'clipboard-snapshot-failed', stage: 'snapshot-copy', format: 13, errorNumber: 0 },
+      { code: 'clipboard-snapshot-failed', stage: 'snapshot-release', format: 13, errorNumber: 0 },
+    ],
+    [
+      { code: 'restore-failed', stage: 'restore-copy', format: 13, errorNumber: 0 },
+      { code: 'restore-failed', stage: 'snapshot-release', format: 13, errorNumber: 0 },
+    ],
+  ]) {
+    const f = fixture();
+    try {
+      const pending = f.driver.request('paste');
+      await nextTurn();
+      f.reply({ id: 1, ok: false, code: causes[0].code, clipboardStage: causes[0].stage,
+        clipboardFormat: causes[0].format, errorNumber: causes[0].errorNumber,
+        clipboardCauses: causes.map((cause) => ({ ...cause, message: 'PRIVATE_COPY_OR_RELEASE',
+          innerException: { message: 'PRIVATE_ORIGINAL_EXCEPTION' }, formatName: 'PRIVATE_FORMAT' })) });
+      await assert.rejects(pending, (error) => {
+        assert.equal(error.code, causes[0].code);
+        assert.equal(error.clipboardStage, causes[0].stage);
+        assert.equal(error.clipboardFormat, causes[0].format);
+        assert.equal(error.errorNumber, causes[0].errorNumber);
+        assert.equal(JSON.stringify(error.clipboardCauses), JSON.stringify(causes));
+        assert.doesNotMatch(JSON.stringify(error.clipboardCauses), /PRIVATE|message|innerException|formatName/);
+        return true;
+      });
+    } finally { f.driver.close(); }
+  }
 });
 
 test('invalid cause schemas are protocol failures, not silently truncated success-shaped metadata', async () => {
