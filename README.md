@@ -142,10 +142,17 @@ owner 是本 transaction，sequence 仍等于 receipt，格式集合只有这些
 及 Unicode/系统 ANSI/OEM text aliases，metadata 的完整 bytes（包括 nonce）
 逐项相等，三个 text format 尚无 materialized handle。metadata 最大 4 KiB/项、
 格式数严格有界，不反序列化任何内容，也不读取／记录未知 text bytes。
-验证 text handle 是否为空时 publishing renderer 明确拒绝生成数据，可能发生的
-blocked callback 单独计数，不伪称没有请求；直到验证完成都不会生成 transcript。
+验证 text handle 时每次 GetClipboardData 都创建独立 active probe，记录本次请求
+及 Unicode backing format。只有该 native call 内、owned HWND 上对应 canonical
+Unicode 的 WM_RENDERFORMAT 可以确认拒绝；NULL+error0 本身不构成证明，
+WM_RENDERALL、过期或无关 format callback 均不能确认本次请求。任何非 NULL
+都拒绝；无法取得关联证明的原生 alias 同样 fail closed，不扩大错误码白名单。
+publishing renderer 明确拒绝生成数据，blocked callback 另计数，不伪称没有请求。
 同一 lock 内验证前后 owner/sequence 必须不变，之后才建立初始 sequence authority；
-只读 seal Close 后若再次漂移仍失败，不再次采用 current。后续 render/Restore
+renderer 在只读 seal Close 及最终 owner/sequence 检查期间仍禁写；比较的是不再
+变化的 locked candidate，不是 callback 可更新的 shared sequence。全部 native
+检查结束后，以无 native call 的 STA managed transition 同时提交 sequence、
+sealed 并启用 renderer。Close/validation 失败保持禁写和 backup。后续 render/Restore
 仍使用原严格 owner/sequence checks，不以 nonce 或内容一致为由接受后续漂移。
 
 这不是把任意 post-close sequence 作为 baseline，也不推断 Close 的增量来源。
@@ -161,7 +168,7 @@ materialized text、nonce 改写和外部新 copy，验证这些竞争不能被�
 参见 [系统格式转换](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats)
 与 [CF_LOCALE 的 close 契约](https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats)。
 restore 仍严格检查 owner/sequence；delayed renderer 在任何写入前也检查
-expected sequence，避免自有 render 掩盖先前未知修改。16 项真实 fixture 保留
+expected sequence，避免自有 render 掩盖先前未知修改。20 项真实 fixture 保留
 原 13 项，并增加实际 same-owner mutation：render 不得覆盖／归属该变化，
 backup 必须仍 pending，随后真正的新 copy 优先。OLE case 保留
 Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实读取后恢复；两条路径都检查
@@ -176,6 +183,18 @@ RecoverPending 必须恢复完整原始 bytes；外部新 copy 的负例也经�
 另外两个新增组覆盖 seal-window 的四类真实 Win32 竞争，以及 Unicode/ANSI/OEM
 读者。转换仍交给 Windows，没有自行选择编码或改变原始 locale；测试保留
 非 ASCII 的 canonical Unicode、ANSI/OEM ASCII prefix 和完整原始 backup bytes。
+原 16 组之后再追加四组：逐调用 probe 的 NULL0/过期/无关/RenderAll/非 NULL
+负例；第二次 readonly Close 与最终 seal 的真实 render/新 owner 竞争；
+GlobalCopy 的 post-allocation/post-lock 控制故障与实际 free 一次证明；
+真实 validation+readonly-close 双失败的恰好两个 scalar causes。
+
+GlobalCopy 从 GlobalAlloc 到成功完成两个 unlock 始终持有 allocation，任何
+异常都在解锁后由唯一 finally 释放；成功返回才移交给 snapshot Item。故障
+fixture 只使用小型 owned buffer 与真实 GlobalFree，不制造 OOM 或巨大分配。
+异常投影最多遍历 32 个节点，每个 operation/cleanup phase 各保留两个 leaf，
+越界显式标记 truncated；Aggregate 的两个成员不会被 InnerException 首项替代。
+wire、JS error 和 privacy log 只接受固定 code/stage、numeric format/native code，
+不包含 message/token/metadata，格式错误的 cause schema 明确拒绝为 protocol fault。
 
 diagnostic `flush()` 是 200 ms bounded best effort，不是文件存在或持久化 ACK。
 native privacy/content fixture 复用已有真实 writer fixture，先等 initialization

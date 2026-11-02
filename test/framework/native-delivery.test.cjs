@@ -15,7 +15,8 @@ function fixture() {
   child.kill = () => { child.killed = true; };
   const context = vm.createContext({ module: { exports: {} },
     require: (name) => name === 'node:child_process' ? { spawn: () => child }
-      : name === './native-diagnostics.cjs' ? require('../../app/native-diagnostics.cjs') : require(name),
+      : name === './native-diagnostics.cjs' ? require('../../app/native-diagnostics.cjs')
+        : name === './clipboard-faults.cjs' ? require('../../app/clipboard-faults.cjs') : require(name),
     setTimeout, clearTimeout, process });
   vm.runInContext(readFileSync(require.resolve('../../app/native-delivery.cjs'), 'utf8'), context);
   const driver = new context.module.exports.NativeDelivery('win32', 'owned-resources');
@@ -90,6 +91,44 @@ test('restore fault metadata retains only fixed stages and numeric formats', asy
         return true;
       });
     } finally { f.driver.close(); }
+  }
+});
+
+test('validation and close causes survive the wire separately from cleanup without raw fields', async () => {
+  const f = fixture();
+  const causes = [
+    { code: 'clipboard-changed', stage: 'publication-state', format: 13, errorNumber: 0 },
+    { code: 'clipboard-unavailable', stage: 'publication-close', format: 0, errorNumber: 0 },
+  ];
+  const cleanup = [{ code: 'restore-failed', stage: 'restore-sequence', format: 0, errorNumber: 0 }];
+  try {
+    const pending = f.driver.request('paste');
+    await nextTurn();
+    f.reply({ id: 1, ok: false, code: 'restore-failed',
+      clipboardCauses: causes.map((cause) => ({ ...cause, message: 'PRIVATE_TOKEN_METADATA' })),
+      clipboardCleanupCauses: cleanup, clipboardCausesTruncated: false, clipboardCleanupCausesTruncated: true });
+    await assert.rejects(pending, (error) => {
+      assert.equal(JSON.stringify(error.clipboardCauses), JSON.stringify(causes));
+      assert.equal(JSON.stringify(error.clipboardCleanupCauses), JSON.stringify(cleanup));
+      assert.equal(error.clipboardCausesTruncated, false);
+      assert.equal(error.clipboardCleanupCausesTruncated, true);
+      assert.doesNotMatch(JSON.stringify(error.clipboardCauses), /PRIVATE|message/);
+      return true;
+    });
+  } finally { f.driver.close(); }
+});
+
+test('invalid cause schemas are protocol failures, not silently truncated success-shaped metadata', async () => {
+  for (const clipboardCauses of [
+    [{ code: 'PRIVATE_VALUE', stage: 'publication-state', format: 13, errorNumber: 0 }],
+    Array.from({ length: 3 }, () => ({ code: 'native-error', stage: 'unspecified', format: 0, errorNumber: 0 })),
+  ]) {
+    const f = fixture();
+    const pending = f.driver.request('paste');
+    await nextTurn();
+    f.reply({ id: 1, ok: false, code: 'restore-failed', clipboardCauses });
+    await assert.rejects(pending, /invalid response/);
+    assert.equal(f.child.killed, true);
   }
 });
 

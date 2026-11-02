@@ -3,6 +3,7 @@ const readline = require('node:readline');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { NativeTrace, nativeHelperEnvironment } = require('./native-diagnostics.cjs');
+const { clipboardCauses } = require('./clipboard-faults.cjs');
 let generation = 0;
 
 class NativeDelivery {
@@ -31,6 +32,11 @@ class NativeDelivery {
         const reply = JSON.parse(line);
         fault = !this.pending ? 'late-reply' : reply.id !== this.pending.id ? 'wrong-id' : 'invalid-shape';
         if (!this.pending || reply.id !== this.pending.id || typeof reply.ok !== 'boolean') throw new Error();
+        const causes = clipboardCauses(reply.clipboardCauses);
+        const cleanupCauses = clipboardCauses(reply.clipboardCleanupCauses);
+        if (!causes || !cleanupCauses ||
+            ['clipboardCausesTruncated', 'clipboardCleanupCausesTruncated'].some((key) =>
+              reply[key] !== undefined && typeof reply[key] !== 'boolean')) throw new Error();
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
@@ -43,7 +49,10 @@ class NativeDelivery {
           this.trace.emit('reply', { action: pending.action, requestId: pending.id,
             spanMs: Math.round(performance.now() - pending.started), ...(reply.ok ? {} : { fault: 'native-error' }),
             ...(Number.isInteger(reply.errorNumber) ? { errorNumber: reply.errorNumber } : {}),
-            ...(clipboardStage ? { clipboardStage, clipboardFormat } : {}) });
+            ...(clipboardStage ? { clipboardStage, clipboardFormat } : {}),
+            clipboardCauses: causes, clipboardCleanupCauses: cleanupCauses,
+            clipboardCausesTruncated: reply.clipboardCausesTruncated === true,
+            clipboardCleanupCausesTruncated: reply.clipboardCleanupCausesTruncated === true });
         }
         if (reply.ok) pending.resolve(reply.value);
         else pending.reject(Object.assign(new Error({
@@ -69,6 +78,9 @@ class NativeDelivery {
           errorNumber: Number.isInteger(reply.errorNumber) && reply.errorNumber >= 0 && reply.errorNumber <= 2147483647
             ? reply.errorNumber : undefined,
           clipboardStage, clipboardFormat,
+          clipboardCauses: causes, clipboardCleanupCauses: cleanupCauses,
+          clipboardCausesTruncated: reply.clipboardCausesTruncated === true,
+          clipboardCleanupCausesTruncated: reply.clipboardCleanupCausesTruncated === true,
           check: ['foreground-window', 'foreground-process', 'accessible-focus', 'native-focus'].includes(reply.check)
             ? reply.check : undefined }));
       } catch {

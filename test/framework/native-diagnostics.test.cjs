@@ -40,6 +40,12 @@ test('native diagnostics retain correlation and safe categories, never raw stder
     clipboardFormat: 49465, formatName: 'PRIVATE_NATIVE_FORMAT' });
   diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardStage: 'publication-state',
     clipboardFormat: 49466, formatName: 'PRIVATE_PUBLICATION_FORMAT' });
+  diagnostics.record('native', { component: 'delivery', state: 'reply', clipboardCauses: [
+    { code: 'clipboard-changed', stage: 'publication-state', format: 13, errorNumber: 0, message: 'PRIVATE_CAUSE' },
+    { code: 'clipboard-unavailable', stage: 'publication-close', format: 0, errorNumber: 0 },
+  ], clipboardCausesTruncated: false, clipboardCleanupCauses: [
+    { code: 'restore-failed', stage: 'restore-sequence', format: 0, errorNumber: 0 },
+  ], clipboardCleanupCausesTruncated: true });
   child.stderr.write(`VI_DIAG ${JSON.stringify({ run: diagnostics.runId, pid: 123, generation: 2,
     state: 'suspended', monoMs: 15, time: '2026-01-01T00:00:00.000Z', birthFileTime: '134380000000000000',
     inputDesktop: 'unavailable', win32Error: 5, endpoint: 'PRIVATE_ENDPOINT' })}\n`);
@@ -51,6 +57,11 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   assert.equal(rows.filter((row) => row.fault === 'compilation').length, 1);
   assert.ok(rows.some((row) => row.clipboardStage === 'restore-write' && row.clipboardFormat === 49465));
   assert.ok(rows.some((row) => row.clipboardStage === 'publication-state' && row.clipboardFormat === 49466));
+  const aggregate = rows.find((row) => row.clipboardCauses?.length === 2);
+  assert.equal(aggregate.clipboardCauses[0].stage, 'publication-state');
+  assert.equal(aggregate.clipboardCauses[1].stage, 'publication-close');
+  assert.equal(aggregate.clipboardCleanupCauses[0].stage, 'restore-sequence');
+  assert.equal(aggregate.clipboardCleanupCausesTruncated, true);
   assert.ok(rows.some((row) => row.startupStage === 'script-entry' && row.powerShellMajor === 5 &&
     row.powerShellEdition === 'Desktop' && row.pointerBytes === 8));
   assert.ok(rows.some((row) => row.generation === 2 && row.helperPid === 123 && row.nativeMonoMs === 15 && row.win32Error === 5));
@@ -158,7 +169,7 @@ test('attested Windows helper generation resolves every production source from t
     path, assert, 'synthetic-unavailable', 'vi-ci-1-1-' + 'a'.repeat(32),
     directory, path.join(directory, 'owned-job'), { platform: 'win32' });
   const delivery = files.get(names.deliveryFile);
-  for (const name of ['windows-input.ps1', 'windows-diagnostics.ps1', 'windows-clipboard-snapshot.cs']) {
+  for (const name of ['windows-input.ps1', 'windows-diagnostics.ps1', 'windows-clipboard-snapshot.cs', 'windows-clipboard-errors.ps1']) {
     assert.ok(delivery.includes(path.resolve('native', name)));
     assert.ok(!delivery.includes(`Join-Path $PSScriptRoot '${name}'`));
     assert.ok(!delivery.includes(`Combine($PSScriptRoot, '${name}')`));

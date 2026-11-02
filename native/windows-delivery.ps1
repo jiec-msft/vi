@@ -46,8 +46,16 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
         public uint Format;
         public byte[] Bytes;
     }
+    sealed class PublicationProbe {
+        public uint RequestedFormat, CanonicalFormat;
+        public bool InsideCall, Declined, Uncorrelated;
+    }
     readonly List<PublicationItem> publication = new List<PublicationItem>(4);
     static Action<IntPtr> publicationClosed = null;
+    static Action<IntPtr> sealBeforeCommit = null;
+    static Func<bool> sealClose = CloseClipboard;
+    static Func<uint, IntPtr> publicationRead = GetClipboardData;
+    PublicationProbe activeProbe;
     bool publishing, publicationSealed;
     uint publicationBlockedRenderRequests;
     ClipboardSnapshot saved;
@@ -124,6 +132,18 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     }
     protected override void WndProc(ref Message message) {
         try {
+            if (publishing && (message.Msg == 0x305 || message.Msg == 0x306)) {
+                publicationBlockedRenderRequests++;
+                var probe = activeProbe;
+                if (probe != null) {
+                    bool correlated = probe.InsideCall && message.HWnd == Handle && message.Msg == 0x305 &&
+                        probe.CanonicalFormat == 13 && message.WParam.ToInt64() == probe.CanonicalFormat && message.LParam == IntPtr.Zero &&
+                        (probe.RequestedFormat == 13 || probe.RequestedFormat == 1 || probe.RequestedFormat == 7);
+                    if (!correlated || probe.Declined) probe.Uncorrelated = true;
+                    else probe.Declined = true;
+                }
+                return;
+            }
             if (message.Msg == 0x305 && message.WParam.ToInt32() == 13) { Render(); return; }
             if (message.Msg == 0x306 && GetClipboardOwner() == Handle && OpenClipboard(Handle)) {
                 try { Render(); } finally { CloseClipboard(); }
@@ -198,12 +218,20 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state");
         // Inspect only nullness, never text bytes. Our renderer stays disabled during sealing.
         foreach (uint format in new uint[] { 13, 1, 7 }) {
-            uint requests = publicationBlockedRenderRequests;
-            SetLastError(0);
-            IntPtr memory = GetClipboardData(format);
-            int error = Marshal.GetLastWin32Error();
-            bool declined = publicationBlockedRenderRequests != requests;
-            if (memory != IntPtr.Zero || error != 0 && !declined)
+            var probe = new PublicationProbe { RequestedFormat = format, CanonicalFormat = 13 };
+            IntPtr memory;
+            int error;
+            activeProbe = probe;
+            try {
+                probe.InsideCall = true;
+                SetLastError(0);
+                memory = publicationRead(format);
+                error = Marshal.GetLastWin32Error();
+            } finally {
+                probe.InsideCall = false;
+                activeProbe = null;
+            }
+            if (memory != IntPtr.Zero || !probe.Declined || probe.Uncorrelated)
                 throw new ClipboardPreparationException("clipboard-changed", error, "publication-state", format);
         }
     }
@@ -218,37 +246,44 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
         }
         if (!opened) throw new ClipboardPreparationException("clipboard-busy", error, "publication-open");
         Exception validationFailure = null;
+        uint candidate = 0;
         try {
             if (GetClipboardOwner() != Handle) {
                 began = false;
                 throw new ClipboardPreparationException("clipboard-changed", 0, "publication-owner");
             }
-            uint current = GetClipboardSequenceNumber();
-            if (current != publicationAfterCloseSequence)
-                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence", 0, publicationAfterCloseSequence, current);
+            candidate = GetClipboardSequenceNumber();
+            if (candidate != publicationAfterCloseSequence)
+                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence", 0, publicationAfterCloseSequence, candidate);
             VerifyPublication();
-            if (GetClipboardOwner() != Handle || GetClipboardSequenceNumber() != current)
+            if (GetClipboardOwner() != Handle || GetClipboardSequenceNumber() != candidate)
                 throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence");
-            sequence = current;
-            publishing = false;
         } catch (Exception failure) {
             validationFailure = failure;
             throw;
         } finally {
-            if (!CloseClipboard()) {
-                var closeFailure = new ClipboardPreparationException("clipboard-unavailable", Marshal.GetLastWin32Error(), "publication-close");
-                publishing = true;
+            Exception closeFailure = null;
+            try {
+                if (!sealClose())
+                    closeFailure = new ClipboardPreparationException("clipboard-unavailable", Marshal.GetLastWin32Error(), "publication-close");
+            } catch {
+                closeFailure = new ClipboardPreparationException("clipboard-unavailable", 0, "publication-close");
+            }
+            if (closeFailure != null) {
                 if (validationFailure != null) throw new AggregateException("Publication validation and close both failed.", validationFailure, closeFailure);
                 throw closeFailure;
             }
         }
+        if (sealBeforeCommit != null) sealBeforeCommit(Handle);
         if (GetClipboardOwner() != Handle) {
             began = false;
             throw new ClipboardPreparationException("clipboard-changed", 0, "publication-owner");
         }
-        if (GetClipboardSequenceNumber() != sequence)
+        if (GetClipboardSequenceNumber() != candidate)
             throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence");
+        sequence = candidate;
         publicationSealed = true;
+        publishing = false;
     }
     public void Begin(string value) {
         if (disposed || began || publication.Count != 0) throw new InvalidOperationException("Clipboard transactions cannot be reused.");
@@ -355,6 +390,15 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($clipboardSource + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-clipboard-snapshot.cs')))
 Write-ViStartup 'clipboard-ready'
 [ViNativeDiagnostics]::Record('compile', 'end', 0)
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-clipboard-errors.ps1'))
+function Set-ClipboardFailureDetail([Exception]$Exception,[switch]$Cleanup){
+    $projection=ConvertTo-ClipboardFailure $Exception
+    if($Cleanup){$script:clipboardCleanupFailure=$projection}else{$script:clipboardFailure=$projection}
+    $first=$projection.causes[0]
+    $script:clipboardErrorNumber=$first.errorNumber
+    $script:clipboardErrorStage=$first.stage
+    $script:clipboardErrorFormat=$first.format
+}
 function Capture-Target {
     $target = [VoiceInput]::Capture()
     [uint32] $owner = 0
@@ -391,6 +435,8 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
     $script:clipboardErrorStage = 'unspecified'
     $script:clipboardErrorFormat = 0
     $script:clipboardErrorNumber = 0
+    $script:clipboardFailure = $null
+    $script:clipboardCleanupFailure = $null
     $script:pasteRequested = $false
     try {
         if ($line.Length -gt 1600000) { throw 'invalid-request' }
@@ -414,15 +460,8 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
                 $transaction.TargetOwner = [uint32]$request.target.pid
                 try {
                     try { $transaction.Begin([string]$request.text) } catch {
-                        $fault=$_.Exception
-                        while($fault.InnerException){$fault=$fault.InnerException}
-                        if($fault -is [ViClipboard.ClipboardPreparationException]){
-                            $script:clipboardErrorNumber=$fault.NativeCode
-                            $script:clipboardErrorStage=$fault.Stage
-                            $script:clipboardErrorFormat=$fault.Format
-                            throw $fault.Code
-                        }
-                        throw 'native-error'
+                        Set-ClipboardFailureDetail $_.Exception
+                        throw $script:clipboardFailure.causes[0].code
                     }
                     $current = Assert-Target $request.target
                     if ([VoiceInput]::ModifiersHeld() -or [VoiceInput]::MouseHeld()) { throw 'modifiers-held' }
@@ -438,15 +477,12 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
                     @{ requested = $true; clipboardRead = $true; readerMatched = $transaction.ReaderMatched;
                        readerUnknown = $transaction.ReaderUnknown; renderedBeforePaste = $transaction.RenderedBeforePaste;
                        clipboardHoldMs = $transaction.HoldMilliseconds }
+                } catch {
+                    if(-not $script:clipboardFailure){Set-ClipboardFailureDetail $_.Exception}
+                    throw
                 } finally {
                     try { $transaction.Dispose() } catch {
-                        $fault=$_.Exception
-                        while($fault.InnerException){$fault=$fault.InnerException}
-                        if($fault -is [ViClipboard.ClipboardPreparationException]){
-                            $script:clipboardErrorNumber=$fault.NativeCode
-                            $script:clipboardErrorStage=$fault.Stage
-                            $script:clipboardErrorFormat=$fault.Format
-                        }
+                        Set-ClipboardFailureDetail $_.Exception -Cleanup
                         throw 'restore-failed'
                     }
                 }
@@ -457,21 +493,24 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         @{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5
     } catch {
         $code = $_.Exception.Message
-        $fault=$_.Exception
-        while($fault.InnerException){$fault=$fault.InnerException}
-        if($fault -is [ViClipboard.ClipboardPreparationException]){
-            $code=$fault.Code
-            $script:clipboardErrorNumber=$fault.NativeCode
-            $script:clipboardErrorStage=$fault.Stage
-            $script:clipboardErrorFormat=$fault.Format
+        if(-not $script:clipboardFailure -and -not $script:clipboardCleanupFailure){
+            Set-ClipboardFailureDetail $_.Exception
         }
+        if($script:clipboardCleanupFailure){$code='restore-failed'}
+        elseif($script:clipboardFailure){$code=$script:clipboardFailure.causes[0].code}
         [ViNativeDiagnostics]::Record([string]$request.action, 'failure', $script:clipboardErrorNumber)
         if ($code -notin @('window-order','target-changed','secure-field','no-input','clipboard-changed','clipboard-unavailable',
             'clipboard-busy','clipboard-format','clipboard-snapshot-failed',
             'modifiers-held','composition-active','paste-unconfirmed','restore-failed')) { $code = 'native-error' }
+        $operationCauses=@()
+        $cleanupCauses=@()
+        if($script:clipboardFailure){$operationCauses=@($script:clipboardFailure.causes)}
+        if($script:clipboardCleanupFailure){$cleanupCauses=@($script:clipboardCleanupFailure.causes)}
         @{ id = $request.id; ok = $false; code = $code; errorNumber=$script:clipboardErrorNumber;
             clipboardStage=$script:clipboardErrorStage; clipboardFormat=$script:clipboardErrorFormat;
-            pasteRequested=$script:pasteRequested; check = $script:failureCheck } | ConvertTo-Json -Compress
+            clipboardCauses=$operationCauses; clipboardCausesTruncated=($script:clipboardFailure.truncated -eq $true);
+            clipboardCleanupCauses=$cleanupCauses; clipboardCleanupCausesTruncated=($script:clipboardCleanupFailure.truncated -eq $true);
+            pasteRequested=$script:pasteRequested; check = $script:failureCheck } | ConvertTo-Json -Compress -Depth 6
     }
 }
 [ViNativeDiagnostics]::Record('native-exit', 'exit', 0)

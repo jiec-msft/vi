@@ -83,7 +83,7 @@ $command=Get-Command Add-Type -ErrorAction Stop
     // This is the first native fixture in its fresh runner, not a warmed replacement.
     report.nativeSources = {};
     for (const name of ['windows-delivery.ps1', 'windows-bootstrap.ps1', 'windows-diagnostics.ps1',
-      'windows-input.ps1', 'windows-clipboard-snapshot.cs']) {
+      'windows-input.ps1', 'windows-clipboard-snapshot.cs', 'windows-clipboard-errors.ps1']) {
       report.nativeSources[name] = createHash('sha256').update(fs.readFileSync(path.join('native', name))).digest('hex');
     }
     const driver = new NativeDelivery('win32', path.resolve('native'));

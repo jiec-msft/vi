@@ -12,6 +12,7 @@ $match=[regex]::Match($file,"(?s)\`$clipboardSource=@'\r?\n(.*?)\r?\n'@")
 if(-not $match.Success){throw 'Actual clipboard transaction source was not found.'}
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition (
     $match.Groups[1].Value+[IO.File]::ReadAllText((Join-Path $Source 'windows-clipboard-snapshot.cs')))
+. ([IO.Path]::Combine($Source, 'windows-clipboard-errors.ps1'))
 [Console]::Error.WriteLine('VI_CLIP_STAGE transaction-compiled')
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
@@ -26,6 +27,47 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  public static OwnedClipboardFixture PublicationFixture;
  public static uint PublicationFormat;
  public static int PublicationMutation;
+ public static Func<uint,IntPtr> RealPublicationRead;
+ public static Func<bool> RealSealClose;
+ public static int ProbeMode, FinalSealMode, CopyFailureStage, CopyFreeCount;
+ public static IntPtr ProbeWindow, FailedCopy;
+ public static Func<IntPtr,IntPtr> RealCopyRelease;
+ public static bool CopyUnlocked, CopyFreed, CopyIdentity, ManagedFailureClosed;
+ public static void RenderFormat(IntPtr window,uint format){SendMessage(window,0x305,new IntPtr((long)format),IntPtr.Zero);}
+ public static void StaleProbe(IntPtr window){RenderFormat(window,13);}
+ public static IntPtr ControlledProbe(uint format){
+  if(ProbeMode==4&&format==13)return RealPublicationRead(format);
+  if(ProbeMode==2)RenderFormat(ProbeWindow,7);
+  if(ProbeMode==3)RenderAll(ProbeWindow);
+  if(ProbeMode==4)RenderFormat(ProbeWindow,1);
+  if(ProbeMode==5){RenderFormat(ProbeWindow,13);SetLastError(0);return new IntPtr(1);}
+  SetLastError(0);return IntPtr.Zero;
+ }
+ public static void SealRenderBoundary(IntPtr window){RenderFormat(window,13);RenderAll(window);}
+ public static bool RenderDuringSealClose(){
+  SealRenderBoundary(ProbeWindow);
+  bool result=RealSealClose();
+  if(FinalSealMode==3)PublicationFixture.Put(new uint[]{13},new byte[][]{System.Text.Encoding.Unicode.GetBytes("New copy during readonly close\0")});
+  SealRenderBoundary(ProbeWindow);return result;
+ }
+ public static void BeforeSealCommit(IntPtr window){
+  SealRenderBoundary(window);
+  if(FinalSealMode==1)PublicationFixture.Put(new uint[]{13},new byte[][]{System.Text.Encoding.Unicode.GetBytes("New copy before seal commit\0")});
+  if(FinalSealMode==2)PublicationFixture.AddWhileOwned(window,PublicationFormat,new byte[]{7,6,5});
+ }
+ public static bool ControlledSealCloseFailure(){
+  ManagedFailureClosed=RealSealClose();
+  if(!ManagedFailureClosed)throw new InvalidOperationException("Actual owned seal close failed.");
+  throw new InvalidOperationException("Controlled managed close-boundary failure.");
+ }
+ public static void CopyCheckpoint(IntPtr copy,int stage){
+  if(stage!=CopyFailureStage)return;
+  FailedCopy=copy;throw new InvalidOperationException("Controlled copy failure.");
+ }
+ public static IntPtr ObserveCopyRelease(IntPtr copy){
+  CopyFreeCount++;CopyIdentity=copy==FailedCopy;CopyUnlocked=(GlobalFlags(copy)&255)==0;
+  IntPtr result=RealCopyRelease(copy);CopyFreed=result==IntPtr.Zero;return result;
+ }
  public static void MutatePublication(IntPtr owner){
   if(PublicationMutation==3)PublicationFixture.Put(new uint[]{13},new byte[][]{System.Text.Encoding.Unicode.GetBytes("New copy during seal\0")});
   else if(PublicationMutation==1)PublicationFixture.AddWhileOwned(owner,13,System.Text.Encoding.Unicode.GetBytes("Unknown text during seal\0"));
@@ -152,6 +194,14 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
    memory=IntPtr.Zero;
   }finally{if(memory!=IntPtr.Zero)GlobalFree(memory);CloseClipboard();}
  }
+ public int LockCount(uint format){
+  if(!OpenClipboard(Handle))throw new Exception("Owned lock-count read failed.");
+  try{
+   IntPtr memory=GetClipboardData(format);
+   if(memory==IntPtr.Zero)throw new Exception("Owned lock-count format missing.");
+   return (int)(GlobalFlags(memory)&255);
+  }finally{CloseClipboard();}
+ }
  public void Hold(int milliseconds){
   var started=new ManualResetEventSlim(false);Exception failure=null;
   var worker=new Thread(()=>{
@@ -173,26 +223,31 @@ function Check([bool]$Value,[string]$Message){
     }
 }
 function Fault-Code($Exception){
-    while($Exception.InnerException){$Exception=$Exception.InnerException}
-    if($Exception -is [ViClipboard.ClipboardPreparationException]){return $Exception.Code}
+    $description=Get-ClipboardExceptionLeaves $Exception
+    if(-not $description.truncated -and $description.leaves.Count -eq 1 -and $description.leaves[0] -is [ViClipboard.ClipboardPreparationException]){
+        return $description.leaves[0].Code
+    }
     throw $Exception
 }
 function Report-TransactionFault([string]$Phase,$Exception){
-    while($Exception.InnerException){$Exception=$Exception.InnerException}
-    if($Exception -is [ViClipboard.ClipboardPreparationException]){
-        [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=$($Exception.Code) stage=$($Exception.Stage) format=$($Exception.Format) nativeError=$($Exception.NativeCode)")
-        if($Exception.Stage -eq 'restore-sequence'){
-            [Console]::Error.WriteLine("VI_CLIP_SEQUENCE expected=$($Exception.ExpectedSequence) current=$($Exception.CurrentSequence) ownerMatch=True")
+    $description=Get-ClipboardExceptionLeaves $Exception
+    foreach($Exception in $description.leaves){
+        if($Exception -is [ViClipboard.ClipboardPreparationException]){
+            [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=$($Exception.Code) stage=$($Exception.Stage) format=$($Exception.Format) nativeError=$($Exception.NativeCode)")
+            if($Exception.Stage -eq 'restore-sequence'){
+                [Console]::Error.WriteLine("VI_CLIP_SEQUENCE expected=$($Exception.ExpectedSequence) current=$($Exception.CurrentSequence) ownerMatch=True")
+            }
+        }elseif($Exception.Data['OwnedFixtureAssertion'] -eq $true){
+            [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=fixture-assertion")
+        }else{
+            $class=$Exception.GetType().Name
+            if($class -notin @('ExternalException','InvalidOperationException','ArgumentException','OutOfMemoryException','IOException','SystemException','Win32Exception','RuntimeException','Exception')){$class='Other'}
+            $nativeError=0
+            if($Exception -is [ComponentModel.Win32Exception]){$nativeError=$Exception.NativeErrorCode}
+            [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=managed-operation errorClass=$class nativeError=$nativeError hresult=$($Exception.HResult)")
         }
-    }elseif($Exception.Data['OwnedFixtureAssertion'] -eq $true){
-        [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=fixture-assertion")
-    }else{
-        $class=$Exception.GetType().Name
-        if($class -notin @('ExternalException','InvalidOperationException','ArgumentException','OutOfMemoryException','IOException','SystemException','Win32Exception','RuntimeException','Exception')){$class='Other'}
-        $nativeError=0
-        if($Exception -is [ComponentModel.Win32Exception]){$nativeError=$Exception.NativeErrorCode}
-        [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=managed-operation errorClass=$class nativeError=$nativeError hresult=$($Exception.HResult)")
     }
+    if($description.truncated){[Console]::Error.WriteLine("VI_CLIP_CAUSES_TRUNCATED $Phase")}
 }
 function Report-TransactionState([ValidateSet('begin-return','text-read-return','restore-return','operation-failed','cleanup-failed')][string]$Phase,$Transaction){
     $flags=[Reflection.BindingFlags]'Instance,NonPublic'
@@ -602,6 +657,149 @@ try{
         finally{Close-Transaction $transaction $operationFailure}
     }
     $checks.Add('native-unicode-ansi-oem-readers-preserve-canonical-result-and-backup')
+    $static=[Reflection.BindingFlags]'Static,NonPublic'
+    $probeReader=[TranscriptClipboard].GetField('publicationRead',$static)
+    $realProbe=$probeReader.GetValue($null)
+    [OwnedClipboardFixture]::RealPublicationRead=$realProbe
+    foreach($mode in @(0,1,2,3,4,5)){
+        [OwnedClipboardFixture]::CaseId=23+$mode
+        $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+        $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
+        [OwnedClipboardFixture]::ProbeMode=$mode
+        [OwnedClipboardFixture]::ProbeWindow=$transaction.Handle
+        try{
+            $probeReader.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr]],[OwnedClipboardFixture].GetMethod('ControlledProbe')))
+            if($mode -eq 1){$publicationHook.SetValue($null,[Delegate]::CreateDelegate([Action[IntPtr]],[OwnedClipboardFixture].GetMethod('StaleProbe')))}
+            $failed=$false
+            $failureProjection=$null
+            try{$transaction.Begin('Must require a correlated probe')}catch{
+                $failed=(Fault-Code $_.Exception) -eq 'clipboard-changed'
+                $failureProjection=ConvertTo-ClipboardFailure $_.Exception
+            }
+            Check $failed 'A null/unrelated/stale/non-null probe was accepted.'
+            if($mode -eq 4){Check ($failureProjection.causes[0].format -eq 1) 'Alias negative did not exercise the requested/canonical mapping after native Unicode proof.'}
+            Check (-not $transaction.PublicationSealed) 'An unproven probe marked publication sealed.'
+            $probeReader.SetValue($null,$realProbe)
+            $publicationHook.SetValue($null,$null)
+            $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+            [TranscriptClipboard]::RecoverPending()
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $probeReader.SetValue($null,$realProbe);$publicationHook.SetValue($null,$null) }}
+    }
+    $checks.Add('per-call-probe-rejects-null-zero-stale-unrelated-renderall-and-nonnull')
+    $closingHook=[TranscriptClipboard].GetField('sealClose',$static)
+    $originalSealClose=$closingHook.GetValue($null)
+    [OwnedClipboardFixture]::RealSealClose=$originalSealClose
+    $commitHook=[TranscriptClipboard].GetField('sealBeforeCommit',$static)
+    foreach($mode in @(0,1,2,3)){
+        [OwnedClipboardFixture]::CaseId=29+$mode
+        $fixture.Put([uint32[]]@(13,$format,$rich,16),[byte[][]]@($text,[byte[]]@(0),$html,[BitConverter]::GetBytes([uint32]1031)))
+        $expected=Read-Mixed $fixture $format $rich
+        [OwnedClipboardFixture]::FinalSealMode=$mode
+        $transaction=[TranscriptClipboard]::new()
+        [OwnedClipboardFixture]::ProbeWindow=$transaction.Handle
+        $operationFailure=$null
+        try{
+            $closingHook.SetValue($null,[Delegate]::CreateDelegate([Func[bool]],[OwnedClipboardFixture].GetMethod('RenderDuringSealClose')))
+            $commitHook.SetValue($null,[Delegate]::CreateDelegate([Action[IntPtr]],[OwnedClipboardFixture].GetMethod('BeforeSealCommit')))
+            if($mode -eq 0){
+                $transaction.Begin('Keep render disabled until final seal')
+                Check $transaction.PublicationSealed 'A valid readonly close could not seal.'
+                Check (-not $transaction.RenderAttempted -and -not $transaction.RenderWriteStarted -and -not $transaction.RenderWriteCompleted) 'Seal-close reentrancy materialized text.'
+                Check ($transaction.PublicationBlockedRenderRequests -ge 6) 'Both real render messages were not exercised before/after readonly Close and before final seal.'
+                $transaction.Restore()
+                $restored=Read-Mixed $fixture $format $rich
+                Check ($restored.text -eq $expected.text -and $restored.metadata -eq $expected.metadata -and $restored.rich -eq $expected.rich) 'Readonly close render attempts changed original bytes.'
+            }else{
+                $failed=$false
+                try{$transaction.Begin('Must not adopt final-seal changes')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-changed'}
+                Check $failed 'Final-seal changes were adopted.'
+                Check (-not $transaction.PublicationSealed -and -not $transaction.RenderWriteStarted) 'An incomplete final seal rendered text.'
+                if($mode -eq 1){Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy before seal commit') 'Final seal overwrote a newer owner.'}
+                elseif($mode -eq 3){Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy during readonly close') 'Readonly close overwrote a newer owner.'}
+                else{
+                    try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected final-seal recovery failure.'}
+                    $pending=[TranscriptClipboard].GetField('deferred',$static).GetValue($null)
+                    Check ([Object]::ReferenceEquals($pending,$transaction)) 'Final-seal mutation discarded its pending master.'
+                    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+                    [TranscriptClipboard]::RecoverPending()
+                    Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned Unicode sample') 'Final-seal recovery overwrote a newer owner.'
+                }
+            }
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $closingHook.SetValue($null,$originalSealClose);$commitHook.SetValue($null,$null) }}
+    }
+    $checks.Add('readonly-close-and-final-seal-reentrancy-cannot-render-or-adopt-changes')
+    $copyHook=[ViClipboard.ClipboardSnapshot].GetField('copyCheckpoint',$static)
+    $copyRelease=[ViClipboard.ClipboardSnapshot].GetField('releaseCopy',$static)
+    $realRelease=$copyRelease.GetValue($null)
+    [OwnedClipboardFixture]::RealCopyRelease=$realRelease
+    foreach($stage in @(0,1)){
+        [OwnedClipboardFixture]::CaseId=33+$stage
+        $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(0),$html))
+        $expected=Read-Mixed $fixture $format $rich
+        $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+        $owner=[OwnedClipboardFixture]::GetClipboardOwner()
+        [OwnedClipboardFixture]::CopyFailureStage=$stage
+        [OwnedClipboardFixture]::CopyFreeCount=0
+        [OwnedClipboardFixture]::CopyFreed=$false
+        $transaction=[TranscriptClipboard]::new()
+        $operationFailure=$null
+        try{
+            $copyHook.SetValue($null,[Delegate]::CreateDelegate([Action[IntPtr,int]],[OwnedClipboardFixture].GetMethod('CopyCheckpoint')))
+            $copyRelease.SetValue($null,[Delegate]::CreateDelegate([Func[IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('ObserveCopyRelease')))
+            $failed=$false
+            try{$transaction.Begin('Must fail without leaking copy allocation')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-snapshot-failed'}
+            Check $failed 'Controlled allocation/lock-boundary failure was not explicit.'
+            Check ([OwnedClipboardFixture]::CopyFreeCount -eq 1 -and [OwnedClipboardFixture]::CopyFreed -and [OwnedClipboardFixture]::CopyIdentity -and [OwnedClipboardFixture]::CopyUnlocked) 'Failed copy was not unlocked and actually freed exactly once.'
+            Check ($fixture.LockCount(13) -eq 0) 'Failed copy left its original source handle locked.'
+            Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner) 'Failed copy changed original clipboard identity.'
+            $restored=Read-Mixed $fixture $format $rich
+            Check ($restored.text -eq $expected.text -and $restored.metadata -eq $expected.metadata -and $restored.rich -eq $expected.rich) 'Failed copy changed original clipboard bytes.'
+        }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+        finally{Close-Transaction $transaction $operationFailure { $copyHook.SetValue($null,$null);$copyRelease.SetValue($null,$realRelease) }}
+    }
+    $checks.Add('post-allocation-and-post-lock-copy-faults-release-native-allocation-once')
+    [OwnedClipboardFixture]::CaseId=35
+    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+    $closeSetter=[TranscriptClipboard].GetField('sealClose',$static)
+    $realClose=$closeSetter.GetValue($null)
+    [OwnedClipboardFixture]::RealSealClose=$realClose
+    [OwnedClipboardFixture]::ProbeMode=0
+    [OwnedClipboardFixture]::ManagedFailureClosed=$false
+    $transaction=[TranscriptClipboard]::new()
+    $operationFailure=$null
+    try{
+        $probeReader.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr]],[OwnedClipboardFixture].GetMethod('ControlledProbe')))
+        $closeSetter.SetValue($null,[Delegate]::CreateDelegate([Func[bool]],[OwnedClipboardFixture].GetMethod('ControlledSealCloseFailure')))
+        $caught=$null
+        try{$transaction.Begin('Must retain both validation and close faults')}catch{$caught=$_.Exception}
+        Check ($null -ne $caught) 'Combined validation/close seam unexpectedly succeeded.'
+        Check ([OwnedClipboardFixture]::ManagedFailureClosed) 'Combined-failure control did not actually close its native lock.'
+        $projection=ConvertTo-ClipboardFailure $caught
+        $wire=@{clipboardCauses=@($projection.causes);clipboardCausesTruncated=$projection.truncated}|ConvertTo-Json -Compress -Depth 6|ConvertFrom-Json
+        Check ($wire.clipboardCauses.Count -eq 2 -and -not $wire.clipboardCausesTruncated) 'Combined failure did not preserve exactly two wire causes.'
+        Check ($wire.clipboardCauses[0].stage -eq 'publication-state' -and $wire.clipboardCauses[0].format -eq 13 -and $wire.clipboardCauses[1].stage -eq 'publication-close') 'Combined failure lost validation or close identity.'
+        Check ($wire.clipboardCauses[0].errorNumber -eq 0 -and $wire.clipboardCauses[1].errorNumber -eq 0) 'Managed control failures fabricated a Win32 error.'
+        $originalError=[Console]::Error
+        $capturedError=[IO.StringWriter]::new()
+        try{[Console]::SetError($capturedError);Report-TransactionFault 'operation' $caught}
+        finally{[Console]::SetError($originalError)}
+        $logged=@($capturedError.ToString() -split '\r?\n'|Where-Object {$_ -like 'VI_CLIP_FAILURE *'})
+        $capturedError.Dispose()
+        Check ($logged.Count -eq 2 -and $logged[0] -like '*stage=publication-state*' -and $logged[1] -like '*stage=publication-close*') 'Fixture logging lost one aggregate member.'
+        $extra=[AggregateException]::new('Synthetic bounded aggregate',[Exception[]]@($caught,[InvalidOperationException]::new('PRIVATE_SYNTHETIC_CAUSE')))
+        $bounded=ConvertTo-ClipboardFailure $extra
+        Check ($bounded.causes.Count -eq 2 -and $bounded.truncated) 'Excess aggregate members were silently discarded.'
+        Check (($bounded|ConvertTo-Json -Depth 6) -notmatch 'PRIVATE_SYNTHETIC_CAUSE') 'Bounded projection exposed raw exception content.'
+        $probeReader.SetValue($null,$realProbe)
+        $closeSetter.SetValue($null,$realClose)
+        $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+        [TranscriptClipboard]::RecoverPending()
+    }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
+    finally{Close-Transaction $transaction $operationFailure { $probeReader.SetValue($null,$realProbe);$closeSetter.SetValue($null,$realClose) }}
+    $checks.Add('combined-native-validation-and-close-failure-preserves-two-scalar-causes')
     $report=@{status='passed';checks=@($checks);zeroAllocation=$zero;zeroAllocationOutcome=$zeroOutcome;clipboardData='CI-owned synthetic only';inputEventsSent=0}
 }catch{$fixtureFailure=$_.Exception;throw}
 finally{

@@ -66,6 +66,8 @@ public sealed class ClipboardSnapshot : IDisposable {
     }
     readonly List<Item> items = new List<Item>();
     static Func<uint, IntPtr, IntPtr> write = SetClipboardData;
+    static Action<IntPtr, int> copyCheckpoint = null;
+    static Func<IntPtr, IntPtr> releaseCopy = GlobalFree;
     static ClipboardPreparationException Fault(string code) {
         return new ClipboardPreparationException(code, Marshal.GetLastWin32Error());
     }
@@ -73,17 +75,25 @@ public sealed class ClipboardSnapshot : IDisposable {
         if (length == 0) throw new ClipboardPreparationException("clipboard-format");
         IntPtr copy = GlobalAlloc(0x42, new UIntPtr((uint)length));
         if (copy == IntPtr.Zero) throw Fault("clipboard-snapshot-failed");
-        IntPtr input = GlobalLock(source);
-        if (input == IntPtr.Zero) { var error = Fault("clipboard-snapshot-failed"); GlobalFree(copy); throw error; }
+        bool transferred = false;
         try {
-            IntPtr output = GlobalLock(copy);
-            if (output == IntPtr.Zero) { var error = Fault("clipboard-snapshot-failed"); GlobalFree(copy); throw error; }
+            if (copyCheckpoint != null) copyCheckpoint(copy, 0);
+            IntPtr input = GlobalLock(source);
+            if (input == IntPtr.Zero) throw Fault("clipboard-snapshot-failed");
             try {
-                var bytes = new byte[length];
-                Marshal.Copy(input, bytes, 0, length); Marshal.Copy(bytes, 0, output, length);
-            } finally { GlobalUnlock(copy); }
-        } finally { GlobalUnlock(source); }
-        return copy;
+                IntPtr output = GlobalLock(copy);
+                if (output == IntPtr.Zero) throw Fault("clipboard-snapshot-failed");
+                try {
+                    if (copyCheckpoint != null) copyCheckpoint(copy, 1);
+                    var bytes = new byte[length];
+                    Marshal.Copy(input, bytes, 0, length); Marshal.Copy(bytes, 0, output, length);
+                } finally { GlobalUnlock(copy); }
+            } finally { GlobalUnlock(source); }
+            transferred = true;
+            return copy;
+        } finally {
+            if (!transferred) releaseCopy(copy);
+        }
     }
     static Item Clone(uint format, IntPtr data) {
         var item = new Item { Format = format };

@@ -350,6 +350,7 @@ async function run() {
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
         .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
         .replace("([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+        .replace("([IO.Path]::Combine($PSScriptRoot, 'windows-clipboard-errors.ps1'))", quote(path.resolve('native', 'windows-clipboard-errors.ps1')))
         .replace("(Join-Path $PSScriptRoot 'windows-clipboard-snapshot.cs')", quote(path.resolve('native', 'windows-clipboard-snapshot.cs')))
         .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
           '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))')

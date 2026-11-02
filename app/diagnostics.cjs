@@ -2,6 +2,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { performance, monitorEventLoopDelay } = require('node:perf_hooks');
 const { Worker } = require('node:worker_threads');
+const { clipboardCauses } = require('./clipboard-faults.cjs');
 
 const events = new Set(['app-start', 'turn-start', 'capture-ready', 'cloud-ready', 'input-paused', 'input-resumed',
   'input-target', 'input-ready', 'input-fallback', 'input-skipped', 'input-error', 'segment-final',
@@ -137,6 +138,15 @@ class Diagnostics {
     }
     if (actions.has(data.action)) entry.action = data.action;
     if (faults.has(data.fault)) entry.fault = data.fault;
+    for (const key of ['clipboardCauses', 'clipboardCleanupCauses']) {
+      if (data[key] === undefined) continue;
+      const causes = clipboardCauses(data[key]);
+      if (causes) entry[key] = causes;
+      else entry.fault = 'protocol';
+    }
+    for (const key of ['clipboardCausesTruncated', 'clipboardCleanupCausesTruncated']) {
+      if (typeof data[key] === 'boolean') entry[key] = data[key];
+    }
     if (['SetWindowPos', 'GetCursorPos', 'GetForegroundWindow', 'GetGUIThreadInfo', 'SendInput',
       'OpenClipboard', 'UIAutomation', 'compile', 'host-pulse'].includes(data.api)) entry.api = data.api;
     if (['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AbortError', 'AggregateError', 'SystemError'].includes(data.errorClass)) entry.errorClass = data.errorClass;
