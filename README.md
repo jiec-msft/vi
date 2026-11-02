@@ -255,6 +255,17 @@ case 8 保留原 transient-lock 路径，并先断言完整单元素 byte[][] �
 引用和精确长度；旧 flattening、null row、单字节、奇数字节、缺 terminator 输入
 必须明确拒绝，owner/sequence 与原始完整 allocation bytes 不变。原 22 组及顺序不变。
 参见 [PowerShell comma/array operators](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_operators?view=powershell-5.1)。
+CI-owned 原始状态读取只为一次 Read 获取 lock，最多 40 次尝试、200 ms monotonic
+acquisition budget；不重跑 transaction 或整个测试。已识别的 same-thread/process
+opener 立即拒绝，不能用等待掩盖自有锁泄漏；其它／不可识别 opener 仅有限等待。
+获取成功后必须在锁内仍匹配开始时的 owner/sequence，变化即失败，不采纳新 copy。
+Put/Read 的 Close BOOL 也检查，operation 与 close 双失败保持 aggregate。有限
+诊断只含固定 read stage、numeric format/error、尝试数、耗时和 opener 分类；
+NULL opener 只表示不可识别，不能认定没有 opener 或断言来自外部进程。
+case 8 用实际 owned lock 验证释放后获取与预算耗尽两条路径，核对完整原始 bytes、
+owner/sequence 不变；原 Hold(80) 的 production Begin 路径和 24 组顺序保持。
+参见 [OpenClipboard](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openclipboard)
+与 [GetOpenClipboardWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getopenclipboardwindow)。
 异常投影最多遍历 32 个节点，每个 operation/cleanup phase 各保留两个 leaf，
 越界显式标记 truncated；Aggregate 的两个成员不会被 InnerException 首项替代。
 wire、JS error 和 privacy log 只接受固定 code/stage、numeric format/native code，
@@ -275,6 +286,13 @@ Windows UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/
 owned-desktop wrapper 保留 PID/desktop 匹配的 bounded startup progress；
 progress 写入 wrapper 实际读取的 desktop receipt directory，而非相邻 evidence root；
 helper/attestor/renderer readiness 未完成时仍失败，不接受仅启动进程作为 READY。
+OS mouse driver 在首个 Add-Type 前显式使用相同 inbox bootstrap，而不是等后续
+attestor 才初始化模块。driver callback 保留实际 PID/code/signal/killed、monotonic
+耗时、配置的 15 s budget、stdout/stderr byte count、末尾最多 4096 characters 的
+CI-owned stderr 与 truncated 标记，以及最多 8 条 PID 匹配的固定 startup stage。
+这只是 CI 诊断，不是 desktop/input proof；没有完整 committed response 仍失败，
+不能据 stage、进程启动或退出时间伪造 osInputs，也不延长 15 s 或放宽 foreground、
+NoActivate、owned-down/first-click/held gesture 和 recovery 的原 gate。
 这些阶段证据与 CI 生成脚本的源文件重定位修正，都不等于已证明 ARM 冷启动
 或真实用户历史浮窗问题修复；仍需 exact-head native CI 和最终包 gates。
 

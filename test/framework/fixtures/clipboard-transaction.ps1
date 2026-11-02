@@ -17,11 +17,23 @@ Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefiniti
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
+ Action readBlocked;
+ public sealed class ReadFailure : Exception {
+  public readonly int NativeError, Attempts;
+  public readonly long ElapsedMilliseconds;
+  public readonly string Stage, Opener;
+  public ReadFailure(string stage,uint format,int error,int attempts,long elapsed,string opener)
+   :base("Owned fixture read failed: stage="+stage+", format="+format+", nativeError="+error+
+    ", attempts="+attempts+", elapsedMs="+elapsed+", opener="+opener+"."){
+   Stage=stage;NativeError=error;Attempts=attempts;ElapsedMilliseconds=elapsed;Opener=opener;
+  }
+ }
  public static Func<uint,IntPtr,IntPtr> RealSetter;
  public static Func<uint,IntPtr,IntPtr> RealCompletionSetter;
  public static Func<bool> RealRestoreClose;
@@ -123,7 +135,7 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
   return true;
  }
  [DllImport("user32.dll",SetLastError=true)]static extern bool OpenClipboard(IntPtr owner);
- [DllImport("user32.dll")]static extern bool CloseClipboard();
+ [DllImport("user32.dll",SetLastError=true)]static extern bool CloseClipboard();
  [DllImport("user32.dll",SetLastError=true)]static extern bool EmptyClipboard();
  [DllImport("user32.dll",SetLastError=true)]static extern IntPtr SetClipboardData(uint format,IntPtr data);
  [DllImport("user32.dll")]static extern IntPtr GetClipboardData(uint format);
@@ -132,6 +144,10 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  public static void RenderAll(IntPtr window){SendMessage(window,0x306,IntPtr.Zero,IntPtr.Zero);}
  [DllImport("user32.dll")]public static extern uint GetClipboardSequenceNumber();
  [DllImport("user32.dll")]public static extern IntPtr GetClipboardOwner();
+ [DllImport("user32.dll")]static extern IntPtr GetOpenClipboardWindow();
+ [DllImport("user32.dll")]static extern uint GetWindowThreadProcessId(IntPtr window,out uint process);
+ [DllImport("kernel32.dll")]static extern uint GetCurrentProcessId();
+ [DllImport("kernel32.dll")]static extern uint GetCurrentThreadId();
  [DllImport("user32.dll")]public static extern IntPtr GetKeyboardLayout(uint thread);
  [DllImport("user32.dll")]public static extern int CountClipboardFormats();
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern uint RegisterClipboardFormat(string name);
@@ -147,6 +163,26 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  static Exception Failure(string stage,uint format,int bytes,int error){
   return new Exception("Owned fixture failure: case="+CaseId+", stage="+stage+
    ", format="+format+", bytes="+bytes+", nativeError="+error+".");
+ }
+ static void CloseChecked(string stage,Exception primary){
+  SetLastError(0);
+  if(CloseClipboard())return;
+  var cleanup=Failure(stage,0,0,Marshal.GetLastWin32Error());
+  if(primary!=null)throw new AggregateException("Owned fixture operation and close both failed.",primary,cleanup);
+  throw cleanup;
+ }
+ static string ReadOpener(){
+  IntPtr window=GetOpenClipboardWindow();
+  if(window==IntPtr.Zero)return "unidentified";
+  uint process;
+  uint thread=GetWindowThreadProcessId(window,out process);
+  if(thread==0)return "unidentified";
+  if(process!=GetCurrentProcessId())return "other-process";
+  return thread==GetCurrentThreadId()?"same-thread":"same-process";
+ }
+ static void ReportRead(string stage,uint format,int attempts,long elapsed,int error,string opener){
+  Console.Error.WriteLine("VI_CLIP_READ case="+CaseId+" stage="+stage+" format="+format+
+   " attempts="+attempts+" elapsedMs="+elapsed+" nativeError="+error+" opener="+opener);
  }
  public sealed class ZeroContract {
   public uint Format, Flags;
@@ -195,6 +231,7 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
     throw new ArgumentException("Owned Unicode payload must contain complete null-terminated UTF-16 bytes.","payloads");
   }
   if(!OpenClipboard(Handle))throw Failure("open",0,0,Marshal.GetLastWin32Error());
+  Exception primary=null;
   try{
    if(!EmptyClipboard())throw Failure("empty",0,0,Marshal.GetLastWin32Error());
    foreach(var memory in privateMemory)GlobalFree(memory);privateMemory.Clear();
@@ -212,11 +249,42 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
     if(written==IntPtr.Zero){GlobalFree(memory);throw Failure("set-data",formats[i],payloads[i].Length,nativeError);}
     if(formats[i]>=0x200&&formats[i]<=0x2ff)privateMemory.Add(memory);
    }
-  }finally{CloseClipboard();}
+  }catch(Exception failure){primary=failure;throw;}
+  finally{CloseChecked("put-close",primary);}
  }
  public byte[] Read(uint format){
-  if(!OpenClipboard(Handle))throw new Exception("Owned fixture read lock failed.");
+  uint expected=GetClipboardSequenceNumber();
+  IntPtr owner=GetClipboardOwner();
+  var clock=Stopwatch.StartNew();
+  int attempts=0,error=0;
+  string opener="unidentified";
+  for(;;){
+   if(attempts>0&&clock.ElapsedMilliseconds>=200){
+    ReportRead("exhausted",format,attempts,clock.ElapsedMilliseconds,error,opener);
+    throw new ReadFailure("read-open",format,error,attempts,clock.ElapsedMilliseconds,opener);
+   }
+   attempts++;SetLastError(0);
+   if(OpenClipboard(Handle))break;
+   error=Marshal.GetLastWin32Error();opener=ReadOpener();
+   bool self=opener=="same-thread"||opener=="same-process";
+   if(self||attempts>=40||clock.ElapsedMilliseconds>=200){
+    ReportRead(self?"rejected":"exhausted",format,attempts,clock.ElapsedMilliseconds,error,opener);
+    throw new ReadFailure(self?"read-self":"read-open",format,error,attempts,clock.ElapsedMilliseconds,opener);
+   }
+   if(readBlocked!=null)readBlocked();
+   Thread.Sleep((int)Math.Min(5,Math.Max(1,200-clock.ElapsedMilliseconds)));
+  }
+  Exception primary=null;
   try{
+   if(clock.ElapsedMilliseconds>200){
+    ReportRead("exhausted",format,attempts,clock.ElapsedMilliseconds,error,opener);
+    throw new ReadFailure("read-open",format,error,attempts,clock.ElapsedMilliseconds,opener);
+   }
+   if(GetClipboardSequenceNumber()!=expected||GetClipboardOwner()!=owner){
+    ReportRead("changed",format,attempts,clock.ElapsedMilliseconds,0,opener);
+    throw new ReadFailure("read-identity",format,0,attempts,clock.ElapsedMilliseconds,opener);
+   }
+   if(attempts>1)ReportRead("acquired",format,attempts,clock.ElapsedMilliseconds,error,opener);
    IntPtr memory=GetClipboardData(format);
    if(memory==IntPtr.Zero)throw new Exception("Owned fixture format missing.");
    int length=(int)GlobalSize(memory).ToUInt64();
@@ -225,7 +293,45 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
     IntPtr pointer=GlobalLock(memory);if(pointer==IntPtr.Zero)throw new Exception("Owned fixture read failed.");
     try{Marshal.Copy(pointer,bytes,0,length);}finally{GlobalUnlock(memory);}
    }return bytes;
-  }finally{CloseClipboard();}
+  }catch(Exception failure){primary=failure;throw;}
+  finally{CloseChecked("read-close",primary);}
+ }
+ public ReadFailure ProbeReadLock(uint format,bool exhaust){
+  using(var started=new ManualResetEventSlim(false))
+  using(var release=new ManualResetEventSlim(false)){
+   Exception holderFailure=null,operation=null;
+   bool blocked=false;
+   ReadFailure result=null;
+   var holder=new Thread(()=>{
+    if(!OpenClipboard(IntPtr.Zero)){holderFailure=Failure("read-probe-open",format,0,Marshal.GetLastWin32Error());started.Set();return;}
+    started.Set();
+    try{if(!release.Wait(2000))throw new TimeoutException("Owned read probe release was not signalled.");}
+    catch(Exception failure){holderFailure=failure;}
+    finally{try{CloseChecked("read-probe-close",holderFailure);}catch(Exception failure){holderFailure=failure;}}
+   });
+   holder.IsBackground=true;holder.Start();
+   try{
+    if(!started.Wait(2000)||holderFailure!=null)throw new Exception("Owned read probe did not acquire its native lock.",holderFailure);
+    if(!exhaust)readBlocked=()=>{blocked=true;release.Set();};
+    try{Read(format);}catch(ReadFailure failure){result=failure;}
+    if(exhaust&&result==null)throw new Exception("Read acquisition exhaustion was silently accepted.");
+    if(!exhaust&&(result!=null||!blocked))throw new Exception("Read acquisition did not recover from the actual owned lock.",result);
+   }catch(Exception failure){operation=failure;}
+   finally{
+    readBlocked=null;release.Set();
+    if(!holder.Join(2000)){
+     var timeout=new TimeoutException("Owned read probe holder did not exit.");
+     if(holderFailure==null)holderFailure=timeout;
+     else holderFailure=new AggregateException("Owned read probe holder failed and did not exit.",holderFailure,timeout);
+    }
+   }
+   if(holderFailure!=null){
+    if(operation!=null)throw new AggregateException("Owned read probe and holder both failed.",operation,holderFailure);
+    throw holderFailure;
+   }
+   if(operation!=null)throw operation;
+   return result;
+  }
  }
  public void AddWhileOwned(IntPtr owner,uint format,byte[] bytes){
   if(!OpenClipboard(owner))throw Failure("mutate-open",format,bytes.Length,Marshal.GetLastWin32Error());
@@ -527,6 +633,10 @@ try{
         Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner) 'Rejected payload shape changed original clipboard identity.'
         Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Rejected payload shape changed full original allocation bytes.'
     }
+    [void]$fixture.ProbeReadLock(13,$false)
+    $readFailure=$fixture.ProbeReadLock(13,$true)
+    Check ($readFailure.Stage -eq 'read-open' -and $readFailure.Attempts -gt 1 -and $readFailure.Attempts -le 40 -and $readFailure.Opener -eq 'unidentified' -and $readFailure.NativeError -ge 0) 'Owned native read acquisition did not fail within its finite contract.'
+    Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner -and [Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Read acquisition probes changed owner, sequence or complete original bytes.'
     $fixture.Hold(80)
     $transaction=[TranscriptClipboard]::new()
     $operationFailure=$null

@@ -75,10 +75,21 @@ async function consumeCommitted(directory, stem, request, report) {
     jobBytesBase64: jobBytes.toString('base64'), consumed };
 }
 async function executeOwnedDriver(report, request, args, outputDirectory) {
+  const started = process.hrtime.bigint();
   const resultPromise = new Promise((resolve) => {
     const child = execFile('powershell.exe', args, { timeout: 15000, windowsHide: true, env: requestEnvironment(request) },
       (error, stdout, stderr) => {
-        request.callback = nodeEvent(report, 'driver-callback', { requestId: request.requestId });
+        const stderrText = String(stderr || '');
+        request.callback = nodeEvent(report, 'driver-callback', { requestId: request.requestId, pid: request.returnedPid,
+          code: error ? (Number.isInteger(error.code) ? error.code : null) : 0,
+          errorCode: typeof error?.code === 'string' ? error.code.slice(0, 64) : undefined,
+          signal: error?.signal || null, killed: error?.killed === true, budgetMs: 15000,
+          spanMs: Math.round(Number(process.hrtime.bigint() - started) / 1e6),
+          stdoutBytes: Buffer.byteLength(String(stdout || '')), stderrBytes: Buffer.byteLength(stderrText),
+          stderrTail: stderrText.slice(-4096), stderrTruncated: stderrText.length > 4096,
+          driverStartup: stderrText.split(/\r?\n/).filter((line) =>
+            /^VI_DRIVER_STAGE (script-entry|bootstrap-ready|mouse-compiled|authority-ready|input-begin|input-returned) \d+$/.test(line) &&
+            line.endsWith(` ${request.returnedPid}`)).slice(-8) });
         if (error) { error.stdout = stdout; error.stderr = stderr; }
         resolve({ error, stdout, stderr });
       });

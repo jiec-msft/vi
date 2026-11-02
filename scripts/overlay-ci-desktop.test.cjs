@@ -70,9 +70,75 @@ test('production driver error retains callback stderr, exit code and committed n
       assert.equal(error.nativeReceipt.error, value.error);
       assert.equal(error.nativeReceipt.committedAck.sha256, commit.sha256);
       assert.equal(error.code === 1 && error.stderr.includes('baseline changed before input'), code === 1);
+      assert.equal(request.callback.code, code);
+      assert.equal(request.callback.pid, value.pid);
+      assert.equal(request.callback.stderrTail, stderr);
+      assert.equal(request.callback.stderrTruncated, false);
       return true;
     });
   }
+});
+test('owned driver without a final response retains bounded stderr and the actual killed-process outcome', async (t) => {
+  const childProcess = require('node:child_process');
+  const { EventEmitter } = require('node:events');
+  const modulePath = require.resolve('./overlay-ci-desktop.cjs');
+  const cached = require.cache[modulePath];
+  const failure = Object.assign(new Error('controlled empty-response failure'), { code: null, signal: 'SIGTERM', killed: true });
+  const stderr = `VI_DRIVER_STAGE script-entry 42\nVI_DRIVER_STAGE bootstrap-ready 42\n${'owned-diagnostic-'.repeat(400)}`;
+  t.mock.method(childProcess, 'execFile', (executable, args, options, callback) => {
+    assert.equal(executable, 'powershell.exe');
+    assert.equal(options.timeout, 15000);
+    const child = Object.assign(new EventEmitter(), { pid: 42 });
+    setImmediate(() => {
+      child.emit('spawn');
+      child.emit('exit', null, 'SIGTERM');
+      callback(failure, '', stderr);
+      child.emit('close', null, 'SIGTERM');
+    });
+    return child;
+  });
+  t.mock.method(fs, 'readFile', async () => { throw new Error('Empty driver response cannot claim a committed native receipt.'); });
+  let execute;
+  try {
+    delete require.cache[modulePath];
+    execute = require(modulePath).executeOwnedDriver;
+  } finally { require.cache[modulePath] = cached; }
+  const report = { causalContext: { ...context }, causalRequests: [], nodeEvents: [] };
+  const request = { ...context, requestId: 'owned-driver-empty-response', requestNonce: 'owned', generation: 1 };
+  report.causalRequests.push(request);
+  await assert.rejects(execute(report, request, [], 'unused-owned-output'), (error) => {
+    assert.equal(error, failure);
+    assert.equal(error.nativeReceipt, undefined);
+    assert.equal(error.stdout, '');
+    assert.equal(error.stderr, stderr);
+    assert.equal(request.response, undefined);
+    assert.equal(request.exit.code, null);
+    assert.equal(request.exit.signal, 'SIGTERM');
+    assert.equal(request.close.signal, 'SIGTERM');
+    assert.equal(request.callback.pid, 42);
+    assert.equal(request.callback.code, null);
+    assert.equal(request.callback.killed, true);
+    assert.equal(request.callback.signal, 'SIGTERM');
+    assert.equal(request.callback.budgetMs, 15000);
+    assert.equal(request.callback.stdoutBytes, 0);
+    assert.equal(request.callback.stderrBytes, Buffer.byteLength(stderr));
+    assert.equal(request.callback.stderrTail, stderr.slice(-4096));
+    assert.equal(request.callback.stderrTail.length, 4096);
+    assert.equal(request.callback.stderrTruncated, true);
+    assert.deepEqual(request.callback.driverStartup, ['VI_DRIVER_STAGE script-entry 42', 'VI_DRIVER_STAGE bootstrap-ready 42']);
+    return true;
+  });
+});
+test('OS mouse driver imports the actual inbox bootstrap before its first binary cmdlet', async () => {
+  const source = await fs.readFile(path.join(__dirname, '..', 'test', 'framework', 'fixtures', 'overlay-mouse.ps1'), 'utf8');
+  const bootstrap = source.indexOf("'native', 'windows-bootstrap.ps1'");
+  const stages = ['VI_DRIVER_STAGE script-entry', 'Add-Type -TypeDefinition', 'VI_DRIVER_STAGE mouse-compiled',
+    '[OverlayDesktopAttestor]::ConfirmExecution()', 'VI_DRIVER_STAGE input-begin', '[OverlayCiMouse]::Execute(']
+    .map((text) => source.indexOf(text));
+  assert.ok(bootstrap >= 0 && stages.every((index) => index >= 0));
+  assert.ok(bootstrap > stages[0] && bootstrap < stages[1]);
+  assert.ok(stages[2] < stages[3]);
+  assert.ok(stages[4] < stages[5]);
 });
 test('controlled helper-death readiness cannot overtake the committed receipt ACK', async () => {
   let commit, released = false;
