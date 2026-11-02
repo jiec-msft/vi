@@ -42,6 +42,23 @@ function electronDistribution(platform, loadExecutable = () => require('electron
   throw new Error('Unexpected public Electron runtime layout.');
 }
 
+function windowsPowerShellContext(supplied = process.env) {
+  const systemRoot = Object.entries(supplied).find(([name]) => name.toUpperCase() === 'SYSTEMROOT')?.[1];
+  if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error('Windows PowerShell requires an absolute SystemRoot.');
+  const home = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0');
+  const env = { ...supplied };
+  for (const name of Object.keys(env)) {
+    if (name.toUpperCase() === 'PSMODULEPATH') delete env[name];
+  }
+  env.PSModulePath = path.join(home, 'Modules');
+  return { executable: path.join(home, 'powershell.exe'), env };
+}
+
+function windowsPowerShell(args, options) {
+  const context = windowsPowerShellContext();
+  return execFileSync(context.executable, args, { ...options, env: context.env });
+}
+
 function architecture(file, arch) {
   const fd = fs.openSync(file, 'r');
   try {
@@ -120,6 +137,7 @@ async function main(version, arch) {
   const provider = await distributionProvider(path.join(resources, 'providers', 'default'),
     path.join(output, 'public-provider-download'));
   const executable = process.platform === 'darwin' ? path.join(contents, 'MacOS', 'VI') : path.join(contents, 'VI.exe');
+  let powerShell;
   if (process.platform === 'darwin') {
     fs.renameSync(path.join(contents, 'MacOS', 'Electron'), executable);
     const plist = path.join(contents, 'Info.plist');
@@ -132,8 +150,26 @@ async function main(version, arch) {
     fs.writeFileSync(metadata, JSON.stringify(data));
     execFileSync('plutil', ['-convert', 'xml1', '-o', plist, metadata]);
     sealMac(bundle);
-  } else execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts', 'distribution-version.ps1'),
-    '-Executable', executable, '-Version', version], { stdio: 'inherit', timeout: 30000 });
+  } else {
+    powerShell = JSON.parse(windowsPowerShell(['-NoProfile', '-NonInteractive', '-Command',
+      "$security=Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -PassThru -ErrorAction Stop; " +
+      "$archive=Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Archive\\Microsoft.PowerShell.Archive.psd1') -PassThru -ErrorAction Stop; " +
+      '@{edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString();' +
+      'securityModule=$security.ModuleBase;archiveModule=$archive.ModuleBase;' +
+      'securityCommand=(Get-Command Get-AuthenticodeSignature -ErrorAction Stop).ModuleName;' +
+      'archiveCommand=(Get-Command Expand-Archive -ErrorAction Stop).ModuleName}|ConvertTo-Json -Compress'],
+    { encoding: 'utf8', timeout: 15000 }));
+    assert.equal(powerShell.edition, 'Desktop');
+    assert.equal(powerShell.securityCommand, 'Microsoft.PowerShell.Security');
+    assert.equal(powerShell.archiveCommand, 'Microsoft.PowerShell.Archive');
+    const inbox = windowsPowerShellContext().env.PSModulePath;
+    for (const module of [powerShell.securityModule, powerShell.archiveModule]) {
+      assert.ok(typeof module === 'string' && !path.relative(inbox, module).startsWith('..') &&
+        !path.isAbsolute(path.relative(inbox, module)), 'Packaging cmdlet did not resolve from Windows PowerShell inbox modules.');
+    }
+    windowsPowerShell(['-NoProfile', '-File', path.resolve('scripts', 'distribution-version.ps1'),
+      '-Executable', executable, '-Version', version], { stdio: 'inherit', timeout: 30000 });
+  }
   const nativeHeader = architecture(executable, arch);
   if (process.platform === 'darwin') architecture(path.join(app, 'native', 'macos-delivery'), arch);
   const sourceFiles = {};
@@ -147,7 +183,7 @@ async function main(version, arch) {
   }
   const authority = { sourceRevision: revision, version, architecture: arch,
     electron: require('../package.json').devDependencies.electron,
-    electronSourceExecutableSha256: digest(electronSource.executable), sourceFiles, provider };
+    electronSourceExecutableSha256: digest(electronSource.executable), windowsPowerShell: powerShell, sourceFiles, provider };
   const authorityFile = path.join(output, 'authority.json');
   fs.writeFileSync(authorityFile, JSON.stringify(authority, null, 2));
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'vi-native-base-'));
@@ -165,7 +201,7 @@ async function main(version, arch) {
       assert.equal(info.CFBundleShortVersionString, version.split('-')[0]);
       versionMetadata = { bundleVersion: info.CFBundleVersion, shortVersion: info.CFBundleShortVersionString };
     } else {
-      versionMetadata = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      versionMetadata = JSON.parse(windowsPowerShell(['-NoProfile', '-Command',
         '& {param($file) $v=(Get-Item -LiteralPath $file).VersionInfo; @{file=$v.FileVersion;product=$v.ProductVersion;name=$v.ProductName}|ConvertTo-Json -Compress}',
         target], { encoding: 'utf8', timeout: 10000 }));
       assert.equal(versionMetadata.file, `${version.split('-')[0]}.0`);
@@ -184,11 +220,11 @@ async function main(version, arch) {
     const zip = path.join(output, `VI-${version}-${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}-neutral.zip`);
     if (process.platform === 'darwin') execFileSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', bundle, zip],
       { timeout: 120000 });
-    else execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts', 'distribution-archive.ps1'),
+    else windowsPowerShell(['-NoProfile', '-File', path.resolve('scripts', 'distribution-archive.ps1'),
       '-Root', staging, '-Zip', zip], { timeout: 120000 });
     const extracted = path.join(output, 'fresh-extraction');
     if (process.platform === 'darwin') execFileSync('ditto', ['-x', '-k', zip, extracted], { timeout: 120000 });
-    else execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    else windowsPowerShell(['-NoProfile', '-Command',
       '& {param($file,$directory) Expand-Archive -LiteralPath $file -DestinationPath $directory -ErrorAction Stop}',
       zip, extracted], { timeout: 120000 });
     try {
@@ -214,7 +250,7 @@ async function main(version, arch) {
   } finally { fs.rmSync(profile, { recursive: true, force: true }); }
 }
 
-module.exports = { distributionVersion, childEnv, electronDistribution };
+module.exports = { distributionVersion, childEnv, electronDistribution, windowsPowerShellContext };
 if (require.main === module) main(process.argv[2], process.argv[3]).catch((error) => {
   console.error(error.stack); process.exitCode = 1;
 });

@@ -181,6 +181,17 @@ Electron 45 的 npm package 可以在首次调用公开 `require('electron')` lo
 receipt 同时记录输入 Electron executable hash 与最终输出 hash；
 不接受 dist override、另一份 runtime 或缺失 binary 的 fallback。
 
+Windows producer 在 PowerShell 7 runner shell 的 Node 子进程内启动
+inbox Windows PowerShell 5.1。两者 module runtime 不可混用：Node 会继承
+PS7 的 `PSModulePath`，但不会执行 PS7 直接启动 `powershell.exe` 时的
+路径转换。producer 因此只对子进程指定系统 Windows PowerShell executable
+和 inbox module path，并显式预检 Security/Archive manifest、cmdlet 来源
+与 Desktop edition；receipt 记录实际 toolchain。该设置同时覆盖 version、
+archive 与 extraction 命令，不修改 runner 全局环境，也不传给应用进程。
+签名拒绝、numeric version、完整解包和逐文件 hash gate 均保持不变。
+相关启动规则见
+<https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath>。
+
 每个平台都用实际 packaged Electron 的 Node mode 加载完整 provider、
 两种 factory 和共享 config loader，通过公开 fixture 的 loopback transport
 发送 synthetic PCM。测试不使用真实麦克风、credential lookup 或外部服务；
