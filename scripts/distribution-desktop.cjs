@@ -23,7 +23,8 @@ const resources = fs.realpathSync(process.argv[marker + 1]);
 const authority = JSON.parse(fs.readFileSync(process.argv[marker + 2], 'utf8'));
 const appRoot = path.join(resources, 'app');
 const nativeRoot = path.join(appRoot, 'native');
-app.commandLine.appendSwitch('user-data-dir', process.env.VI_FIXTURE_PROFILE);
+assert.equal(app.commandLine.getSwitchValue('user-data-dir'), process.env.VI_FIXTURE_PROFILE,
+  'The isolated browser profile must be selected before the final fixture enters JavaScript.');
 app.commandLine.appendSwitch('force-renderer-accessibility');
 const report = { status: 'failed', scope: 'final-extracted-module/native-path on matching generic Electron host',
   appMainExercised: false, actualUserApplicationUsed: false, microphoneUsed: false, externalServiceCalled: false };

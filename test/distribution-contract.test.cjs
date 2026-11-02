@@ -219,6 +219,8 @@ test('final extracted gate retains entry stages, exact native HWND and all deliv
     assert.ok(source.includes(text));
   }
   assert.ok(source.includes('60000'));
+  assert.ok(source.includes("app.commandLine.getSwitchValue('user-data-dir'), process.env.VI_FIXTURE_PROFILE"));
+  assert.ok(!source.includes("app.commandLine.appendSwitch('user-data-dir'"));
   const workflow = fs.readFileSync(path.resolve('.github', 'workflows', 'native-distribution.yml'), 'utf8');
   assert.ok(workflow.includes('artifacts-ci/distribution/final-desktop.launch.json'));
   assert.ok(!workflow.includes('final-desktop.chromium.log'));

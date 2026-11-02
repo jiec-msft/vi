@@ -32,6 +32,7 @@ function finalDesktopLaunch(executable, entry, resources, authorityFile, profile
   const env = childEnv(profile);
   delete env.ELECTRON_RUN_AS_NODE;
   Object.assign(env, { GITHUB_ACTIONS: 'true', VI_FIXTURE_PROFILE: profile, VI_FIXTURE_PROGRESS: progressFile });
+  // Select Chromium's isolated profile before the fixture's JavaScript can run.
   return { executable, args: ['--enable-logging=file', '--log-level=2', `--log-file=${logFile}`, `--user-data-dir=${profile}`,
     entry, '--ci-final-native-delivery', resources, authorityFile],
   options: { env, cwd: profile, encoding: 'utf8', windowsHide: true, timeout: 65000, maxBuffer: 262144 } };
