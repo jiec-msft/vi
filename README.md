@@ -525,6 +525,22 @@ PS/CS 的 final-path/hash 来源，执行实际 helper Add-Type/ready/capture，
 再向唯一 owned editor 做 caret 单次粘贴并恢复 text/HTML clipboard。
 这属于明确的 final-module/native-path equivalent gate，不冒称启动了最终
 app main；raw stdout/stderr 和实际 helper exit 保存，失败阻断 producer。
+最终 host 的单次启动在 argv 中提前指定同一个 isolated user-data directory，
+并启用仅 error/fatal 的 Electron 原生文件日志；不等 JS 才决定这些 pre-entry 路径。原生日志留在
+临时 profile，最多读取尾部 32 KiB，只导出至多八个 error/fatal 的源码 basename、
+line 与 severity，不上传原始内容或路径。JS 另用同步文件记录至多 16 个固定 stage
+和实际 PID，最早 entry 标记位于 require Electron 之前，不依赖 stdout 收尾。
+`final-desktop.launch.json` 在退出断言前保存实际 child PID/status/hex/signal、
+spawn error 分类、byte counts、耗时、host/entry SHA 和经过 schema/PID 校验的阶段。
+empty／absent、无原生日志、unknown nonzero status 都是证据边界，不推断为
+helper、clipboard、架构或网络成因；诊断不触发 retry 或提供成功 fallback。
+文件读取错误以固定类别显式记录，不覆盖原始 process status；空 marker 文件也不能
+证明 JS 从未执行，只能说明未观察到该 entry publication。
+原始 Chromium log 不进入 artifacts，profile 按既有 finally 清理。JS 60 s／父进程
+65 s deadline、sandbox/GPU、安全策略、fresh-extraction inventory 和全部实际
+delivery gates 保持；零退出还须有完整 JSON、最后 complete 阶段、精确 owned HWND、
+单次 caret paste、text/HTML 恢复与真实 helper exit，stage 不替代这些证明。
+原生 logging 契约见 [Electron command-line switches](https://www.electronjs.org/docs/latest/api/command-line-switches#--enable-loggingfile)。
 Windows receipt 的 helperRuntimeExercised 只在此 gate 真正通过后为 true。
 macOS 保持 strict signing/ditto/headless provider gate，不把 compiled helper
 bytes 记录当作已执行；headlessOnly/helperRuntimeExercised 继续如实区分。

@@ -25,6 +25,74 @@ function childEnv(profile) {
   return env;
 }
 
+function finalDesktopLaunch(executable, entry, resources, authorityFile, profile, progressFile, logFile) {
+  for (const file of [executable, entry, resources, authorityFile, profile, progressFile, logFile]) {
+    assert.ok(path.isAbsolute(file), 'Final desktop launch requires absolute paths.');
+  }
+  const env = childEnv(profile);
+  delete env.ELECTRON_RUN_AS_NODE;
+  Object.assign(env, { GITHUB_ACTIONS: 'true', VI_FIXTURE_PROFILE: profile, VI_FIXTURE_PROGRESS: progressFile });
+  return { executable, args: ['--enable-logging=file', '--log-level=2', `--log-file=${logFile}`, `--user-data-dir=${profile}`,
+    entry, '--ci-final-native-delivery', resources, authorityFile],
+  options: { env, cwd: profile, encoding: 'utf8', windowsHide: true, timeout: 65000, maxBuffer: 262144 } };
+}
+
+function boundedTail(file, limit) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return { present: true, bytes: null, sampledBytes: 0, truncated: false, readError: 'not-file', text: '' };
+    const bytes = stat.size;
+    const sample = Buffer.alloc(Math.min(bytes, limit));
+    const sampledBytes = fs.readSync(fd, sample, 0, sample.length, Math.max(0, bytes - limit));
+    return { present: true, bytes, sampledBytes, truncated: bytes > sampledBytes, readError: null,
+      text: sample.subarray(0, sampledBytes).toString('utf8') };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { present: false, bytes: 0, sampledBytes: 0, truncated: false, readError: null, text: '' };
+    return { present: null, bytes: null, sampledBytes: 0, truncated: false,
+      readError: ['EACCES', 'EPERM', 'EBUSY', 'EIO', 'EISDIR'].includes(error.code) ? error.code : 'other', text: '' };
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
+function finalDesktopDiagnostics(result, progressFile, logFile) {
+  const progress = boundedTail(progressFile, 8192);
+  const nativeLog = boundedTail(logFile, 32768);
+  const stages = new Set(['js-entry', 'imports-ready', 'host-verified', 'sources-verified', 'modules-loaded',
+    'app-ready', 'editor-ready', 'helper-ready', 'target-verified', 'paste-verified', 'cleanup', 'complete', 'deadline']);
+  let entries = [], progressStatus = progress.readError ? 'read-error' : progress.present ? 'empty' : 'absent';
+  if (progress.bytes > 0) {
+    try {
+      entries = progress.text.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+      assert.ok(!progress.truncated && entries.length <= 16);
+      for (const entry of entries) {
+        assert.deepEqual(Object.keys(entry).sort(), ['pid', 'stage']);
+        assert.ok(entry.pid === result.pid && Number.isSafeInteger(entry.pid) && entry.pid > 0 && stages.has(entry.stage));
+      }
+      progressStatus = 'verified';
+    } catch { progressStatus = 'invalid'; entries = []; }
+  }
+  const sites = [];
+  for (const match of nativeLog.text.matchAll(/\b(FATAL|ERROR):([a-z0-9_./\\-]+)[(:](\d{1,6})\)?\]/g)) {
+    const file = match[2].replaceAll('\\', '/').split('/').at(-1);
+    if (/^[a-z0-9_]{1,80}\.(cc|cpp|h)$/.test(file) && sites.length < 8) {
+      const site = { severity: match[1].toLowerCase(), file, line: Number(match[3]) };
+      if (!sites.some((value) => value.severity === site.severity && value.file === site.file && value.line === site.line)) sites.push(site);
+    }
+  }
+  delete progress.text;
+  delete nativeLog.text;
+  return { pid: Number.isSafeInteger(result.pid) && result.pid > 0 ? result.pid : null,
+    exitStatus: Number.isSafeInteger(result.status) ? result.status : null,
+    windowsStatusHex: Number.isInteger(result.status) && result.status >= -2147483648 && result.status <= 4294967295
+      ? `0x${(result.status >>> 0).toString(16).padStart(8, '0')}` : null,
+    signal: ['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV', 'SIGTRAP'].includes(result.signal) ? result.signal : null,
+    spawnError: ['ENOENT', 'EACCES', 'EPERM', 'ETIMEDOUT', 'ENOBUFS'].includes(result.error?.code) ? result.error.code : null,
+    stdoutBytes: Buffer.byteLength(result.stdout || ''), stderrBytes: Buffer.byteLength(result.stderr || ''),
+    progress: { ...progress, status: progressStatus, entries },
+    nativeLog: { ...nativeLog, sites } };
+}
+
 function electronDistribution(platform, loadExecutable = () => require('electron')) {
   // Electron's public loader initializes its lazy binary installation.
   const supplied = loadExecutable();
@@ -265,17 +333,34 @@ async function main(version, arch) {
       architecture(freshExe, arch);
       smoke(freshExe, path.join(freshContents, process.platform === 'darwin' ? 'Resources' : 'resources'));
       if (process.platform === 'win32') {
-        const env = childEnv(profile);
-        delete env.ELECTRON_RUN_AS_NODE;
-        env.GITHUB_ACTIONS = 'true';
-        env.VI_FIXTURE_PROFILE = profile;
-        const desktop = spawnSync(electronSource.executable, [path.resolve('scripts', 'distribution-desktop.cjs'),
-          '--ci-final-native-delivery', path.join(freshContents, 'resources'), authorityFile],
-        { env, cwd: profile, encoding: 'utf8', windowsHide: true, timeout: 65000, maxBuffer: 262144 });
+        const progressFile = path.join(output, 'final-desktop.progress.jsonl');
+        const logFile = path.join(profile, 'final-desktop.chromium.log');
+        const entry = path.resolve('scripts', 'distribution-desktop.cjs');
+        const launch = finalDesktopLaunch(electronSource.executable, entry,
+          path.join(freshContents, 'resources'), authorityFile, profile, progressFile, logFile);
+        const hostSha256 = digest(launch.executable);
+        const entrySha256 = digest(entry);
+        assert.equal(hostSha256, authority.electronSourceExecutableSha256, 'Final desktop host is not the locked input runtime.');
+        fs.writeFileSync(progressFile, '', { flag: 'wx' });
+        const desktopStarted = process.hrtime.bigint();
+        const desktop = spawnSync(launch.executable, launch.args, launch.options);
         fs.writeFileSync(path.join(output, 'final-desktop.stdout.json'), desktop.stdout || '');
         fs.writeFileSync(path.join(output, 'final-desktop.stderr.txt'), desktop.stderr || '');
+        const diagnostics = { ...finalDesktopDiagnostics(desktop, progressFile, logFile),
+          hostExecutableSha256: hostSha256, entrySha256, electron: authority.electron, architecture: arch,
+          host: 'locked-public-electron', appMainExercised: false, timeoutMs: launch.options.timeout,
+          spanMs: Math.round(Number(process.hrtime.bigint() - desktopStarted) / 1e6),
+          environmentNames: Object.keys(launch.options.env).sort(),
+          isolatedCwd: true, nativeUserDataDirArgument: true, runAsNode: false };
+        fs.writeFileSync(path.join(output, 'final-desktop.launch.json'), JSON.stringify(diagnostics, null, 2));
+        assert.equal(digest(launch.executable), hostSha256, 'Final desktop host changed during launch.');
+        assert.equal(digest(entry), entrySha256, 'Final desktop entry changed during launch.');
         assert.equal(desktop.status, 0, `Final extracted native delivery failed (${desktop.error?.code || desktop.signal || desktop.status}).`);
+        assert.equal(diagnostics.progress.status, 'verified', 'Final desktop did not publish valid JS entry stages.');
+        assert.equal(diagnostics.progress.entries.at(-1)?.stage, 'complete');
+        assert.equal(diagnostics.nativeLog.readError, null, 'Final desktop native log could not be inspected.');
         finalDesktop = JSON.parse(desktop.stdout.trim());
+        finalDesktop.launch = diagnostics;
         assert.equal(finalDesktop.status, 'passed');
         assert.equal(finalDesktop.actualFinalHelperReady, true);
         assert.equal(finalDesktop.actualFinalTargetedPaste, true);
@@ -299,7 +384,7 @@ async function main(version, arch) {
   } finally { fs.rmSync(profile, { recursive: true, force: true }); }
 }
 
-module.exports = { distributionVersion, childEnv, electronDistribution,
+module.exports = { distributionVersion, childEnv, electronDistribution, finalDesktopLaunch, finalDesktopDiagnostics,
   packagingShellContext, validatePackagingShell, probePackagingShell };
 if (require.main === module) main(process.argv[2], process.argv[3]).catch((error) => {
   console.error(error.stack); process.exitCode = 1;

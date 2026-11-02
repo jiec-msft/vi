@@ -83,5 +83,6 @@ jobs:
             artifacts-ci/distribution/windows-toolchain.json
             artifacts-ci/distribution/final-desktop.stdout.json
             artifacts-ci/distribution/final-desktop.stderr.txt
+            artifacts-ci/distribution/final-desktop.launch.json
           retention-days: 7
           if-no-files-found: warn

@@ -1,10 +1,20 @@
-const { app, BrowserWindow, clipboard } = require('electron');
 const fs = require('node:fs');
+const stages = new Set(['js-entry', 'imports-ready', 'host-verified', 'sources-verified', 'modules-loaded',
+  'app-ready', 'editor-ready', 'helper-ready', 'target-verified', 'paste-verified', 'cleanup', 'complete', 'deadline']);
+let published = 0;
+function progress(stage) {
+  if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_FIXTURE_PROGRESS ||
+      !stages.has(stage) || ++published > 16) throw new Error('Invalid final desktop progress publication.');
+  fs.appendFileSync(process.env.VI_FIXTURE_PROGRESS, `${JSON.stringify({ pid: process.pid, stage })}\n`);
+}
+progress('js-entry');
+const { app, BrowserWindow, clipboard } = require('electron');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { createHash } = require('node:crypto');
 const { once } = require('node:events');
+progress('imports-ready');
 const marker = process.argv.indexOf('--ci-final-native-delivery');
 if (process.env.GITHUB_ACTIONS !== 'true' || marker < 0 || !process.env.VI_FIXTURE_PROFILE) {
   throw new Error('Final native delivery fixtures require an isolated CI host.');
@@ -30,12 +40,14 @@ async function run() {
   assert.equal(process.versions.electron, authority.electron);
   report.hostExecutableSha256 = createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex');
   assert.equal(report.hostExecutableSha256, authority.electronSourceExecutableSha256);
+  progress('host-verified');
   report.nativeSources = {};
   for (const name of ['windows-delivery.ps1', 'windows-clipboard-snapshot.cs', 'windows-clipboard-errors.ps1', 'windows-input.ps1', 'windows-diagnostics.ps1', 'windows-bootstrap.ps1']) {
     const sha256 = createHash('sha256').update(fs.readFileSync(path.join(nativeRoot, name))).digest('hex');
     assert.equal(sha256, authority.sourceFiles[`native/${name}`].sha256);
     report.nativeSources[name] = sha256;
   }
+  progress('sources-verified');
   const before = new Set(Object.keys(require.cache));
   const load = createRequire(path.join(appRoot, 'package.json'));
   const { DesktopInput } = load('./app/desktop.cjs');
@@ -47,7 +59,10 @@ async function run() {
     assert.equal(sha256, authority.sourceFiles[relative].sha256);
     return { relative, sha256 };
   });
+  progress('modules-loaded');
   await app.whenReady();
+  assert.equal(fs.realpathSync(app.getPath('userData')), fs.realpathSync(process.env.VI_FIXTURE_PROFILE));
+  progress('app-ready');
   editor = new BrowserWindow({ width: 500, height: 300, title: 'VI owned final delivery fixture',
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   await editor.loadURL('data:text/html,<textarea aria-label="Owned fixture" style="width:95%;height:90%"></textarea>');
@@ -55,6 +70,7 @@ async function run() {
   await editor.webContents.executeJavaScript(`(() => {
     const field=document.querySelector('textarea');field.value='Prefix  Suffix';field.focus();field.setSelectionRange(7,7);
   })()`);
+  progress('editor-ready');
   await clipboard.write({ text: 'Owned original clipboard', html: '<b>Owned original rich clipboard</b>' });
   const original = { text: await clipboard.readText(), html: await clipboard.readHTML() };
   assert.equal(original.text, 'Owned original clipboard');
@@ -62,19 +78,25 @@ async function run() {
   await driver.warmup();
   report.actualFinalHelperReady = true;
   report.helperPid = driver.driver.process.pid;
+  progress('helper-ready');
   const target = await driver.capture();
   assert.equal(target.pid, process.pid, 'Only the CI-owned editor may receive this paste.');
+  assert.equal(target.window, editor.getNativeWindowHandle().readBigUInt64LE().toString(),
+    'Native target must match the CI-owned final editor HWND.');
+  progress('target-verified');
   assert.equal(await driver.paste('Approved final fixture', target), true);
   await until(async () => await editor.webContents.executeJavaScript("document.querySelector('textarea').value") ===
     'Prefix Approved final fixture Suffix', 'one caret paste with unchanged prefix/suffix');
   assert.deepEqual({ text: await clipboard.readText(), html: await clipboard.readHTML() }, original);
   report.actualFinalTargetedPaste = true;
   report.actualMixedClipboardRestored = true;
+  progress('paste-verified');
   report.status = 'passed';
 }
-timer = setTimeout(() => { driver?.close(); app.exit(1); }, 60000);
+timer = setTimeout(() => { progress('deadline'); driver?.close(); app.exit(1); }, 60000);
 run().catch((error) => { report.error = error.message; process.exitCode = 1; }).finally(async () => {
   try {
+    progress('cleanup');
     const child = driver?.driver?.process;
     const exited = child && child.exitCode === null && child.signalCode === null ? once(child, 'exit') : undefined;
     driver?.close();
@@ -83,6 +105,7 @@ run().catch((error) => { report.error = error.message; process.exitCode = 1; }).
     editor?.destroy();
   } catch (error) { report.status = 'failed'; report.cleanupError = error.message; process.exitCode = 1; }
   clearTimeout(timer);
+  progress('complete');
   console.log(JSON.stringify(report));
   app.exit(process.exitCode || (report.status === 'passed' ? 0 : 1));
 });
