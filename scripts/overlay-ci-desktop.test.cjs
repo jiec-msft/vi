@@ -2,7 +2,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { assertDesktopChain, assertWrapperOutcome, armOwnedEarlyInjection, helperCheckpointQueue, nodeEvent,
-  assertJobReceiptPath, selfReceiptStem, assertRootReport, committedHelperReady, requestEnvironment } = require('./overlay-ci-desktop.cjs');
+  assertJobReceiptPath, selfReceiptStem, assertRootReport, committedHelperReady, requestEnvironment,
+  rethrowDriverError } = require('./overlay-ci-desktop.cjs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
@@ -74,6 +75,9 @@ test('production driver error retains callback stderr, exit code and committed n
       assert.equal(request.callback.pid, value.pid);
       assert.equal(request.callback.stderrTail, stderr);
       assert.equal(request.callback.stderrTruncated, false);
+      const inputs = [];
+      assert.throws(() => rethrowDriverError('win32', error, (input) => inputs.push(input)), (raised) => raised === failure);
+      assert.deepEqual(inputs, [error.nativeReceipt]);
       return true;
     });
   }
@@ -84,7 +88,8 @@ test('owned driver without a final response retains bounded stderr and the actua
   const modulePath = require.resolve('./overlay-ci-desktop.cjs');
   const cached = require.cache[modulePath];
   const failure = Object.assign(new Error('controlled empty-response failure'), { code: null, signal: 'SIGTERM', killed: true });
-  const stderr = `VI_DRIVER_STAGE script-entry 42\nVI_DRIVER_STAGE bootstrap-ready 42\n${'owned-diagnostic-'.repeat(400)}`;
+  const stderr = `VI_DRIVER_STAGE script-entry 42\nVI_DRIVER_STAGE bootstrap-ready 42\n` +
+    `VI_DRIVER_STAGE input-returned 99\nVI_DRIVER_STAGE PRIVATE_STAGE 42\n${'owned-diagnostic-'.repeat(400)}`;
   t.mock.method(childProcess, 'execFile', (executable, args, options, callback) => {
     assert.equal(executable, 'powershell.exe');
     assert.equal(options.timeout, 15000);
@@ -109,6 +114,8 @@ test('owned driver without a final response retains bounded stderr and the actua
   await assert.rejects(execute(report, request, [], 'unused-owned-output'), (error) => {
     assert.equal(error, failure);
     assert.equal(error.nativeReceipt, undefined);
+    assert.equal(error.receiptValidationStage, 'empty-response');
+    assert.ok(error.receiptValidationError instanceof Error);
     assert.equal(error.stdout, '');
     assert.equal(error.stderr, stderr);
     assert.equal(request.response, undefined);
@@ -128,6 +135,84 @@ test('owned driver without a final response retains bounded stderr and the actua
     assert.deepEqual(request.callback.driverStartup, ['VI_DRIVER_STAGE script-entry 42', 'VI_DRIVER_STAGE bootstrap-ready 42']);
     return true;
   });
+});
+test('partial or uncommitted Windows responses cannot replace the original process error or become input proof', async (t) => {
+  const childProcess = require('node:child_process');
+  const { EventEmitter } = require('node:events');
+  const modulePath = require.resolve('./overlay-ci-desktop.cjs');
+  const cached = require.cache[modulePath];
+  const { report: witness } = fixture();
+  const ack = witness.osInputs[0].committedAck;
+  const value = { ...ack.value, responseOutcome: 'error', error: 'Owned controlled native error.' };
+  const nativeBytes = JSON.stringify(value);
+  const commit = { ...ack.commit, sha256: createHash('sha256').update(nativeBytes).digest('hex') };
+  const directory = path.resolve('controlled-uncommitted-driver');
+  let active;
+  t.mock.method(childProcess, 'execFile', (executable, args, options, callback) => {
+    assert.equal(executable, 'powershell.exe');
+    assert.equal(options.timeout, 15000);
+    const child = Object.assign(new EventEmitter(), { pid: value.pid });
+    setImmediate(() => {
+      child.emit('spawn');
+      child.emit('exit', null, 'SIGTERM');
+      callback(active.failure, active.stdout, active.stderr);
+      child.emit('close', null, 'SIGTERM');
+    });
+    return child;
+  });
+  t.mock.method(fs, 'readFile', async (file) => {
+    if (active.kind === 'missing-ack') throw active.validationFailure;
+    assert.ok(active.files.has(file), 'Unexpected committed receipt lookup.');
+    return Buffer.from(active.files.get(file));
+  });
+  let execute;
+  try {
+    delete require.cache[modulePath];
+    execute = require(modulePath).executeOwnedDriver;
+  } finally { require.cache[modulePath] = cached; }
+  for (const kind of ['partial-json', 'missing-ack', 'malformed-ack', 'wrong-ack-hash', 'pipe-mismatch']) {
+    const files = new Map([
+      [path.join(directory, commit.fileName), nativeBytes],
+      [path.join(directory, commit.fileName.replace(/\.json$/, '.commit.json')), JSON.stringify(commit)],
+      [path.join(directory, value.jobReceipt.fileName), Buffer.from(ack.jobBytesBase64, 'base64')],
+    ]);
+    active = { kind, files, stdout: nativeBytes, stderr: 'Owned driver stderr remains diagnostic.',
+      failure: Object.assign(new Error('Owned killed process error'), { code: null, signal: 'SIGTERM', killed: true }),
+      validationFailure: Object.assign(new Error('PRIVATE_VALIDATION_DETAIL'), { code: 'ENOENT' }) };
+    if (kind === 'partial-json') active.stdout = '{"responseOutcome":';
+    if (kind === 'malformed-ack') files.set(path.join(directory, commit.fileName.replace(/\.json$/, '.commit.json')), '{');
+    if (kind === 'wrong-ack-hash') files.set(path.join(directory, commit.fileName.replace(/\.json$/, '.commit.json')),
+      JSON.stringify({ ...commit, sha256: '0'.repeat(64) }));
+    if (kind === 'pipe-mismatch') active.stdout = JSON.stringify({ ...value, error: 'Different pipe response.' });
+    const report = { causalContext: { ...context }, causalRequests: [], nodeEvents: [] };
+    const request = { ...witness.osInputs[0].causalRequest, jobDirectory: directory };
+    report.causalRequests.push(request);
+    await assert.rejects(execute(report, request, [], directory), (error) => {
+      assert.equal(error, active.failure);
+      assert.equal(error.code, null);
+      assert.equal(error.signal, 'SIGTERM');
+      assert.equal(error.killed, true);
+      assert.equal(error.stdout, active.stdout);
+      assert.equal(error.stderr, active.stderr);
+      assert.equal(error.nativeReceipt, undefined);
+      assert.notEqual(error.receiptValidationError, error);
+      assert.ok(error.receiptValidationError instanceof Error);
+      assert.equal(Object.getOwnPropertyDescriptor(error, 'receiptValidationError').enumerable, false);
+      if (kind === 'missing-ack') assert.equal(error.receiptValidationError, active.validationFailure);
+      const expectedStage = kind === 'partial-json' ? 'response-json' : kind === 'pipe-mismatch' ? 'receipt-pipe' : 'receipt-commit';
+      assert.equal(error.receiptValidationStage, expectedStage);
+      assert.equal(request.validationFailure.stage, expectedStage);
+      assert.doesNotMatch(JSON.stringify(request.validationFailure), /PRIVATE_VALIDATION_DETAIL|SyntaxError|AssertionError/);
+      const inputs = [];
+      assert.throws(() => rethrowDriverError('win32', error, (input) => inputs.push(input)), (raised) => raised === error);
+      assert.deepEqual(inputs, []);
+      return true;
+    });
+  }
+  const macError = Object.assign(new Error('Owned macOS driver error'), { stdout: '{"ownerVerified":true}' });
+  const macInputs = [];
+  assert.throws(() => rethrowDriverError('darwin', macError, (input) => macInputs.push(input)), (raised) => raised === macError);
+  assert.deepEqual(macInputs, [macError.stdout]);
 });
 test('OS mouse driver imports the actual inbox bootstrap before its first binary cmdlet', async () => {
   const source = await fs.readFile(path.join(__dirname, '..', 'test', 'framework', 'fixtures', 'overlay-mouse.ps1'), 'utf8');

@@ -8,7 +8,7 @@ const childProcess = require('node:child_process');
 const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
-const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority,
+const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, rethrowDriverError, downAuthority,
   armOwnedEarlyInjection, helperCheckpointQueue, selfReceiptStem, committedHelperReady } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
@@ -152,9 +152,7 @@ async function mouse(mode, point) {
         [String(process.pid), mode, String(location.x), String(location.y)], { timeout: 10000 });
     }
   } catch (error) {
-    if (error.nativeReceipt) recordInput(error.nativeReceipt);
-    else if (error.stdout?.trim()) recordInput(error.stdout);
-    throw error;
+    rethrowDriverError(process.platform, error, recordInput);
   }
   const input = recordInput(process.platform === 'win32' ? result : result.stdout);
   assert.equal(input.ownerVerified, true);

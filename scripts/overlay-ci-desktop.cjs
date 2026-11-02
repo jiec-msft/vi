@@ -104,18 +104,36 @@ async function executeOwnedDriver(report, request, args, outputDirectory) {
   const result = await resultPromise;
   await request.closed;
   delete request.closed;
-  if (!result.stdout.trim()) {
-    throw result.error || new Error('Owned driver produced no complete final response.');
+  let receipt, validationStage = 'empty-response';
+  try {
+    if (!result.stdout.trim()) throw new Error('Owned driver produced no complete final response.');
+    validationStage = 'response-json';
+    const value = JSON.parse(result.stdout);
+    request.response = nodeEvent(report, 'driver-response-consumed', { requestId: request.requestId });
+    validationStage = 'receipt-commit';
+    const ack = await consumeCommitted(outputDirectory, `driver-response-${request.requestNonce}`, request, report);
+    validationStage = 'receipt-pipe';
+    assert.equal(JSON.stringify(ack.value), JSON.stringify(value), 'Pipe response differs from committed native response.');
+    receipt = { ...value, processExitObservedAt: request.exit.at, processExitObservedTicks: request.exit.ticks,
+      causalRequest: request, committedAck: ack };
+  } catch (validationError) {
+    request.validationFailure = nodeEvent(report, 'driver-response-rejected', { requestId: request.requestId, stage: validationStage });
+    if (result.error) {
+      delete result.error.nativeReceipt;
+      result.error.receiptValidationStage = validationStage;
+      Object.defineProperty(result.error, 'receiptValidationError', { value: validationError, configurable: true });
+      throw result.error;
+    }
+    throw validationError;
   }
-  const value = JSON.parse(result.stdout);
-  request.response = nodeEvent(report, 'driver-response-consumed', { requestId: request.requestId });
-  const ack = await consumeCommitted(outputDirectory, `driver-response-${request.requestNonce}`, request, report);
-  assert.equal(JSON.stringify(ack.value), JSON.stringify(value), 'Pipe response differs from committed native response.');
-  const receipt = { ...value, processExitObservedAt: request.exit.at, processExitObservedTicks: request.exit.ticks,
-    causalRequest: request, committedAck: ack };
   if (result.error) { result.error.nativeReceipt = receipt; throw result.error; }
-  assert.equal(value.responseOutcome, 'success');
+  assert.equal(receipt.responseOutcome, 'success');
   return receipt;
+}
+function rethrowDriverError(platform, error, recordInput) {
+  if (error.nativeReceipt) recordInput(error.nativeReceipt);
+  else if (platform !== 'win32' && error.stdout?.trim()) recordInput(error.stdout);
+  throw error;
 }
 function downAuthority(value) {
   return { ownedDownInjected: value.ownedDownInjected, ownerVerified: value.ownerVerified, leftHeldAfter: value.leftHeldAfter,
@@ -690,5 +708,5 @@ function assertDesktopChain(report, desktop) {
 }
 
 module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
-  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath,
+  consumeCommitted, executeOwnedDriver, rethrowDriverError, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath,
   selfReceiptStem, assertRootReport, committedHelperReady };

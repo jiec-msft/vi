@@ -24,6 +24,12 @@ using System.Windows.Forms;
 public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
  Action readBlocked;
+ Func<long> readTicks=Stopwatch.GetTimestamp;
+ Action<int> readDelay=Thread.Sleep;
+ Func<IntPtr,bool> readOpen=OpenClipboard;
+ Func<bool> readClose=CloseClipboard;
+ // First representable counter tick at or beyond the 200 ms boundary.
+ static readonly long ReadBudgetTicks=(Stopwatch.Frequency+4)/5;
  public sealed class ReadFailure : Exception {
   public readonly int NativeError, Attempts;
   public readonly long ElapsedMilliseconds;
@@ -164,9 +170,9 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
   return new Exception("Owned fixture failure: case="+CaseId+", stage="+stage+
    ", format="+format+", bytes="+bytes+", nativeError="+error+".");
  }
- static void CloseChecked(string stage,Exception primary){
+ static void CloseChecked(string stage,Exception primary,Func<bool> close=null){
   SetLastError(0);
-  if(CloseClipboard())return;
+  if(close==null?CloseClipboard():close())return;
   var cleanup=Failure(stage,0,0,Marshal.GetLastWin32Error());
   if(primary!=null)throw new AggregateException("Owned fixture operation and close both failed.",primary,cleanup);
   throw cleanup;
@@ -255,36 +261,51 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  public byte[] Read(uint format){
   uint expected=GetClipboardSequenceNumber();
   IntPtr owner=GetClipboardOwner();
-  var clock=Stopwatch.StartNew();
+  long started=readTicks();
+  long deadline=started+ReadBudgetTicks;
+  long now=started;
   int attempts=0,error=0;
   string opener="unidentified";
   for(;;){
-   if(attempts>0&&clock.ElapsedMilliseconds>=200){
-    ReportRead("exhausted",format,attempts,clock.ElapsedMilliseconds,error,opener);
-    throw new ReadFailure("read-open",format,error,attempts,clock.ElapsedMilliseconds,opener);
+   now=readTicks();
+   if(now>=deadline){
+    long elapsed=(now-started)*1000/Stopwatch.Frequency;
+    ReportRead("exhausted",format,attempts,elapsed,error,opener);
+    throw new ReadFailure("read-open",format,error,attempts,elapsed,opener);
    }
    attempts++;SetLastError(0);
-   if(OpenClipboard(Handle))break;
+   if(readOpen(Handle))break;
    error=Marshal.GetLastWin32Error();opener=ReadOpener();
    bool self=opener=="same-thread"||opener=="same-process";
-   if(self||attempts>=40||clock.ElapsedMilliseconds>=200){
-    ReportRead(self?"rejected":"exhausted",format,attempts,clock.ElapsedMilliseconds,error,opener);
-    throw new ReadFailure(self?"read-self":"read-open",format,error,attempts,clock.ElapsedMilliseconds,opener);
+   if(self||attempts>=40){
+    long elapsed=(readTicks()-started)*1000/Stopwatch.Frequency;
+    ReportRead(self?"rejected":"exhausted",format,attempts,elapsed,error,opener);
+    throw new ReadFailure(self?"read-self":"read-open",format,error,attempts,elapsed,opener);
    }
    if(readBlocked!=null)readBlocked();
-   Thread.Sleep((int)Math.Min(5,Math.Max(1,200-clock.ElapsedMilliseconds)));
+   now=readTicks();
+   long remaining=deadline-now;
+   if(remaining<=0){
+    long elapsed=(now-started)*1000/Stopwatch.Frequency;
+    ReportRead("exhausted",format,attempts,elapsed,error,opener);
+    throw new ReadFailure("read-open",format,error,attempts,elapsed,opener);
+   }
+   int delay=(int)Math.Min(5,remaining*1000/Stopwatch.Frequency);
+   if(delay>0)readDelay(delay);
   }
   Exception primary=null;
   try{
-   if(clock.ElapsedMilliseconds>200){
-    ReportRead("exhausted",format,attempts,clock.ElapsedMilliseconds,error,opener);
-    throw new ReadFailure("read-open",format,error,attempts,clock.ElapsedMilliseconds,opener);
+   now=readTicks();
+   long elapsed=(now-started)*1000/Stopwatch.Frequency;
+   if(now>=deadline){
+    ReportRead("exhausted",format,attempts,elapsed,error,opener);
+    throw new ReadFailure("read-late",format,error,attempts,elapsed,opener);
    }
    if(GetClipboardSequenceNumber()!=expected||GetClipboardOwner()!=owner){
-    ReportRead("changed",format,attempts,clock.ElapsedMilliseconds,0,opener);
-    throw new ReadFailure("read-identity",format,0,attempts,clock.ElapsedMilliseconds,opener);
+    ReportRead("changed",format,attempts,elapsed,0,opener);
+    throw new ReadFailure("read-identity",format,0,attempts,elapsed,opener);
    }
-   if(attempts>1)ReportRead("acquired",format,attempts,clock.ElapsedMilliseconds,error,opener);
+   if(attempts>1)ReportRead("acquired",format,attempts,elapsed,error,opener);
    IntPtr memory=GetClipboardData(format);
    if(memory==IntPtr.Zero)throw new Exception("Owned fixture format missing.");
    int length=(int)GlobalSize(memory).ToUInt64();
@@ -294,7 +315,33 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
     try{Marshal.Copy(pointer,bytes,0,length);}finally{GlobalUnlock(memory);}
    }return bytes;
   }catch(Exception failure){primary=failure;throw;}
-  finally{CloseChecked("read-close",primary);}
+  finally{CloseChecked("read-close",primary,readClose);}
+ }
+ public ReadFailure ProbeReadDeadline(uint format,int mode){
+  if(mode<0||mode>2)throw new ArgumentOutOfRangeException("mode");
+  var timestamp=readTicks;var delay=readDelay;var open=readOpen;var close=readClose;
+  long deadline=ReadBudgetTicks;
+  int samples=0,sleeps=0,opens=0,closes=0;
+  readTicks=()=>{
+   samples++;
+   if(samples==1)return 0;
+   if(samples==2)return deadline-1;
+   return deadline+(mode==1?Math.Max(1,Stopwatch.Frequency/2000):0);
+  };
+  readDelay=unused=>{sleeps++;};
+  if(mode!=2){
+   readOpen=window=>{opens++;return true;};
+   readClose=()=>{closes++;return true;};
+  }
+  try{
+   ReadFailure failure=null;
+   if(mode==2)failure=ProbeReadLock(format,true);
+   else{try{Read(format);}catch(ReadFailure caught){failure=caught;}}
+   if(failure==null||failure.Stage!=(mode==2?"read-open":"read-late")||failure.Attempts!=1||sleeps!=0||
+    mode!=2&&(opens!=1||closes!=1))
+    throw new Exception("Controlled monotonic deadline edge was accepted or requested another delay.");
+   return failure;
+  }finally{readTicks=timestamp;readDelay=delay;readOpen=open;readClose=close;}
  }
  public ReadFailure ProbeReadLock(uint format,bool exhaust){
   using(var started=new ManualResetEventSlim(false))
@@ -636,6 +683,10 @@ try{
     [void]$fixture.ProbeReadLock(13,$false)
     $readFailure=$fixture.ProbeReadLock(13,$true)
     Check ($readFailure.Stage -eq 'read-open' -and $readFailure.Attempts -gt 1 -and $readFailure.Attempts -le 40 -and $readFailure.Opener -eq 'unidentified' -and $readFailure.NativeError -ge 0) 'Owned native read acquisition did not fail within its finite contract.'
+    foreach($edge in @(0,1,2)){
+        $edgeFailure=$fixture.ProbeReadDeadline(13,$edge)
+        Check ($edgeFailure.ElapsedMilliseconds -eq 200 -and $edgeFailure.Attempts -eq 1) 'Precise deadline edge did not reject before reading or waiting again.'
+    }
     Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner -and [Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Read acquisition probes changed owner, sequence or complete original bytes.'
     $fixture.Hold(80)
     $transaction=[TranscriptClipboard]::new()

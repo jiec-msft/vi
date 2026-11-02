@@ -258,6 +258,10 @@ case 8 保留原 transient-lock 路径，并先断言完整单元素 byte[][] �
 CI-owned 原始状态读取只为一次 Read 获取 lock，最多 40 次尝试、200 ms monotonic
 acquisition budget；不重跑 transaction 或整个测试。已识别的 same-thread/process
 opener 立即拒绝，不能用等待掩盖自有锁泄漏；其它／不可识别 opener 仅有限等待。
+获取前、成功后与睡眠前共用 Stopwatch timestamp/frequency 形成的同一 tick deadline，
+不以向下取整的 ElapsedMilliseconds 判断预算。remaining<=0 不再等待或重试，睡眠
+时长向下取整；late-acquired lock 明确失败并经 checked Close 释放。受控 clock
+覆盖 exact deadline、整数毫秒仍显示 200 的 200.x ms 成功返回，以及睡眠前已过期。
 获取成功后必须在锁内仍匹配开始时的 owner/sequence，变化即失败，不采纳新 copy。
 Put/Read 的 Close BOOL 也检查，operation 与 close 双失败保持 aggregate。有限
 诊断只含固定 read stage、numeric format/error、尝试数、耗时和 opener 分类；
@@ -293,6 +297,10 @@ CI-owned stderr 与 truncated 标记，以及最多 8 条 PID 匹配的固定 st
 这只是 CI 诊断，不是 desktop/input proof；没有完整 committed response 仍失败，
 不能据 stage、进程启动或退出时间伪造 osInputs，也不延长 15 s 或放宽 foreground、
 NoActivate、owned-down/first-click/held gesture 和 recovery 的原 gate。
+execFile 已失败时，partial JSON、缺失／损坏／不匹配的 ACK 或 pipe/commit 不一致
+均继续抛同一个原始 process error；validation error 以非枚举属性另存，公开事件只
+增加固定 rejection stage。只有全部 receipt 验证完成才附 nativeReceipt；Windows
+caller 不能把保留的未验证 stdout 升格为 osInputs，macOS 原有错误输出路径不变。
 这些阶段证据与 CI 生成脚本的源文件重定位修正，都不等于已证明 ARM 冷启动
 或真实用户历史浮窗问题修复；仍需 exact-head native CI 和最终包 gates。
 
