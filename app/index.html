@@ -42,9 +42,10 @@
         in the original window. The floating window stays ready for the next recording.
         No live replacement or automatic undo is performed.</p>
       <label class="consent"><input type="checkbox" id="auto-copy"> Automatically copy preview results (after automatic paste, preserve the clipboard)</label>
-      <p>Off by default. When enabled, successful recordings replace your clipboard with the final text,
-        including Record preview and recordings where automatic paste was skipped or failed. Partial results,
-        failed transcriptions and recordings cancelled before copying are not copied.
+      <p>Off by default. When enabled, approved Record preview results replace your clipboard with the final text.
+        Targeted recordings never perform an additional copy after paste, failure or a skipped delivery:
+        the previous clipboard or a newer user copy is preserved. Use Copy result explicitly when ready.
+        Partial results, failed transcriptions and recordings cancelled before copying are not copied.
         A clipboard write already requested from the OS cannot be cancelled or reverted.
         This option is separate from automatic paste.</p>
       <label class="consent"><input type="checkbox" id="sounds"> Play start, stop and cancel sounds</label>

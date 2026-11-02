@@ -38,46 +38,73 @@ function fixture() {
     detail: () => elements.get('.pill').title, interrupt: () => listeners.cancel(),
     nativeDown(name) { target = elements.get(name); listeners.down({ x: 0, y: 0 }); },
     click(name) { elements.get(name).onclick({ detail: 1 }); },
+    pointer(name, event, properties = {}) {
+      elements.get(name).listeners[event]?.({ pointerType: 'mouse', pointerId: 1, button: 0, buttons: 0, ...properties });
+    },
     freshPress(name) {
       const button = elements.get(name);
-      button.listeners.pointerdown?.({ pointerType: 'mouse', button: 0, buttons: 1 });
-      button.onclick({ detail: 1 });
+      button.listeners.pointerdown?.({ pointerType: 'mouse', pointerId: 1, button: 0, buttons: 1 });
+      button.listeners.pointerup?.({ pointerType: 'mouse', pointerId: 1, button: 0, buttons: 0 });
+      button.onclick({ detail: 1, pointerId: 1 });
     },
   };
 }
 
-test('native Stop and Cancel own their pending DOM click across helper cancellation and readiness changes', () => {
+test('DOM-only quick clicks execute once even when the polling observer is ready or initially seeded held', () => {
+  for (const name of ['stop', 'cancel']) {
+    const f = fixture();
+    f.status(true);
+    f.freshPress(name);
+    assert.equal(f.calls[name], 1);
+    f.freshPress(name);
+    assert.equal(f.calls[name], 2);
+  }
+});
+
+test('native-first and DOM-first observations cannot duplicate a button gesture across readiness changes', () => {
   for (const name of ['stop', 'cancel']) {
     const f = fixture();
     f.status(true);
     f.nativeDown(name);
+    f.pointer(name, 'pointerdown', { buttons: 1 });
+    f.pointer(name, 'pointerup');
     assert.equal(f.calls[name], 1);
     f.interrupt();
     f.status(false);
     f.click(name);
     assert.equal(f.calls[name], 1, 'One physical press dispatched its action twice.');
+    f.status(true);
     f.freshPress(name);
-    assert.equal(f.calls[name], 2, 'The next fallback press was incorrectly suppressed.');
+    f.nativeDown(name);
+    assert.equal(f.calls[name], 2, 'A late polling observation repeated a completed DOM gesture.');
+    f.freshPress(name);
+    assert.equal(f.calls[name], 3, 'A separate gesture was incorrectly deduplicated.');
   }
 });
 
-test('an unclicked native press cannot suppress a fresh fallback press', () => {
+test('the nonactivating first-click fallback owns pointerup without a DOM down and deduplicates its click', () => {
   const f = fixture();
   f.status(true);
-  f.nativeDown('cancel');
+  f.pointer('cancel', 'pointerenter');
+  f.pointer('cancel', 'pointerup');
+  assert.equal(f.calls.cancel, 1);
   f.interrupt();
   f.status(false);
+  f.click('cancel');
+  assert.equal(f.calls.cancel, 1);
   f.freshPress('cancel');
   assert.equal(f.calls.cancel, 2);
 });
 
-test('a DOM click before native delivery cannot dispatch an opaque-window press twice', () => {
+test('an unrelated native observation cannot drop a DOM-only click or cause a drag release to activate a button', () => {
   const f = fixture();
   f.status(true);
   f.click('stop');
-  assert.equal(f.calls.stop, 0);
+  assert.equal(f.calls.stop, 1);
   f.nativeDown('stop');
-  f.click('stop');
+  assert.equal(f.calls.stop, 1);
+  f.pointer('stop', 'pointerenter', { buttons: 1 });
+  f.pointer('stop', 'pointerup');
   assert.equal(f.calls.stop, 1);
 });
 

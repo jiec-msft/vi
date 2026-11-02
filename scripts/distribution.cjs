@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const { digest, fileInventory } = require('./distribution-files.cjs');
 const { distributionProvider } = require('./distribution-provider.cjs');
 
@@ -131,6 +131,7 @@ function sealMac(bundle) {
 }
 
 async function main(version, arch) {
+  if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Native distribution verification runs only in isolated CI.');
   distributionVersion(version);
   if (version !== require('../package.json').version) throw new Error('Distribution version must match this source revision.');
   if (!['win32', 'darwin'].includes(process.platform) || process.arch !== arch ||
@@ -211,6 +212,7 @@ async function main(version, arch) {
   fs.writeFileSync(authorityFile, JSON.stringify(authority, null, 2));
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'vi-native-base-'));
   const reports = [];
+  let finalDesktop;
   function smoke(target, targetResources) {
     const appManifest = JSON.parse(fs.readFileSync(path.join(targetResources, 'app', 'package.json')));
     assert.equal(appManifest.version, version);
@@ -262,6 +264,24 @@ async function main(version, arch) {
       const freshExe = process.platform === 'darwin' ? path.join(freshContents, 'MacOS', 'VI') : path.join(freshContents, 'VI.exe');
       architecture(freshExe, arch);
       smoke(freshExe, path.join(freshContents, process.platform === 'darwin' ? 'Resources' : 'resources'));
+      if (process.platform === 'win32') {
+        const env = childEnv(profile);
+        delete env.ELECTRON_RUN_AS_NODE;
+        env.GITHUB_ACTIONS = 'true';
+        env.VI_FIXTURE_PROFILE = profile;
+        const desktop = spawnSync(electronSource.executable, [path.resolve('scripts', 'distribution-desktop.cjs'),
+          '--ci-final-native-delivery', path.join(freshContents, 'resources'), authorityFile],
+        { env, cwd: profile, encoding: 'utf8', windowsHide: true, timeout: 65000, maxBuffer: 262144 });
+        fs.writeFileSync(path.join(output, 'final-desktop.stdout.json'), desktop.stdout || '');
+        fs.writeFileSync(path.join(output, 'final-desktop.stderr.txt'), desktop.stderr || '');
+        assert.equal(desktop.status, 0, `Final extracted native delivery failed (${desktop.error?.code || desktop.signal || desktop.status}).`);
+        finalDesktop = JSON.parse(desktop.stdout.trim());
+        assert.equal(finalDesktop.status, 'passed');
+        assert.equal(finalDesktop.actualFinalHelperReady, true);
+        assert.equal(finalDesktop.actualFinalTargetedPaste, true);
+        assert.equal(finalDesktop.actualMixedClipboardRestored, true);
+        assert.equal(finalDesktop.helperExited, true);
+      }
       if (process.platform === 'darwin') execFileSync('codesign',
         ['--verify', '--deep', '--strict', path.join(extracted, 'VI.app')]);
     } finally { fs.rmSync(extracted, { recursive: true, force: true }); }
@@ -271,7 +291,7 @@ async function main(version, arch) {
       archive: { file: path.basename(zip), bytes: fs.statSync(zip).size, sha256: digest(zip) },
       executableSha256: digest(executable), nativeHeader, archiveWriter, payload: files, reports,
       signature: process.platform === 'darwin' ? 'ad-hoc strict verified before and after archive' : 'unsigned',
-      helperRuntimeExercised: false, headlessOnly: true,
+      helperRuntimeExercised: Boolean(finalDesktop?.actualFinalHelperReady), headlessOnly: !finalDesktop, finalDesktop,
       cleanup: { packagedElectronChildrenExited: true, syntheticProfileRemoved: !fs.existsSync(profile),
         freshExtractionRemoved: !fs.existsSync(extracted) },
       externalDefaultsIncluded: false }, null, 2));

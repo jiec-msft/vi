@@ -56,11 +56,11 @@ public sealed class ClipboardSnapshot : IDisposable {
                 if (Metafile != IntPtr.Zero) DeleteMetaFile(Metafile);
                 GlobalFree(Handle);
             }
-            }
             Handle = IntPtr.Zero; Metafile = IntPtr.Zero;
         }
     }
     readonly List<Item> items = new List<Item>();
+    static Func<uint, IntPtr, IntPtr> write = SetClipboardData;
     static ClipboardPreparationException Fault(string code) {
         return new ClipboardPreparationException(code, Marshal.GetLastWin32Error());
     }
@@ -166,6 +166,11 @@ public sealed class ClipboardSnapshot : IDisposable {
                     if (name.ToString() == "Ole Private Data" || name.ToString() == "DataObject") {
                         previous = format; continue;
                     }
+                    if (name.ToString() == "FileContents" || name.ToString() == "FileGroupDescriptor" ||
+                        name.ToString() == "FileGroupDescriptorW" || name.ToString() == "Embed Source" ||
+                        name.ToString() == "Embedded Object" || name.ToString() == "Link Source") {
+                        throw new ClipboardPreparationException("clipboard-format");
+                    }
                 }
                 if (!(format >= 1 && format <= 17 || format == 129 || format == 130 ||
                     format == 131 || format == 142 || format >= 0xc000)) {
@@ -187,16 +192,22 @@ public sealed class ClipboardSnapshot : IDisposable {
             return snapshot;
         } catch { snapshot.Dispose(); throw; }
     }
-    public void RestoreWhileOpen() {
+    public void RestoreWhileOpen(Action changed) {
         var copies = new List<Item>();
         try {
             foreach (var item in items) copies.Add(Clone(item.Format, item.Handle));
             if (!EmptyClipboard()) throw Fault("restore-failed");
+            changed();
             foreach (var copy in copies) {
-                if (SetClipboardData(copy.Format, copy.Handle) == IntPtr.Zero) throw Fault("restore-failed");
-                copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
+                try {
+                    if (write(copy.Format, copy.Handle) == IntPtr.Zero) throw Fault("restore-failed");
+                    copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
+                } finally { changed(); }
             }
-        } finally { foreach (var copy in copies) copy.Dispose(); }
+        } catch (ClipboardPreparationException) { throw; }
+        catch { throw new ClipboardPreparationException("restore-failed"); }
+        finally { foreach (var copy in copies) copy.Dispose(); }
     }
     public void Dispose() { foreach (var item in items) item.Dispose(); items.Clear(); }
+}
 }

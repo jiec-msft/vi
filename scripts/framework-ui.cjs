@@ -79,7 +79,7 @@ async function overlayPixels(overlay, display) {
   if (!source) throw new Error('Owned overlay primary desktop capture is unavailable.');
   const image = source.thumbnail, size = image.getSize(), data = image.toBitmap();
   const bounds = overlay.getBounds();
-  let dark = 0, light = 0;
+  let dark = 0, light = 0, red = 0, sampled = 0;
   for (let y = bounds.y + 3; y < bounds.y + bounds.height - 3; y++) {
     for (let x = bounds.x + 3; x < bounds.x + bounds.width - 3; x++) {
       const px = Math.floor((x - display.bounds.x) * size.width / display.bounds.width);
@@ -87,11 +87,13 @@ async function overlayPixels(overlay, display) {
       if (px < 0 || py < 0 || px >= size.width || py >= size.height) continue;
       const index = (py * size.width + px) * 4;
       const b = data[index], g = data[index + 1], r = data[index + 2];
+      sampled++;
+      if (r > 200 && g < 60 && b > 20 && b < 90) red++;
       if (r < 70 && g < 80 && b < 100) dark++;
       if (r > 120 && g > 120 && b > 120) light++;
     }
   }
-  return { dark, light, painted: dark > 100 && light > 10 };
+  return { dark, light, red, sampled, bounds, painted: dark > 100 && light > 10 };
 }
 async function verifyWindowsOverlay() {
   if (process.platform !== 'win32') return;
@@ -130,9 +132,15 @@ async function verifyWindowsOverlay() {
     await until(() => !overlay.isVisible(), 'explicit floating hide');
     screen.emit('display-metrics-changed', {}, display, ['workArea']);
     assert.equal(overlay.isVisible(), false, 'Display recovery undid an intentional hide.');
+    let hiddenPixels;
+    await until(async () => {
+      hiddenPixels = await overlayPixels(overlay, display);
+      return !hiddenPixels.painted && hiddenPixels.sampled > 100 &&
+        hiddenPixels.red / hiddenPixels.sampled > 0.9;
+    }, 'physical negative: same rectangle contains the owned red underlay, not the widget');
     await evaluate('window.voice.showFloating()');
     await until(async () => (await overlayPixels(overlay, display)).painted, 'explicit floating show and painted controls');
-    report.overlaySurface = { before, after: await overlayPixels(overlay, display),
+    report.overlaySurface = { before, hidden: hiddenPixels, after: await overlayPixels(overlay, display),
       scope: 'CI-owned Windows desktop capture; synthetic display notification and isolated renderer failure',
       actualHardwareDpiTransitionTested: false };
     report.checks.push('floating-controls-native-desktop-pixels', 'floating-bounds-recovery', 'floating-renderer-recovery-no-focus');
@@ -160,6 +168,26 @@ async function verifyWindowsPaste() {
     assert.equal(clipboard.readText(), 'Owned previous clipboard');
     report.checks.push('actual-native-approved-caret-paste-once', 'actual-native-clipboard-restored');
   } finally { driver.close(); editor.destroy(); }
+}
+async function verifyFloatingDomControls() {
+  if (process.platform !== 'win32') return;
+  const overlay = BrowserWindow.getAllWindows().find((item) => item.webContents.getURL().endsWith('/overlay.html'));
+  for (const [button, outcome] of [['stop', 'done'], ['cancel', 'idle']]) {
+    await click('#toggle');
+    await until(async () => (await status()).phase === 'recording', 'owned recording for floating DOM control');
+    const point = await overlay.webContents.executeJavaScript(`(() => {
+      const r=document.getElementById(${JSON.stringify(button)}).getBoundingClientRect();
+      return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};
+    })()`);
+    // Renderer input intentionally has no corresponding GetAsyncKeyState polling gesture.
+    overlay.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+    overlay.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+    overlay.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+    await until(async () => (await status()).phase === outcome, 'floating DOM-only quick gesture');
+    await overlay.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    assert.equal((await status()).phase, outcome, 'A duplicate floating action restarted recording.');
+  }
+  report.checks.push('floating-dom-only-stop-cancel-no-polling-dependency');
 }
 async function run() {
   assert.equal(process.arch, process.env.VI_EXPECTED_ARCH);
@@ -227,6 +255,7 @@ async function run() {
   await click('#test-mic');
   await until(async () => !(await status()).testingMic && await evaluate('micTest === undefined'), 'microphone-test release');
   report.checks.push('microphone-test-without-network');
+  await verifyFloatingDomControls();
   await record('Fixture final text');
   await click('#copy');
   await until(async () => (await clipboard.readText()) === 'Fixture final text', 'copy result');

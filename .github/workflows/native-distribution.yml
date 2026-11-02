@@ -45,6 +45,10 @@ jobs:
         run: npm test
       - name: Compile native helper on the matching host
         run: node scripts/build-native.cjs
+      - name: Prepare CI-owned Windows desktop for final native delivery
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\prepare-desktop.ps1
       - name: Build, seal, archive and verify the actual neutral executable
         run: node -e "const{spawnSync}=require('node:child_process');const r=spawnSync(process.execPath,['scripts/distribution.cjs',process.env.DISTRIBUTION_VERSION,process.env.DISTRIBUTION_ARCH],{stdio:'inherit'});if(r.error)throw r.error;process.exitCode=r.status===0?0:1;"
       - name: Save neutral bases, provenance and checksums
@@ -70,3 +74,14 @@ jobs:
             artifacts-ci/distribution/SHA256SUMS
           retention-days: 7
           if-no-files-found: error
+      - name: Preserve bounded native delivery failure reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neutral-base-failure-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            artifacts-ci/distribution/windows-toolchain.json
+            artifacts-ci/distribution/final-desktop.stdout.json
+            artifacts-ci/distribution/final-desktop.stderr.txt
+          retention-days: 7
+          if-no-files-found: warn

@@ -14,11 +14,20 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
  readonly List<IntPtr> privateMemory=new List<IntPtr>();
+ public static Func<uint,IntPtr,IntPtr> RealSetter;
+ public static int FailAfter=-1, Writes;
+ public static IntPtr RestoreSetter(uint format,IntPtr data){
+  if(Writes==FailAfter)throw new InvalidOperationException("Controlled restore setter failure.");
+  IntPtr result=RealSetter(format,data);if(result!=IntPtr.Zero)Writes++;return result;
+ }
  [DllImport("user32.dll")]static extern bool OpenClipboard(IntPtr owner);
  [DllImport("user32.dll")]static extern bool CloseClipboard();
  [DllImport("user32.dll")]static extern bool EmptyClipboard();
  [DllImport("user32.dll")]static extern IntPtr SetClipboardData(uint format,IntPtr data);
  [DllImport("user32.dll")]static extern IntPtr GetClipboardData(uint format);
+ [DllImport("user32.dll")]public static extern bool IsClipboardFormatAvailable(uint format);
+ [DllImport("user32.dll")]static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr wparam,IntPtr lparam);
+ public static void RenderAll(IntPtr window){SendMessage(window,0x306,IntPtr.Zero,IntPtr.Zero);}
  [DllImport("user32.dll")]public static extern uint GetClipboardSequenceNumber();
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern uint RegisterClipboardFormat(string name);
  [DllImport("kernel32.dll")]static extern IntPtr GlobalAlloc(uint flags,UIntPtr size);
@@ -102,6 +111,30 @@ try{
         else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Disposal changed the restored Unicode bytes.'}
     }
     $checks.Add('empty-unicode-rich-zero-metadata-native-roundtrip')
+    $ole=[Windows.Forms.DataObject]::new()
+    $ole.SetText('Owned OLE text',[Windows.Forms.TextDataFormat]::UnicodeText)
+    $ole.SetData([Windows.Forms.DataFormats]::Rtf,$false,'{\rtf1 Owned OLE rich text}')
+    $ole.SetData('HTML Format',$false,[IO.MemoryStream]::new($html))
+    [Windows.Forms.Clipboard]::SetDataObject($ole,$true)
+    $transaction=[TranscriptClipboard]::new()
+    try{$transaction.Begin('Approved OLE result');$transaction.Restore()}finally{$transaction.Dispose()}
+    Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned OLE text') 'Actual OLE text producer was not preserved.'
+    Check ([Windows.Forms.Clipboard]::GetDataObject().GetData([Windows.Forms.DataFormats]::Rtf,$false) -eq '{\rtf1 Owned OLE rich text}') 'Actual OLE RTF producer was not preserved.'
+    $checks.Add('actual-managed-ole-rich-producer')
+    $virtual=[Windows.Forms.DataObject]::new()
+    $virtual.SetText('Owned virtual file fallback text')
+    $virtual.SetData('FileGroupDescriptorW',$false,[IO.MemoryStream]::new([byte[]]@(1,0,0,0)))
+    $virtual.SetData('FileContents',$false,[IO.MemoryStream]::new([byte[]]@(1,2,3)))
+    [Windows.Forms.Clipboard]::SetDataObject($virtual,$true)
+    $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+    $transaction=[TranscriptClipboard]::new()
+    try{
+        $failed=$false
+        try{$transaction.Begin('Must not replace virtual file data')}catch{$failed=(Fault-Code $_.Exception) -eq 'clipboard-format'}
+        Check $failed 'Declared OLE virtual-file data did not fail closed.'
+        Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before) 'Rejected OLE producer was modified.'
+    }finally{$transaction.Dispose()}
+    $checks.Add('ole-virtual-file-contract-fails-closed-before-data-access')
     $bitmap=[Drawing.Bitmap]::new(8,8)
     $bitmap.SetPixel(3,3,[Drawing.Color]::FromArgb(255,17,99,201))
     try{
@@ -163,7 +196,51 @@ try{
         try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected deferred restore error.'}
         Start-Sleep -Milliseconds 450
         [TranscriptClipboard]::RecoverPending()
+        Check ([Windows.Forms.Clipboard]::GetText() -eq 'New user copy') 'Busy restore recovery did not restore the full saved text.'
     }finally{$transaction.Dispose()}
     $checks.Add('restore-failure-is-explicit-and-backup-retained')
+    $flags=[Reflection.BindingFlags]'Static,NonPublic'
+    $setter=[ViClipboard.ClipboardSnapshot].GetField('write',$flags)
+    $original=$setter.GetValue($null)
+    [OwnedClipboardFixture]::RealSetter=$original
+    foreach($after in @(0,1)){
+        $fixture.Put([uint32[]]@(13,$format,$rich),[byte[][]]@($text,[byte[]]@(),$html))
+        $transaction=[TranscriptClipboard]::new()
+        try{
+            $transaction.Begin('Approved partial restore fixture')
+            [OwnedClipboardFixture]::FailAfter=$after
+            [OwnedClipboardFixture]::Writes=0
+            $setter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('RestoreSetter')))
+            $failed=$false
+            try{$transaction.Dispose()}catch{$failed=(Fault-Code $_.Exception) -eq 'restore-failed'}
+            Check $failed 'Controlled mid-restore failure did not retain the transaction.'
+            Check ([OwnedClipboardFixture]::Writes -eq $after) 'Restore seam failed at a different mutation boundary.'
+            $sequence=[TranscriptClipboard].GetField('sequence',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($transaction)
+            Check ($sequence -eq [OwnedClipboardFixture]::GetClipboardSequenceNumber()) 'Own partial restoration was not attributed under the lock.'
+            [OwnedClipboardFixture]::RenderAll($transaction.Handle)
+            if($after -eq 0){Check (-not [OwnedClipboardFixture]::IsClipboardFormatAvailable(13)) 'Late rendering reintroduced temporary transcript data.'}
+            else{Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Late rendering changed the restored first format.'}
+            $setter.SetValue($null,$original)
+            [TranscriptClipboard]::RecoverPending()
+            Check ([Convert]::ToBase64String($fixture.Read(13)) -eq [Convert]::ToBase64String($text)) 'Mid-restore recovery lost the original Unicode bytes.'
+            Check ($fixture.Read($format).Length -eq 0) 'Mid-restore recovery lost zero metadata.'
+            Check ([Convert]::ToBase64String($fixture.Read($rich)) -eq [Convert]::ToBase64String($html)) 'Mid-restore recovery lost rich bytes.'
+        }finally{$setter.SetValue($null,$original);$transaction.Dispose()}
+    }
+    $checks.Add('actual-empty-and-first-format-restore-faults-recover-all-original-bytes')
+    $fixture.Put([uint32[]]@(13,$rich),[byte[][]]@($text,$html))
+    $transaction=[TranscriptClipboard]::new()
+    try{
+        $transaction.Begin('Must never be repasted')
+        [OwnedClipboardFixture]::FailAfter=1
+        [OwnedClipboardFixture]::Writes=0
+        $setter.SetValue($null,[Delegate]::CreateDelegate([Func[uint32,IntPtr,IntPtr]],[OwnedClipboardFixture].GetMethod('RestoreSetter')))
+        try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected restore failure.'}
+        $setter.SetValue($null,$original)
+        $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New external copy wins`0")))
+        [TranscriptClipboard]::RecoverPending()
+        Check ([Windows.Forms.Clipboard]::GetText() -eq 'New external copy wins') 'Deferred backup overwrote a genuinely newer external copy.'
+    }finally{$setter.SetValue($null,$original);$transaction.Dispose()}
+    $checks.Add('external-new-copy-wins-after-partial-restore')
     @{status='passed';checks=@($checks);clipboardData='CI-owned synthetic only';inputEventsSent=0}|ConvertTo-Json -Compress
 }finally{$fixture.Dispose()}

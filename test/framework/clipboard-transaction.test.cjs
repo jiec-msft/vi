@@ -13,5 +13,5 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
   { env, encoding: 'utf8', timeout: 20000, maxBuffer: 65536 }));
   assert.equal(report.status, 'passed');
   assert.equal(report.inputEventsSent, 0);
-  assert.equal(report.checks.length, 7);
+  assert.equal(report.checks.length, 11);
 });

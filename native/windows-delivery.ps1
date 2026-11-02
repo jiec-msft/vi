@@ -39,7 +39,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     bool disposed;
     string text;
     uint sequence;
-    bool rendered, renderFailed, began;
+    bool rendered, renderFailed, began, restoring, restoreMutated;
     readonly Stopwatch clock = new Stopwatch();
     long renderedAt;
     long pasteAt = -1;
@@ -71,7 +71,7 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
         }
     }
     void Render() {
-        if (!began || rendered || GetClipboardOwner() != Handle) return;
+        if (!began || restoring || restoreMutated || rendered || GetClipboardOwner() != Handle) return;
         SetBytes(13, Encoding.Unicode.GetBytes(text + "\0"));
         uint reader;
         GetWindowThreadProcessId(GetOpenClipboardWindow(),out reader);
@@ -146,9 +146,19 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
         if (!opened) throw new ClipboardPreparationException("restore-failed", openError);
         try {
             // Check ownership under the same lock as restoration so a newer copy cannot be overwritten.
-            if (GetClipboardOwner() != Handle || GetClipboardSequenceNumber() != sequence) { began = false; return; }
-            saved.RestoreWhileOpen();
-            began = false;
+            if (GetClipboardOwner() != Handle) { began = false; return; }
+            if (GetClipboardSequenceNumber() != sequence) throw new ClipboardPreparationException("restore-failed");
+            restoring = true;
+            try {
+                saved.RestoreWhileOpen(() => {
+                    restoreMutated = true;
+                    sequence = GetClipboardSequenceNumber();
+                });
+                began = false;
+            } finally {
+                sequence = GetClipboardSequenceNumber();
+                restoring = false;
+            }
         } finally { CloseClipboard(); }
     }
     public void Dispose() {

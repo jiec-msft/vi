@@ -13,6 +13,12 @@ settings 的 Show floating controls 或 tray 菜单显式恢复。
 不记录其它窗口标题、全局光标或内容。Native `IsVisible`/topmost/bounds
 不是实际像素证据；opaque surface 和这些 recovery path 的改变，也不等于
 已证明某次历史窗口消失的唯一 compositor 原因。
+Stop/Cancel 以 DOM pointerup/click 为唯一 action stream，不再把 polling
+observer 的 ready 当作“必然会收到每次 press”。同一 pointerup 的后续 click
+只消费该 DOM gesture，下一次 pointerdown 开新 gesture，无时间窗去重；
+只有 mouse-down 被非激活窗口吞掉时，已 hover 的 pointerup 仍可完成首击。
+native polling 仅保留 drag fallback，不再与 DOM 各自派发 Stop/Cancel。
+真实物理首击与完整 quick press 仍须 native CI 证明，不能靠伪造 nativeDown。
 
 Windows paste 在同一个 clipboard lock 内枚举并建立原生 backup，不再依赖
 managed OLE 数据投影/反序列化。已知 bitmap/metafile/palette 按原生类型
@@ -22,6 +28,10 @@ clone；Unicode、rich formats、streams、registered HGLOBAL metadata 保留
 用户格式仍须保留。owner-specific/non-HGLOBAL/不可保留格式明确失败，不
 清空原剪贴板继续粘贴。上限为 256 formats、单项 64 MiB、总 backup
 256 MiB；超限同样保留 preview，不进行不安全的部分 snapshot。
+此规则不宣称 universal OLE restore。真实 managed OLE text/RTF/HTML producer
+有单独 fixture；virtual-file `FileContents`/descriptor、embedded/link-source
+等依赖 stream/storage contract 的格式，明确在读取 payload 前拒绝，不把
+一个 HGLOBAL 或跳过 bookkeeping 当作支持全部第三方 OLE 的证据。
 
 恢复时在同一 lock 内重新检查 owner/sequence，再交还 clone；用户的新 copy
 优先。恢复被暂时阻塞时，helper 保留一个 bounded backup，在下一命令前
@@ -29,6 +39,11 @@ clone；Unicode、rich formats、streams、registered HGLOBAL metadata 保留
 访问时不能保证恢复完成，必须报告错误，不宣称成功。busy、unpreservable
 format、snapshot failure、changed 和 restore failure 分开；只有实际 API
 返回的 Win32 code 才记录，0 不作为具体 Windows 故障证据。
+EmptyClipboard 和每个 restore setter（包括失败）都在同一个 lock 内更新
+本 transaction 的 sequence。部分 restore 是自己的 mutation，不能当作
+新的 user copy 丢弃 backup；未确认的 same-owner sequence drift 也保留
+backup 并报错。fixture 在清空后、首个 format 后注入失败，验证完整原始
+bytes 恢复、late render 不重写 transcript，以及 genuinely new copy 优先。
 
 Targeted paste 仍经过原有 focus/secure-field/modifier/IME guards，只发送一次
 批准后的结果，不替换整个字段。失败后 approved preview 保留。Auto-copy
@@ -37,14 +52,19 @@ Targeted paste 仍经过原有 focus/secure-field/modifier/IME guards，只发�
 完整 0.6.4 必须是同源、同版本的三个真实目标：
 `VI-0.6.4-windows-x64.zip`、`VI-0.6.4-windows-arm64.zip`、
 `VI-0.6.4-macos-arm64.zip`。UI/About/tray 显示 runtime architecture，
-`distribution-info.json` 保存版本、target 和 source，不能给旧包改名代替。
+`distribution-info.json` 明确为五个字段：`version`、`platform`、
+`architecture`、`target`、`sourceRevision`；旧 `build-info.json` 仍为两字段。
+不能给旧包改名代替。
 
 CI-only Windows fixture 使用实际 transaction 类测试 empty/Unicode/rich/
 image/zero metadata、暂时/持续占用、不可保留格式、新 copy、early reader
 和 restore failure；没有向真实用户字段发送输入。framework UI 另用 owned
 editor 验证实际 caret 单次粘贴与 clipboard restore；浮窗检查从原生 desktop
 capture 验证实际 controls pixels、受控越界/resize、renderer failure 及主动
-Hide/Show，不把 `isVisible` mock 当成完整验收。display notification 是
+Hide/Show，不把 `isVisible` mock 当成完整验收。Hide 的物理负对照必须在
+同一 rectangle 捕获超过 90% 的 CI-owned red underlay，并让同一 painted
+predicate 返回 false；不能用黑图、无 capture 或 window flag 代替。
+display notification 是
 synthetic seam，不宣称真实硬件 DPI/monitor/RDP/compositor incident 已复现。
 这些新 gates 需要在 Windows x64/ARM64 CI 实际运行；旧 head 的 green
 packaging receipts 不证明本功能修复通过，也不授权本机交互测试或发布。
@@ -256,10 +276,17 @@ PowerShell 的八位十六进制 `0xf0000000` 是有符号 Int32 负数，不能
 进程 cwd/profile 独立，module/preload/credential environment 不继承，
 模块来源逐文件与 bundle 内 provider inventory 比较。fresh native archive
 解包后重复该检查，保存 archive SHA256、source revision、架构、helper/
-payload 文件 hash、原始来源与 cleanup receipt。此 headless gate 不证明
-GUI、TCC、硬件麦克风、notarization 或下游组合后的全部 native 行为。
-Windows PowerShell helper 与 macOS compiled helper 的 bytes/架构被记录，
-但此 manual headless gate 不启动 desktop helper；receipt 明确标为未执行。
+payload 文件 hash、原始来源与 cleanup receipt。Windows 另有最终解包
+native-delivery gate：matching、hash-pinned generic Electron host 加载实际
+final package 的 DesktopInput/NativeDelivery 模块，验证所有模块与 native
+PS/CS 的 final-path/hash 来源，执行实际 helper Add-Type/ready/capture，
+再向唯一 owned editor 做 caret 单次粘贴并恢复 text/HTML clipboard。
+这属于明确的 final-module/native-path equivalent gate，不冒称启动了最终
+app main；raw stdout/stderr 和实际 helper exit 保存，失败阻断 producer。
+Windows receipt 的 helperRuntimeExercised 只在此 gate 真正通过后为 true。
+macOS 保持 strict signing/ditto/headless provider gate，不把 compiled helper
+bytes 记录当作已执行；headlessOnly/helperRuntimeExercised 继续如实区分。
+以上都不证明真实用户 GUI/TCC/硬件麦克风、notarization 或所有下游行为。
 三个同版本 native bases、各自 receipts 与下游配置/下载校验未齐全前，
 不能称为完整三平台 release。
 
