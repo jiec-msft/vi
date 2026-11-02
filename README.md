@@ -523,6 +523,17 @@ native-delivery gate：matching、hash-pinned generic Electron host 加载实际
 final package 的 DesktopInput/NativeDelivery 模块，验证所有模块与 native
 PS/CS 的 final-path/hash 来源，执行实际 helper Add-Type/ready/capture，
 再向唯一 owned editor 做 caret 单次粘贴并恢复 text/HTML clipboard。
+rich clipboard fixture 使用 Electron 45 的实际 MIME API：单次原子
+`clipboard.write([new ClipboardItem(...)])` 同时提供 `text/plain` 与 `text/html`，
+不使用旧 `{text,html}` dictionary、`readHTML()` 或两次覆盖式 write。
+两个 readback 都通过 `clipboard.read()` 的同一单项 ClipboardItem，先要求两种
+MIME 齐全，再取各自 Blob 的完整 bytes；种子内容须真实存在，native 单次 paste
+之后两种表示的 bytes 必须与原 snapshot 完全相同，不能只比较 plain text、
+decode 后相同或用 dummy HTML 绕过恢复 gate。见 [ClipboardItem](https://www.electronjs.org/docs/latest/api/clipboard-item)。
+final fixture 同样在真实 helper READY 后复用既有 5 s owned-foreground setup，
+再核对 editor 的 native PID／精确 HWND／textarea renderer-ready；不依赖启动
+helper 之前的一次 focus。CI setup helpers 在 final-module cache baseline 前加载，
+不混入或替代实际 final payload 的模块 hash 来源。
 这属于明确的 final-module/native-path equivalent gate，不冒称启动了最终
 app main；raw stdout/stderr 和实际 helper exit 保存，失败阻断 producer。
 最终 host 的单次启动在 argv 中提前指定同一个 isolated user-data directory。

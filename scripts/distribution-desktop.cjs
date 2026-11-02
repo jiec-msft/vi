@@ -1,5 +1,7 @@
 const fs = require('node:fs');
 const { FinalDesktopLifecycle, stages } = require('./distribution-desktop-lifecycle.cjs');
+const { writeMixedClipboard, readMixedClipboard } = require('./distribution-clipboard.cjs');
+const { acquireOwnedForeground } = require('./owned-foreground.cjs');
 const report = { status: 'failed', scope: 'final-extracted-module/native-path on matching generic Electron host',
   appMainExercised: false, actualUserApplicationUsed: false, microphoneUsed: false, externalServiceCalled: false };
 let driver, editor, timer, app;
@@ -21,7 +23,7 @@ function progress(stage) {
 lifecycle.publish('js-entry');
 const electron = require('electron');
 app = electron.app;
-const { BrowserWindow, clipboard } = electron;
+const { BrowserWindow, clipboard, ClipboardItem } = electron;
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
@@ -78,20 +80,24 @@ async function run() {
   editor = new BrowserWindow({ width: 500, height: 300, title: 'VI owned final delivery fixture',
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   await editor.loadURL('data:text/html,<textarea aria-label="Owned fixture" style="width:95%;height:90%"></textarea>');
-  editor.show(); editor.focus();
+  editor.show();
   await editor.webContents.executeJavaScript(`(() => {
     const field=document.querySelector('textarea');field.value='Prefix  Suffix';field.focus();field.setSelectionRange(7,7);
   })()`);
   progress('editor-ready');
-  await clipboard.write({ text: 'Owned original clipboard', html: '<b>Owned original rich clipboard</b>' });
-  const original = { text: await clipboard.readText(), html: await clipboard.readHTML() };
-  assert.equal(original.text, 'Owned original clipboard');
-  assert.match(original.html, /<b>Owned original rich clipboard<\/b>/);
+  await writeMixedClipboard(clipboard, ClipboardItem);
+  const original = await readMixedClipboard(clipboard);
+  assert.equal(original.text.toString('utf8'), 'Owned original clipboard');
+  assert.match(original.html.toString('utf8'), /<b>Owned original rich clipboard<\/b>/);
   await driver.warmup();
   report.actualFinalHelperReady = true;
   report.helperPid = driver.driver.process.pid;
   progress('helper-ready');
-  const target = await driver.capture();
+  report.focusAcquisition = { budgetMs: 5000, attempts: 0 };
+  const target = await acquireOwnedForeground({ driver, window: editor, ownerPid: process.pid,
+    rendererReady: async () => BrowserWindow.getFocusedWindow() === editor && !editor.webContents.isLoading() &&
+      await editor.webContents.executeJavaScript("document.hasFocus() && document.activeElement.tagName === 'TEXTAREA'"),
+    onAttempt: (value) => Object.assign(report.focusAcquisition, value) });
   assert.equal(target.pid, process.pid, 'Only the CI-owned editor may receive this paste.');
   assert.equal(target.window, editor.getNativeWindowHandle().readBigUInt64LE().toString(),
     'Native target must match the CI-owned final editor HWND.');
@@ -99,7 +105,7 @@ async function run() {
   assert.equal(await driver.paste('Approved final fixture', target), true);
   await until(async () => await editor.webContents.executeJavaScript("document.querySelector('textarea').value") ===
     'Prefix Approved final fixture Suffix', 'one caret paste with unchanged prefix/suffix');
-  assert.deepEqual({ text: await clipboard.readText(), html: await clipboard.readHTML() }, original);
+  assert.deepEqual(await readMixedClipboard(clipboard), original);
   report.actualFinalTargetedPaste = true;
   report.actualMixedClipboardRestored = true;
   progress('paste-verified');
