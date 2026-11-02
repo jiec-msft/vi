@@ -31,7 +31,7 @@ async function run() {
   report.hostExecutableSha256 = createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex');
   assert.equal(report.hostExecutableSha256, authority.electronSourceExecutableSha256);
   report.nativeSources = {};
-  for (const name of ['windows-delivery.ps1', 'windows-clipboard-snapshot.cs', 'windows-input.ps1', 'windows-diagnostics.ps1']) {
+  for (const name of ['windows-delivery.ps1', 'windows-clipboard-snapshot.cs', 'windows-input.ps1', 'windows-diagnostics.ps1', 'windows-bootstrap.ps1']) {
     const sha256 = createHash('sha256').update(fs.readFileSync(path.join(nativeRoot, name))).digest('hex');
     assert.equal(sha256, authority.sourceFiles[`native/${name}`].sha256);
     report.nativeSources[name] = sha256;

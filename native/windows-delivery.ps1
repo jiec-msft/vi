@@ -1,6 +1,6 @@
 param([string] $DiagnosticsDirectory = '', [string] $DiagnosticRun = '', [int] $DiagnosticGeneration = 0, [int] $DiagnosticParent = 0)
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-diagnostics.ps1')
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))
 [ViNativeDiagnostics]::Configure($DiagnosticsDirectory, $DiagnosticRun, 'delivery', $DiagnosticGeneration, $DiagnosticParent, $false)
 [ViNativeDiagnostics]::Record('compile', 'begin', 0)
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
@@ -146,11 +146,11 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             opened = OpenClipboard(Handle);
             if (!opened) { openError = Marshal.GetLastWin32Error(); Application.DoEvents(); Thread.Sleep(20); }
         }
-        if (!opened) throw new ClipboardPreparationException("restore-failed", openError);
+        if (!opened) throw new ClipboardPreparationException("restore-failed", openError, "restore-open");
         try {
             // Check ownership under the same lock as restoration so a newer copy cannot be overwritten.
             if (GetClipboardOwner() != Handle) { began = false; return; }
-            if (GetClipboardSequenceNumber() != sequence) throw new ClipboardPreparationException("restore-failed");
+            if (GetClipboardSequenceNumber() != sequence) throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence");
             restoring = true;
             try {
                 saved.RestoreWhileOpen(() => {
@@ -217,6 +217,8 @@ Write-ViStartup 'protocol-ready'
 while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
     $request = $null
     $script:failureCheck = $null
+    $script:clipboardErrorStage = 'unspecified'
+    $script:clipboardErrorFormat = 0
     $script:clipboardErrorNumber = 0
     $script:pasteRequested = $false
     try {
@@ -245,6 +247,8 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
                         while($fault.InnerException){$fault=$fault.InnerException}
                         if($fault -is [ViClipboard.ClipboardPreparationException]){
                             $script:clipboardErrorNumber=$fault.NativeCode
+                            $script:clipboardErrorStage=$fault.Stage
+                            $script:clipboardErrorFormat=$fault.Format
                             throw $fault.Code
                         }
                         throw 'native-error'
@@ -267,7 +271,11 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
                     try { $transaction.Dispose() } catch {
                         $fault=$_.Exception
                         while($fault.InnerException){$fault=$fault.InnerException}
-                        if($fault -is [ViClipboard.ClipboardPreparationException]){$script:clipboardErrorNumber=$fault.NativeCode}
+                        if($fault -is [ViClipboard.ClipboardPreparationException]){
+                            $script:clipboardErrorNumber=$fault.NativeCode
+                            $script:clipboardErrorStage=$fault.Stage
+                            $script:clipboardErrorFormat=$fault.Format
+                        }
                         throw 'restore-failed'
                     }
                 }
@@ -283,12 +291,15 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         if($fault -is [ViClipboard.ClipboardPreparationException]){
             $code=$fault.Code
             $script:clipboardErrorNumber=$fault.NativeCode
+            $script:clipboardErrorStage=$fault.Stage
+            $script:clipboardErrorFormat=$fault.Format
         }
         [ViNativeDiagnostics]::Record([string]$request.action, 'failure', $script:clipboardErrorNumber)
         if ($code -notin @('window-order','target-changed','secure-field','no-input','clipboard-changed','clipboard-unavailable',
             'clipboard-busy','clipboard-format','clipboard-snapshot-failed',
             'modifiers-held','composition-active','paste-unconfirmed','restore-failed')) { $code = 'native-error' }
         @{ id = $request.id; ok = $false; code = $code; errorNumber=$script:clipboardErrorNumber;
+            clipboardStage=$script:clipboardErrorStage; clipboardFormat=$script:clipboardErrorFormat;
             pasteRequested=$script:pasteRequested; check = $script:failureCheck } | ConvertTo-Json -Compress
     }
 }

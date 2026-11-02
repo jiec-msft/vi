@@ -8,10 +8,11 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 test('owned native actor environment does not inherit a Core module path or mutate its caller', () => {
-  const base = { PSModulePath: 'synthetic-core-modules', psMODULEpath: 'synthetic-override', KEEP: 'owned' };
+  const base = { SystemRoot: 'C:\\Windows', PSModulePath: 'synthetic-core-modules', psMODULEpath: 'synthetic-override', KEEP: 'owned' };
   const request = { generation: 1, requestId: 'owned', requestSequence: 1, requestNonce: 'owned', callerPid: 42 };
   const env = requestEnvironment(request, base);
-  assert.ok(!Object.keys(env).some((key) => key.toUpperCase() === 'PSMODULEPATH'));
+  assert.deepEqual(Object.keys(env).filter((key) => key.toUpperCase() === 'PSMODULEPATH'), ['PSModulePath']);
+  assert.equal(env.PSModulePath, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
   assert.equal(env.KEEP, 'owned');
   assert.equal(env.VI_CI_NATIVE_CALLER_PID, '42');
   assert.equal(base.PSModulePath, 'synthetic-core-modules');

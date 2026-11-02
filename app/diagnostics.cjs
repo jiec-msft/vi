@@ -123,7 +123,11 @@ class Diagnostics {
       if (Number.isInteger(data[key]) && Math.abs(data[key]) <= 100000) entry[key] = data[key];
     }
     if (components.has(data.component)) entry.component = data.component;
-    if (['script-entry', 'diagnostics-ready', 'input-begin', 'input-ready', 'forms-ready',
+    if (['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write'].includes(data.clipboardStage)) {
+      entry.clipboardStage = data.clipboardStage;
+      if (Number.isInteger(data.clipboardFormat) && data.clipboardFormat >= 0 && data.clipboardFormat <= 65535) entry.clipboardFormat = data.clipboardFormat;
+    }
+    if (['host-entry', 'inbox-ready', 'script-entry', 'diagnostics-ready', 'input-begin', 'input-ready', 'forms-ready',
       'clipboard-ready', 'pointer-ready', 'protocol-ready', 'ci-attest-begin', 'ci-attest-end'].includes(data.startupStage)) {
       entry.startupStage = data.startupStage;
       if ([4, 8].includes(data.pointerBytes)) entry.pointerBytes = data.pointerBytes;

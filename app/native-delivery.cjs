@@ -34,10 +34,15 @@ class NativeDelivery {
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
+        const clipboardStage = ['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write']
+          .includes(reply.clipboardStage) ? reply.clipboardStage : undefined;
+        const clipboardFormat = clipboardStage && Number.isInteger(reply.clipboardFormat) && reply.clipboardFormat >= 0 && reply.clipboardFormat <= 65535
+          ? reply.clipboardFormat : undefined;
         if (pending.action !== 'held' || !reply.ok || performance.now() - pending.started > 250) {
           this.trace.emit('reply', { action: pending.action, requestId: pending.id,
             spanMs: Math.round(performance.now() - pending.started), ...(reply.ok ? {} : { fault: 'native-error' }),
-            ...(Number.isInteger(reply.errorNumber) ? { errorNumber: reply.errorNumber } : {}) });
+            ...(Number.isInteger(reply.errorNumber) ? { errorNumber: reply.errorNumber } : {}),
+            ...(clipboardStage ? { clipboardStage, clipboardFormat } : {}) });
         }
         if (reply.ok) pending.resolve(reply.value);
         else pending.reject(Object.assign(new Error({
@@ -62,6 +67,7 @@ class NativeDelivery {
           pasteRequested: reply.pasteRequested === true,
           errorNumber: Number.isInteger(reply.errorNumber) && reply.errorNumber >= 0 && reply.errorNumber <= 2147483647
             ? reply.errorNumber : undefined,
+          clipboardStage, clipboardFormat,
           check: ['foreground-window', 'foreground-process', 'accessible-focus', 'native-focus'].includes(reply.check)
             ? reply.check : undefined }));
       } catch {

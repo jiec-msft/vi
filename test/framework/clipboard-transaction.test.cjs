@@ -2,12 +2,12 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { nativeHelperEnvironment } = require('../../app/native-diagnostics.cjs');
 
 test('real Windows clipboard transaction preserves owned mixed formats and concurrent copies', {
   skip: process.platform !== 'win32',
 }, () => {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.toUpperCase() === 'PSMODULEPATH') delete env[key];
+  const env = nativeHelperEnvironment();
   let output;
   try { output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-File',
     path.resolve('test', 'framework', 'fixtures', 'clipboard-transaction.ps1'), '-Source', path.resolve('native')],
@@ -15,7 +15,9 @@ test('real Windows clipboard transaction preserves owned mixed formats and concu
   catch (error) {
     const stages = String(error.stderr || '').split(/\r?\n/).filter((line) =>
       /^VI_CLIP_STAGE (engine \d+ [48] \d+|forms-ready|transaction-compiled|fixture-compiled|case \d{1,2})$/.test(line)).slice(-32);
-    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages,
+    const faults = String(error.stderr || '').split(/\r?\n/).filter((line) =>
+      /^VI_CLIP_FAILURE (operation|cleanup) case=\d{1,2} code=(fixture-assertion|[a-z-]+)( stage=[a-z-]+ format=\d{1,5} nativeError=-?\d{1,10})?$/.test(line)).slice(-8);
+    console.error(JSON.stringify({ scope: 'native-clipboard-fixture', stages, faults,
       timedOut: error.code === 'ETIMEDOUT', status: error.status, signal: error.signal }));
     throw error;
   }

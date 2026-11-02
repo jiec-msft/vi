@@ -1,6 +1,10 @@
 param([Parameter(Mandatory=$true)][string]$Source)
 $ErrorActionPreference='Stop'
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+    throw 'Owned clipboard transactions require an isolated GitHub-hosted Windows runner.'
+}
 [Console]::Error.WriteLine("VI_CLIP_STAGE engine $PID $([IntPtr]::Size) $($PSVersionTable.PSVersion.Major)")
+. ([IO.Path]::Combine($Source, 'windows-bootstrap.ps1'))
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 [Console]::Error.WriteLine('VI_CLIP_STAGE forms-ready')
 $file=[IO.File]::ReadAllText((Join-Path $Source 'windows-delivery.ps1'))
@@ -140,6 +144,14 @@ function Fault-Code($Exception){
     if($Exception -is [ViClipboard.ClipboardPreparationException]){return $Exception.Code}
     throw $Exception
 }
+function Report-TransactionFault([string]$Phase,$Exception){
+    while($Exception.InnerException){$Exception=$Exception.InnerException}
+    if($Exception -is [ViClipboard.ClipboardPreparationException]){
+        [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=$($Exception.Code) stage=$($Exception.Stage) format=$($Exception.Format) nativeError=$($Exception.NativeCode)")
+    }else{
+        [Console]::Error.WriteLine("VI_CLIP_FAILURE $Phase case=$([OwnedClipboardFixture]::CaseId) code=fixture-assertion")
+    }
+}
 function Read-Mixed($Fixture,$Metadata,$Rich){
     return @{
         text=[Convert]::ToBase64String($Fixture.Read(13))
@@ -217,7 +229,25 @@ try{
     $ole.SetData('HTML Format',$false,[IO.MemoryStream]::new($html))
     [Windows.Forms.Clipboard]::SetDataObject($ole,$true)
     $transaction=[TranscriptClipboard]::new()
-    try{$transaction.Begin('Approved OLE result');$transaction.Restore()}finally{$transaction.Dispose()}
+    $operationFailure=$null
+    try{
+        $transaction.Begin('Approved OLE result')
+        $transaction.Restore()
+    }catch{
+        $operationFailure=$_.Exception
+        Report-TransactionFault 'operation' $operationFailure
+        throw
+    }finally{
+        try{$transaction.Dispose()}catch{
+            $cleanupFailure=$_.Exception
+            Report-TransactionFault 'cleanup' $cleanupFailure
+            if($operationFailure){
+                throw [AggregateException]::new('Owned transaction operation and cleanup both failed.',
+                    [Exception[]]@($operationFailure,$cleanupFailure))
+            }
+            throw
+        }
+    }
     Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned OLE text') 'Actual OLE text producer was not preserved.'
     Check ([Windows.Forms.Clipboard]::GetDataObject().GetData([Windows.Forms.DataFormats]::Rtf,$false) -eq '{\rtf1 Owned OLE rich text}') 'Actual OLE RTF producer was not preserved.'
     $checks.Add('actual-managed-ole-rich-producer')

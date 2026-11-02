@@ -94,6 +94,29 @@ pointer 重启上限 3 次及既有 CI budgets 不变。helper 在加载 diagnos
 fixture 另记录 engine/assembly/transaction/owned-fixture/case 边界，超时保留这些
 标量证据。没有 marker 只表示尚未观察到该边界，不能归因为 host noise 或某个 API。
 CI actor 子进程同样隔离 inherited `PSModulePath`，不改调用者或要求用户安装 Core。
+隔离不是简单删除该变量后依赖默认搜索：child environment 固定到 Windows inbox
+module directory，bootstrap 用实际 `$PSHOME\Modules` 的完整 manifest 路径导入
+Management/Utility，再禁用隐式 module autoload。bootstrap 之前只用 .NET path
+组合，不先调用尚未加载的 `Join-Path`。这避免 Core/user/all-users module
+discovery 影响内部 helper；不修改用户、父进程或 registry。规则依据
+[Windows PowerShell 模块路径构造契约](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath?view=powershell-5.1)，
+但不能仅凭原先空 stderr 或某次超时就断定历史根因。
+
+`Windows native startup comparison (nonrelease)` 是单独的有限诊断，不是发布：
+由维护者 push `ci/windows-native-probe` 或在 workflow 注册后手动触发。
+ARM 的 inherited、deleted、inbox-autoload 和 candidate 各用独立 hosted VM，
+另有 x64 candidate，共五格、每格 3 min；不在同一个 runner 依次预热后冒充对照。
+control 只做 8 s assembly/cmdlet/type probe，失败如实使该格失败。candidate 首先
+启动真实生产 `NativeDelivery`，保留原始 20 s READY deadline，再运行实际 clipboard、
+native-diagnostics、native-types selectors。CI-only observer 在 5 s 内核对该 helper
+的真实 PID/parent/creation/image/PE machine；该观察与 readiness 重叠，会明确记录，
+不宣称 uncached OS/disk 或最终 app GUI 测试。只准备源码不等于已执行此比较。
+
+恢复失败新增固定 `restore-open/sequence/copy/empty/write` stage、numeric format
+和实际 Win32 code，绝不记录 format names/bytes。OLE roundtrip 的 operation
+与 Dispose 异常分别保留；两者都失败时保留 aggregate，而不是用 cleanup 覆盖
+原始故障。没有证明的 restore failure 仍使 fixture/CI 失败：不会吞错、跳过 OLE、
+放宽 owner/sequence 检查、释放 pending backup 或再次发送 paste。
 
 Windows UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/focus 状态；
 每个 overlay recovery 边界仍须由真实 native capture 确认 foreground PID/HWND
@@ -101,6 +124,7 @@ Windows UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/
 必须在按住及 native suspension 期间保持 recording 且零 action，实际释放后
 恰好提交一次，后续 fresh gesture 仍可用。native polling 不重新成为按钮事件源。
 owned-desktop wrapper 保留 PID/desktop 匹配的 bounded startup progress；
+progress 写入 wrapper 实际读取的 desktop receipt directory，而非相邻 evidence root；
 helper/attestor/renderer readiness 未完成时仍失败，不接受仅启动进程作为 READY。
 这些阶段证据与 CI 生成脚本的源文件重定位修正，都不等于已证明 ARM 冷启动
 或真实用户历史浮窗问题修复；仍需 exact-head native CI 和最终包 gates。

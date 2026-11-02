@@ -22,7 +22,7 @@ test('Windows delivery helper compiles and answers readiness without desktop or 
     try { assert.deepEqual(await driver.request('ready'), { ready: true }); }
     catch (error) {
       console.error(JSON.stringify({ scope: 'cold-native-readiness', startup: driver.trace.startup,
-        launcherArchitecture: process.arch, executable: 'powershell.exe', childModulePathOverride: false,
+        launcherArchitecture: process.arch, executable: 'powershell.exe', childModulePath: 'windows-inbox',
         stderrBytes: driver.trace.stderrBytes, stderrClasses: [...driver.trace.stderrClasses] }));
       throw error;
     }
@@ -33,7 +33,8 @@ test('Windows pointer sampler cancels unavailable input once and never resumes a
   { skip: process.platform !== 'win32' }, () => {
     const source = readFileSync(path.resolve('native', 'windows-overlay.ps1'), 'utf8');
     const type = source.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
-    const script = `$ErrorActionPreference = 'Stop'\nAdd-Type -TypeDefinition @'\n${type}\n'@\n` + `
+    const bootstrap = path.resolve('native', 'windows-bootstrap.ps1').replaceAll("'", "''");
+    const script = `$ErrorActionPreference = 'Stop'\n. '${bootstrap}'\nAdd-Type -TypeDefinition @'\n${type}\n'@\n` + `
 $mouse = New-Object OverlayMouse
 if ($mouse.Sample($false, $true, 100, 200) -ne '{"type":"ready"}') { throw 'Initial readiness missing.' }
 if ($mouse.Sample($true, $true, 100, 200) -notmatch '"type":"down"') { throw 'Press missing.' }

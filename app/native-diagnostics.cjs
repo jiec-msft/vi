@@ -1,6 +1,7 @@
 const { performance } = require('node:perf_hooks');
 const { safeError } = require('./diagnostics.cjs');
-const startupStages = new Set(['script-entry', 'diagnostics-ready', 'input-begin', 'input-ready',
+const path = require('node:path');
+const startupStages = new Set(['host-entry', 'inbox-ready', 'script-entry', 'diagnostics-ready', 'input-begin', 'input-ready',
   'forms-ready', 'clipboard-ready', 'pointer-ready', 'protocol-ready', 'ci-attest-begin', 'ci-attest-end']);
 function parseNativeStartup(line, pid) {
   const match = /^VI_STARTUP ([a-z-]+) ([1-9]\d{0,9}) ([48]) ([1-9]\d?) (Desktop|Core|unknown)$/.exec(line);
@@ -91,6 +92,15 @@ class NativeTrace {
 function nativeHelperEnvironment(supplied = process.env) {
   const env = { ...supplied };
   for (const name of Object.keys(env)) if (name.toUpperCase() === 'PSMODULEPATH') delete env[name];
+  const root = Object.entries(env).find(([name]) => name.toUpperCase() === 'SYSTEMROOT')?.[1];
+  if (root !== undefined) {
+    if (typeof root !== 'string' || !/^[a-z]:[\\/]/i.test(root) || !path.win32.isAbsolute(root)) {
+      throw new Error('The native Windows system root must be a drive-qualified absolute path.');
+    }
+    env.PSModulePath = path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  } else if (process.platform === 'win32') {
+    throw new Error('The native Windows system root is unavailable.');
+  }
   return env;
 }
 

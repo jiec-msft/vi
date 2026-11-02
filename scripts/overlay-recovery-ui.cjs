@@ -56,7 +56,7 @@ let startupPublications = 0;
 function startupCheckpoint(phase) {
   if (!expectedDesktop) return;
   assert.ok(++startupPublications <= 96, 'Owned startup progress publication bound exceeded.');
-  const file = path.join(directory, 'startup-progress.json');
+  const file = path.join(desktopReceipt, 'startup-progress.json');
   writeFileSync(`${file}.tmp`, JSON.stringify({ pid: process.pid, caseId: expectedDesktop, phase,
     at: Date.now(), ticks: process.hrtime.bigint().toString(),
     helpers: report.helpers.map(({ pid, role, generation, startup, events }) => ({
@@ -312,7 +312,7 @@ async function run() {
     }
 `;
     assert.ok(original.includes('if (!GetCursorPos(out point))'));
-    let injected = original.replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+    let injected = original.replace("([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))", quote(path.resolve('native', 'windows-diagnostics.ps1')))
       .replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
@@ -349,7 +349,7 @@ async function run() {
       await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
         .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
-        .replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+        .replace("([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))", quote(path.resolve('native', 'windows-diagnostics.ps1')))
         .replace("(Join-Path $PSScriptRoot 'windows-clipboard-snapshot.cs')", quote(path.resolve('native', 'windows-clipboard-snapshot.cs')))
         .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
           '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))')

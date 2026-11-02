@@ -11,7 +11,10 @@ test('auto-copy cannot overwrite a concurrent user copy after targeted delivery,
   assert.equal(autoCopyPreview({ autoCopy: false }), false);
 });
 test('Windows helper environment restores native module resolution without changing user or parent state', () => {
-  const parent = { PATH: 'owned-path', PSModulePath: 'foreign-runtime', PSMODULEPATH: 'other-runtime' };
-  assert.deepEqual(nativeHelperEnvironment(parent), { PATH: 'owned-path' });
+  const parent = { SystemRoot: 'C:\\Windows', PATH: 'owned-path', PSModulePath: 'foreign-runtime', PSMODULEPATH: 'other-runtime' };
+  assert.deepEqual(nativeHelperEnvironment(parent), { SystemRoot: 'C:\\Windows', PATH: 'owned-path',
+    PSModulePath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules' });
   assert.equal(parent.PSModulePath, 'foreign-runtime');
+  assert.throws(() => nativeHelperEnvironment({ SystemRoot: 'relative' }), /absolute/);
+  assert.throws(() => nativeHelperEnvironment({ SystemRoot: '\\\\untrusted\\modules' }), /absolute/);
 });

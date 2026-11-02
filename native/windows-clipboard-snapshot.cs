@@ -7,8 +7,10 @@ using System.Text;
 public sealed class ClipboardPreparationException : Exception {
     public readonly string Code;
     public readonly int NativeCode;
-    public ClipboardPreparationException(string code, int nativeCode = 0) : base(code) {
-        Code = code; NativeCode = nativeCode;
+    public readonly string Stage;
+    public readonly uint Format;
+    public ClipboardPreparationException(string code, int nativeCode = 0, string stage = "unspecified", uint format = 0) : base(code) {
+        Code = code; NativeCode = nativeCode; Stage = stage; Format = format;
     }
 }
 
@@ -194,18 +196,28 @@ public sealed class ClipboardSnapshot : IDisposable {
     }
     public void RestoreWhileOpen(Action changed) {
         var copies = new List<Item>();
+        string stage = "restore-copy";
+        uint format = 0;
         try {
-            foreach (var item in items) copies.Add(Clone(item.Format, item.Handle));
-            if (!EmptyClipboard()) throw Fault("restore-failed");
+            foreach (var item in items) { format = item.Format; copies.Add(Clone(item.Format, item.Handle)); }
+            format = 0;
+            stage = "restore-empty";
+            if (!EmptyClipboard()) throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), stage);
             changed();
+            stage = "restore-write";
             foreach (var copy in copies) {
+                format = copy.Format;
                 try {
-                    if (write(copy.Format, copy.Handle) == IntPtr.Zero) throw Fault("restore-failed");
+                    if (write(copy.Format, copy.Handle) == IntPtr.Zero)
+                        throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), stage, format);
                     copy.Handle = IntPtr.Zero; copy.Metafile = IntPtr.Zero;
                 } finally { changed(); }
             }
-        } catch (ClipboardPreparationException) { throw; }
-        catch { throw new ClipboardPreparationException("restore-failed"); }
+        } catch (ClipboardPreparationException error) {
+            if (error.Code == "restore-failed") throw;
+            throw new ClipboardPreparationException("restore-failed", error.NativeCode, stage, format);
+        }
+        catch { throw new ClipboardPreparationException("restore-failed", 0, stage, format); }
         finally { foreach (var copy in copies) copy.Dispose(); }
     }
     public void Dispose() { foreach (var item in items) item.Dispose(); items.Clear(); }
