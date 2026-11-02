@@ -1,15 +1,16 @@
 {
   "name": "vi",
-  "version": "0.1.0",
+  "version": "0.6.4-preview",
   "private": true,
   "description": "Voice Input",
   "license": "MIT",
-  "main": "src/main.cjs",
+  "main": "app/main.cjs",
   "scripts": {
     "start": "electron app/main.cjs",
     "test": "node scripts/unit.cjs",
     "smoke": "node scripts/ci.cjs smoke",
-    "test:ui": "node scripts/ci.cjs ui && node scripts/ci.cjs framework-ui"
+    "test:ui": "node scripts/ci.cjs ui && node scripts/ci.cjs framework-ui",
+    "distribution": "node scripts/distribution.cjs"
   },
   "dependencies": {
     "ws": "8.22.0"

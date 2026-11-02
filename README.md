@@ -4,7 +4,9 @@ Voice Input.
 
 MIT-licensed application and provider-interface experiments. CI uses a local
 fixture service and synthetic audio; no account or external speech service is
-needed. No application download packages are published here.
+needed. Regular checks do not publish application download packages. The explicit
+manual neutral-base workflow described below uploads endpointless CI build
+artifacts only; it does not create releases or choose an external speech service.
 
 ## Checks
 
@@ -123,6 +125,67 @@ framework does not select a live service by itself.
 Provider defaults belong to the installed plugin's `config.json`. The application
 only displays a user-supplied endpoint override, stored locally. Changing it
 requires confirming trust because the provider may send credentials and speech.
+
+### Data-only distribution defaults
+
+发行版可在 Windows `VI.exe` 同目录、macOS `VI.app` 外的同目录放
+`VI.provider.json`。文件仅支持
+`{"schemaVersion":1,"endpoint":"wss://service.example.invalid/speech"}`，
+最多 4096 bytes，必须是非 symlink 的 regular file；不能包含代码、
+plugin 路径、credential 或其它选项。远程 endpoint 仅支持不带
+username/password/query/fragment 的 `wss:`，synthetic loopback 可用 `ws:`。
+这只是显式信任的服务地址数据，不会改写 provider、app bundle 或 userData。
+
+优先级为 bundled provider `config.json` → sibling data → 已有 user endpoint
+override。`--provider-config=<absolute JSON path>` 显式选择数据文件；
+文件缺失或非法会报 setup error。既有 `--provider-dir` 仍选择整个 trusted
+executable plugin root，并默认不读取 sibling data；显式 `--provider-config`
+仍可与它组合。已有 user override 最后生效，但不能掩盖非法 external file。
+中性包没有配置 endpoint；没有 data 或 user override 时会明确报未配置，
+不会回退到任何服务。
+
+### Manual neutral native bases
+
+`Neutral native distribution bases` 是原“不生成下载包”规则的明确、手动
+CI artifact 例外。它只在 `workflow_dispatch` 执行，使用标准
+Windows x64、Windows ARM64、macOS ARM64 runner，同一次输入版本生成
+三个 neutral bases；默认应用版本为 `0.6.4-preview`。没有自动 release、
+production endpoint、账户、外部语音请求或额外 repository checkout。
+源码、测试、安装和 native build 仍只在 GitHub Actions 执行。
+
+公开 provider 来源仍是 checksum-pinned `v0.1.1` TGZ，不宣称另有 provider
+源码 release。打包记录原始 TGZ hash 与源文件 inventory，仅补充来自本仓库
+lock 的 `ws` production closure/lock、保留许可证，写入空配置。
+不会重命名成另一个 provider 版本。receipt 明确区分 upstream source
+与 distribution metadata，不把重新组装冒充新的 provider 实现。
+provider channel 本身目前没有独立 LICENSE 文件；receipt 保留 artifact
+已有 license declaration（未声明则显式为 `null`）与全部原始 notice。
+framework 的 MIT 不自动成为 provider 的新许可，发布审核须单独确认。
+因此 manual workflow 的 `upload_bases` 默认 `false`，只上传 receipts；
+owner 明确完成 upstream provider redistribution 审核后才选择上传 base
+内容。这个开关不是新增许可或自动授权。
+
+分发入口为 `resources/app/package.json` 的 `app/main.cjs`；当前中性包使用
+普通 app directory，不声称存在 ASAR。Windows 先设置真实 PE version，
+再用 inbox seekable .NET ZIP writer 写规范相对文件名，实际
+`Expand-Archive` 后比较所有文件。macOS 先完成 Info.plist、public code、
+provider 和 helper，再 inside-out ad-hoc signing、strict verification；
+使用原生 `ditto` 保留 symlink/mode，解包后再次验证 seal 和完整 inventory。
+后续服务地址 JSON 只能放 bundle 外，不能修改 sealed macOS bundle，
+也不能将 macOS archive 用 Windows ZIP 工具重新打包。
+
+每个平台都用实际 packaged Electron 的 Node mode 加载完整 provider、
+两种 factory 和共享 config loader，通过公开 fixture 的 loopback transport
+发送 synthetic PCM。测试不使用真实麦克风、credential lookup 或外部服务；
+进程 cwd/profile 独立，module/preload/credential environment 不继承，
+模块来源逐文件与 bundle 内 provider inventory 比较。fresh native archive
+解包后重复该检查，保存 archive SHA256、source revision、架构、helper/
+payload 文件 hash、原始来源与 cleanup receipt。此 headless gate 不证明
+GUI、TCC、硬件麦克风、notarization 或下游组合后的全部 native 行为。
+Windows PowerShell helper 与 macOS compiled helper 的 bytes/架构被记录，
+但此 manual headless gate 不启动 desktop helper；receipt 明确标为未执行。
+三个同版本 native bases、各自 receipts 与下游配置/下载校验未齐全前，
+不能称为完整三平台 release。
 
 Startup CI also launches this full framework independently, without choosing a
 service, and verifies readiness and clean shutdown. UI CI additionally exercises
