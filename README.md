@@ -304,6 +304,16 @@ CI-owned stderr 与 truncated 标记，以及最多 8 条 PID 匹配的固定 st
 这只是 CI 诊断，不是 desktop/input proof；没有完整 committed response 仍失败，
 不能据 stage、进程启动或退出时间伪造 osInputs，也不延长 15 s 或放宽 foreground、
 NoActivate、owned-down/first-click/held gesture 和 recovery 的原 gate。
+Console negative checks 仍同时要求非零 child exit、独立 live registry readback
+与原始状态完全一致、以及预期 failure marker 和 reason 都出现；不能用 rollback
+成功替代预期注入路径。failureWitness 只保存 expected marker、两项匹配 bool
+和固定 observed stage，区分“更早阶段失败”与“marker/reason 缺失”，不导出 raw output。
+owned console probe 的原 5000 ms exit wait 另保存 waitCompleted、实际可读取的
+exitCode、elapsed 与固定 outcome（timeout／exited-nonzero／API error 等）。
+ready receipt 不等于 clean exit；旧 coarse error 不能据此推断 timeout 或非零原因，
+也不能将通用 negative failure 总标题误读为 live rollback 已失败。所有 probe、
+registry restore、五个负例及原见证强度不变；pure contract 只提取指定函数并用
+mock probe 验证，不运行真实 console prepare／restore 或访问用户终端设置。
 execFile 已失败时，partial JSON、缺失／损坏／不匹配的 ACK 或 pipe/commit 不一致
 均继续抛同一个原始 process error；validation error 以非枚举属性另存，公开事件只
 增加固定 rejection stage。只有全部 receipt 验证完成才附 nativeReceipt；Windows

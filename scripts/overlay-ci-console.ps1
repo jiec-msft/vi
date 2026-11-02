@@ -26,6 +26,23 @@ function Save-Report {
     if ($Mode -eq 'restore' -and $FailRestoreReportWrite) { throw 'Injected restore report write failure.' }
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
 }
+function Assert-OverlayConsoleProbeExit($Probe, $Report) {
+    $observation = @{ budgetMilliseconds = 5000; outcome = 'waiting'; waitCompleted = $false; exitCode = $null }
+    $Report.probeProcess.exitWait = $observation
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        try { $observation.waitCompleted = $Probe.WaitForExit(5000) }
+        catch { $observation.outcome = 'wait-error'; throw }
+        if (!$observation.waitCompleted) {
+            $observation.outcome = 'timeout'
+            throw 'Owned console probe did not exit cleanly.'
+        }
+        try { $observation.exitCode = $Probe.get_ExitCode() }
+        catch { $observation.outcome = 'exit-code-error'; throw }
+        $observation.outcome = if ($observation.exitCode -eq 0) { 'exited-zero' } else { 'exited-nonzero' }
+        if ($observation.exitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
+    } finally { $observation.elapsedMilliseconds = $clock.ElapsedMilliseconds }
+}
 function Read-Selection {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($registryPath)
     try {
@@ -273,7 +290,7 @@ public static class OwnedConsoleProbe {
     $report.probe.hostVerification = 'live Win32_Process host/client parent identity'
     $report.probeProcess.parentPid = $hosts[0].chain[1].parentPid
     $report.probeProcess.createdAt = $hosts[0].chain[1].createdAt
-    if (!$probe.WaitForExit(5000) -or $probe.ExitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
+    Assert-OverlayConsoleProbeExit $probe $report
     $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
     $clientIdentity.exitedAt = $report.probeProcess.exitedAt
     $deadline = [DateTime]::UtcNow.AddSeconds(2)

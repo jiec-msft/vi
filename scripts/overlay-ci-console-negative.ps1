@@ -35,6 +35,15 @@ function Failure-Text($output) {
     $text = ($output | Out-String) -replace "$([char]27)\[[0-9;]*[a-zA-Z]", ''
     return $text -replace '\s+', ' '
 }
+function Get-OverlayFailureWitness($Output, [string]$Marker, [string]$Reason) {
+    $text = Failure-Text $Output
+    $markerMatched = $text -match [regex]::Escape($Marker)
+    $reasonMatched = $text -match [regex]::Escape($Reason)
+    $observed = @([regex]::Matches($text, 'VI_PARENT_FAIL:(prepare|restore|readback|receipt|mismatch)(?![a-z-])') |
+        ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    return @{ matched = $markerMatched -and $reasonMatched; markerMatched = $markerMatched;
+        reasonMatched = $reasonMatched; observedStages = $observed }
+}
 $result = @{ cases = @(); status = 'running'; runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT }
 foreach ($case in @('prepare', 'missing-receipt', 'mismatch')) {
     $before = Registry-State
@@ -53,11 +62,13 @@ foreach ($case in @('prepare', 'missing-receipt', 'mismatch')) {
         'missing-receipt' { 'diagnostic error receipt missing' }
         'mismatch' { 'Injected parent registry mismatch assertion' }
     }
-    $text = Failure-Text $output
-    $witness = $text -match [regex]::Escape($marker) -and $text -match [regex]::Escape($reason)
+    $evidence = Get-OverlayFailureWitness $output $marker $reason
+    $witness = $evidence.matched
     $matched = Matches-Original $before $actual
     $result.cases += @{ name = "parent-$case"; exitCode = $code; original = $before; actual = $actual;
         originalMatched = $matched; expectedFailureReported = $witness;
+        failureWitness = @{ expectedMarker = $marker; markerMatched = $evidence.markerMatched;
+            reasonMatched = $evidence.reasonMatched; observedStages = $evidence.observedStages };
         passed = $code -ne 0 -and $matched -and $witness }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $directory 'negative-parent.json') -Encoding utf8
 }
