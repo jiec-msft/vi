@@ -1,48 +1,93 @@
 param([string] $DiagnosticsDirectory = '', [string] $DiagnosticRun = '', [int] $DiagnosticGeneration = 0, [int] $DiagnosticParent = 0)
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-diagnostics.ps1')
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))
 [ViNativeDiagnostics]::Configure($DiagnosticsDirectory, $DiagnosticRun, 'delivery', $DiagnosticGeneration, $DiagnosticParent, $false)
 [ViNativeDiagnostics]::Record('compile', 'begin', 0)
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+Write-ViStartup 'input-begin'
 & (Join-Path $PSScriptRoot 'windows-input.ps1') -Action load
+Write-ViStartup 'input-ready'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes
-Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
+Write-ViStartup 'forms-ready'
+$clipboardSource=@'
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using ViClipboard;
 
 public sealed class TranscriptClipboard : NativeWindow, IDisposable {
-    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
-    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool CloseClipboard();
     [DllImport("user32.dll")] static extern bool EmptyClipboard();
-    [DllImport("user32.dll")] static extern IntPtr SetClipboardData(uint format, IntPtr data);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SetClipboardData(uint format, IntPtr data);
+    [DllImport("user32.dll", SetLastError=true)] static extern uint EnumClipboardFormats(uint previous);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     [DllImport("user32.dll")] static extern IntPtr GetOpenClipboardWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
     [DllImport("user32.dll")] static extern int CountClipboardFormats();
-    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetClipboardData(uint format);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
-    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GlobalLock(IntPtr memory);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr memory);
-    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
-    DataObject saved;
+    [DllImport("kernel32.dll", SetLastError=true)] static extern UIntPtr GlobalSize(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern uint GlobalFlags(IntPtr memory);
+    [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
+    sealed class PublicationItem {
+        public uint Format;
+        public byte[] Bytes;
+    }
+    sealed class PublicationProbe {
+        public uint RequestedFormat, CanonicalFormat;
+        public bool InsideCall, Declined, Uncorrelated;
+    }
+    readonly List<PublicationItem> publication = new List<PublicationItem>(4);
+    static Action<IntPtr> publicationClosed = null;
+    static Action<IntPtr> sealBeforeCommit = null;
+    static Func<bool> sealClose = CloseClipboard;
+    static Func<bool> restoreClose = CloseClipboard;
+    static Func<uint, IntPtr> publicationRead = GetClipboardData;
+    PublicationProbe activeProbe;
+    bool publishing, publicationSealed;
+    uint publicationBlockedRenderRequests;
+    ClipboardSnapshot saved;
+    static TranscriptClipboard deferred;
+    bool disposed;
     string text;
     uint sequence;
-    bool rendered, renderFailed, began;
+    bool rendered, renderFailed, began, restoring, restoreMutated;
+    bool renderAttempted, renderWriteStarted, renderWriteCompleted;
+    uint renderExpectedSequence, renderObservedSequence;
+    uint publicationBeforeCloseSequence, publicationAfterCloseSequence;
+    bool publicationCloseSucceeded, publicationOwnerObservedAfterClose;
+    int publicationCloseNativeError;
     readonly Stopwatch clock = new Stopwatch();
     long renderedAt;
     long pasteAt = -1;
     long holdAt = -1;
     public uint TargetOwner;
     public bool ReaderMatched, ReaderUnknown;
+    public bool RenderAttempted { get { return renderAttempted; } }
+    public uint RenderExpectedSequence { get { return renderExpectedSequence; } }
+    public uint RenderObservedSequence { get { return renderObservedSequence; } }
+    public bool RenderWriteStarted { get { return renderWriteStarted; } }
+    public bool RenderWriteCompleted { get { return renderWriteCompleted; } }
+    public uint PublicationBeforeCloseSequence { get { return publicationBeforeCloseSequence; } }
+    public uint PublicationAfterCloseSequence { get { return publicationAfterCloseSequence; } }
+    public bool PublicationCloseSucceeded { get { return publicationCloseSucceeded; } }
+    public int PublicationCloseNativeError { get { return publicationCloseNativeError; } }
+    public bool PublicationOwnerObservedAfterClose { get { return publicationOwnerObservedAfterClose; } }
+    public bool PublicationSealed { get { return publicationSealed; } }
+    public uint PublicationBlockedRenderRequests { get { return publicationBlockedRenderRequests; } }
     public bool RenderedBeforePaste { get { return rendered && (pasteAt < 0 || renderedAt < pasteAt); } }
     public long HoldMilliseconds { get { return holdAt < 0 ? 0 : clock.ElapsedMilliseconds - holdAt; } }
     public void PasteStarted() { pasteAt = clock.ElapsedMilliseconds; }
@@ -67,24 +112,17 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
             throw new InvalidOperationException("Clipboard write failed.");
         }
     }
-    static byte[] ReadGlobalBytes(uint format) {
-        if (!OpenClipboard(IntPtr.Zero)) throw new ExternalException("Clipboard is busy.");
-        try {
-            IntPtr memory = GetClipboardData(format);
-            if (memory == IntPtr.Zero) throw new InvalidOperationException("Clipboard format unavailable.");
-            ulong length = GlobalSize(memory).ToUInt64();
-            if (length == 0 || length > 67108864) throw new NotSupportedException("Unsupported clipboard payload.");
-            IntPtr pointer = GlobalLock(memory);
-            if (pointer == IntPtr.Zero) throw new InvalidOperationException("Clipboard data unavailable.");
-            var bytes = new byte[(int)length];
-            try { Marshal.Copy(pointer, bytes, 0, bytes.Length); }
-            finally { GlobalUnlock(memory); }
-            return bytes;
-        } finally { CloseClipboard(); }
-    }
     void Render() {
-        if (rendered) return;
+        if (publishing) { publicationBlockedRenderRequests++; return; }
+        if (!began || restoring || restoreMutated || rendered || GetClipboardOwner() != Handle) return;
+        renderAttempted = true;
+        renderWriteStarted = renderWriteCompleted = false;
+        renderExpectedSequence = sequence;
+        renderObservedSequence = GetClipboardSequenceNumber();
+        if (renderObservedSequence != sequence) { renderFailed = true; return; }
+        renderWriteStarted = true;
         SetBytes(13, Encoding.Unicode.GetBytes(text + "\0"));
+        renderWriteCompleted = true;
         uint reader;
         GetWindowThreadProcessId(GetOpenClipboardWindow(),out reader);
         ReaderMatched = reader == TargetOwner;
@@ -95,6 +133,18 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     }
     protected override void WndProc(ref Message message) {
         try {
+            if (publishing && (message.Msg == 0x305 || message.Msg == 0x306)) {
+                publicationBlockedRenderRequests++;
+                var probe = activeProbe;
+                if (probe != null) {
+                    bool correlated = probe.InsideCall && message.HWnd == Handle && message.Msg == 0x305 &&
+                        probe.CanonicalFormat == 13 && message.WParam.ToInt64() == probe.CanonicalFormat && message.LParam == IntPtr.Zero &&
+                        (probe.RequestedFormat == 13 || probe.RequestedFormat == 1 || probe.RequestedFormat == 7);
+                    if (!correlated || probe.Declined) probe.Uncorrelated = true;
+                    else probe.Declined = true;
+                }
+                return;
+            }
             if (message.Msg == 0x305 && message.WParam.ToInt32() == 13) { Render(); return; }
             if (message.Msg == 0x306 && GetClipboardOwner() == Handle && OpenClipboard(Handle)) {
                 try { Render(); } finally { CloseClipboard(); }
@@ -103,70 +153,184 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
         } catch { renderFailed = true; }
         base.WndProc(ref message);
     }
-    static DataObject Snapshot() {
-        var result = new DataObject();
-        var original = Clipboard.GetDataObject();
-        if (original == null && CountClipboardFormats() > 0)
-            throw new InvalidOperationException("Clipboard snapshot unavailable.");
-        if (original != null) foreach (string format in original.GetFormats(false)) {
-            int id = DataFormats.GetFormat(format).Id;
-            object data;
-            if (id >= 0xC000) {
-                // Managed clipboard projections can return zero-filled streams despite valid native bytes.
-                data = new MemoryStream(ReadGlobalBytes((uint)id));
-            } else if (id == 13) {
-                var bytes = ReadGlobalBytes(13);
-                if (bytes.Length % 2 != 0) throw new NotSupportedException("Invalid Unicode clipboard data.");
-                var chars = new char[bytes.Length / 2];
-                Buffer.BlockCopy(bytes, 0, chars, 0, bytes.Length);
-                data = new string(chars).TrimEnd('\0');
-            } else { data = original.GetData(format, false); }
-            if (data == null) throw new InvalidOperationException("Clipboard format cannot be preserved.");
-            var stream = data as MemoryStream;
-            var image = data as System.Drawing.Image;
-            if (stream != null) data = new MemoryStream(stream.ToArray());
-            else if (image != null) data = image.Clone();
-            else if (data is byte[]) data = ((byte[])data).Clone();
-            else if (data is string[]) data = ((string[])data).Clone();
-            else if (!(data is string)) throw new NotSupportedException("Unsupported clipboard format.");
-            result.SetData(format, false, data);
+    static byte[] PublicationBytes(IntPtr memory, uint format) {
+        SetLastError(0);
+        uint flags = GlobalFlags(memory);
+        if (flags == 0x8000 || (flags & 0x4000) != 0)
+            throw new ClipboardPreparationException("clipboard-changed", Marshal.GetLastWin32Error(), "publication-state", format);
+        SetLastError(0);
+        ulong size = GlobalSize(memory).ToUInt64();
+        int error = Marshal.GetLastWin32Error();
+        if (error != 0) throw new ClipboardPreparationException("clipboard-changed", error, "publication-state", format);
+        if (size == 0 || size > 4096)
+            throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state", format);
+        IntPtr pointer = GlobalLock(memory);
+        if (pointer == IntPtr.Zero)
+            throw new ClipboardPreparationException("clipboard-changed", Marshal.GetLastWin32Error(), "publication-state", format);
+        try {
+            var bytes = new byte[(int)size];
+            Marshal.Copy(pointer, bytes, 0, bytes.Length);
+            return bytes;
+        } finally { GlobalUnlock(memory); }
+    }
+    void PublishMetadata(uint format, byte[] bytes) {
+        IntPtr memory = Bytes(bytes);
+        bool transferred = false;
+        try {
+            var item = new PublicationItem { Format = format, Bytes = PublicationBytes(memory, format) };
+            if (SetClipboardData(format, memory) == IntPtr.Zero)
+                throw new ClipboardPreparationException("clipboard-unavailable", Marshal.GetLastWin32Error(), "publication-write", format);
+            transferred = true;
+            publication.Add(item);
+        } finally { if (!transferred) GlobalFree(memory); }
+    }
+    void VerifyPublication() {
+        uint previous = 0;
+        int seen = 0, metadata = 0;
+        bool unicode = false;
+        for (;;) {
+            SetLastError(0);
+            uint format = EnumClipboardFormats(previous);
+            int error = Marshal.GetLastWin32Error();
+            if (format == 0) {
+                if (error != 0) throw new ClipboardPreparationException("clipboard-changed", error, "publication-state");
+                break;
+            }
+            if (++seen > publication.Count + 3)
+                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state", format);
+            previous = format;
+            if (format == 13) { unicode = true; continue; }
+            if (format == 1 || format == 7) continue;
+            PublicationItem expected = publication.Find(item => item.Format == format);
+            if (expected == null) throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state", format);
+            SetLastError(0);
+            IntPtr memory = GetClipboardData(format);
+            if (memory == IntPtr.Zero)
+                throw new ClipboardPreparationException("clipboard-changed", Marshal.GetLastWin32Error(), "publication-state", format);
+            byte[] actual = PublicationBytes(memory, format);
+            if (actual.Length != expected.Bytes.Length)
+                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state", format);
+            for (int i = 0; i < actual.Length; i++)
+                if (actual[i] != expected.Bytes[i])
+                    throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state", format);
+            metadata++;
         }
-        return result;
+        if (!unicode || metadata != publication.Count)
+            throw new ClipboardPreparationException("clipboard-changed", 0, "publication-state");
+        // Inspect only nullness, never text bytes. Our renderer stays disabled during sealing.
+        foreach (uint format in new uint[] { 13, 1, 7 }) {
+            var probe = new PublicationProbe { RequestedFormat = format, CanonicalFormat = 13 };
+            IntPtr memory;
+            int error;
+            activeProbe = probe;
+            try {
+                probe.InsideCall = true;
+                SetLastError(0);
+                memory = publicationRead(format);
+                error = Marshal.GetLastWin32Error();
+            } finally {
+                probe.InsideCall = false;
+                activeProbe = null;
+            }
+            if (memory != IntPtr.Zero || !probe.Declined || probe.Uncorrelated)
+                throw new ClipboardPreparationException("clipboard-changed", error, "publication-state", format);
+        }
+    }
+    void SealPublication() {
+        if (!publicationCloseSucceeded)
+            throw new ClipboardPreparationException("clipboard-unavailable", publicationCloseNativeError, "publication-close");
+        bool opened = false;
+        int error = 0;
+        for (int attempt = 0; attempt < 5 && !opened; attempt++) {
+            opened = OpenClipboard(Handle);
+            if (!opened) { error = Marshal.GetLastWin32Error(); Application.DoEvents(); Thread.Sleep(50); }
+        }
+        if (!opened) throw new ClipboardPreparationException("clipboard-busy", error, "publication-open");
+        Exception validationFailure = null;
+        uint candidate = 0;
+        try {
+            if (GetClipboardOwner() != Handle) {
+                began = false;
+                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-owner");
+            }
+            candidate = GetClipboardSequenceNumber();
+            if (candidate != publicationAfterCloseSequence)
+                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence", 0, publicationAfterCloseSequence, candidate);
+            VerifyPublication();
+            if (GetClipboardOwner() != Handle || GetClipboardSequenceNumber() != candidate)
+                throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence");
+        } catch (Exception failure) {
+            validationFailure = failure;
+            throw;
+        } finally {
+            Exception closeFailure = null;
+            try {
+                if (!sealClose())
+                    closeFailure = new ClipboardPreparationException("clipboard-unavailable", Marshal.GetLastWin32Error(), "publication-close");
+            } catch {
+                closeFailure = new ClipboardPreparationException("clipboard-unavailable", 0, "publication-close");
+            }
+            if (closeFailure != null) {
+                if (validationFailure != null) throw new AggregateException("Publication validation and close both failed.", validationFailure, closeFailure);
+                throw closeFailure;
+            }
+        }
+        if (sealBeforeCommit != null) sealBeforeCommit(Handle);
+        if (GetClipboardOwner() != Handle) {
+            began = false;
+            throw new ClipboardPreparationException("clipboard-changed", 0, "publication-owner");
+        }
+        if (GetClipboardSequenceNumber() != candidate)
+            throw new ClipboardPreparationException("clipboard-changed", 0, "publication-sequence");
+        sequence = candidate;
+        publicationSealed = true;
+        publishing = false;
     }
     public void Begin(string value) {
+        if (disposed || began || publication.Count != 0) throw new InvalidOperationException("Clipboard transactions cannot be reused.");
+        RecoverPending();
         if (value == null || value.Length == 0 || value.Length > 262144 || value.IndexOf('\0') >= 0)
             throw new ArgumentException("Invalid transcript.");
         uint before = GetClipboardSequenceNumber();
-        for (int attempt = 0; attempt < 5; attempt++) {
-            if (GetClipboardSequenceNumber() != before) throw new InvalidOperationException("Clipboard changed.");
-            try { saved = Snapshot(); break; }
-            catch (ExternalException) { if (attempt == 4) throw; }
-            catch (InvalidOperationException) { if (attempt == 4) throw; }
-            Application.DoEvents();
-            Thread.Sleep(50);
-        }
-        if (GetClipboardSequenceNumber() != before) throw new InvalidOperationException("Clipboard changed.");
-        if (saved.GetFormats(false).Length == 0 && CountClipboardFormats() > 0)
-            throw new InvalidOperationException("Clipboard snapshot unavailable.");
         bool opened = false;
+        int openError = 0;
         for (int attempt = 0; attempt < 5 && !opened; attempt++) {
             opened = OpenClipboard(Handle);
-            if (!opened) { Application.DoEvents(); Thread.Sleep(20); }
+            if (!opened) { openError = Marshal.GetLastWin32Error(); Application.DoEvents(); Thread.Sleep(50); }
         }
-        if (!opened) throw new InvalidOperationException("Clipboard busy.");
+        if (!opened) throw new ClipboardPreparationException("clipboard-busy", openError);
         try {
-            if (GetClipboardSequenceNumber() != before) throw new InvalidOperationException("Clipboard changed.");
+            if (GetClipboardSequenceNumber() != before) throw new ClipboardPreparationException("clipboard-changed");
+            IntPtr snapshotOwner = GetClipboardOwner();
+            try { saved = ClipboardSnapshot.Capture(); }
+            catch (ClipboardPreparationException) { throw; }
+            catch (AggregateException) { throw; }
+            catch { throw new ClipboardPreparationException("clipboard-snapshot-failed"); }
+            if (GetClipboardOwner() != snapshotOwner) throw new ClipboardPreparationException("clipboard-changed");
+            uint locale = (uint)(GetKeyboardLayout(0).ToInt64() & 0xffff);
+            if (locale == 0) throw new ClipboardPreparationException("clipboard-snapshot-failed");
             if (!EmptyClipboard()) throw new InvalidOperationException("Clipboard unavailable.");
             text = value;
+            publishing = true;
             began = true;
             SetClipboardData(13, IntPtr.Zero);
-            SetBytes(RegisterClipboardFormat("CanIncludeInClipboardHistory"), BitConverter.GetBytes(0));
-            SetBytes(RegisterClipboardFormat("CanUploadToCloudClipboard"), BitConverter.GetBytes(0));
+            // Otherwise CloseClipboard may synthesize CF_LOCALE after our sequence sample.
+            PublishMetadata(16, BitConverter.GetBytes(locale));
+            PublishMetadata(RegisterClipboardFormat("CanIncludeInClipboardHistory"), BitConverter.GetBytes(0));
+            PublishMetadata(RegisterClipboardFormat("CanUploadToCloudClipboard"), BitConverter.GetBytes(0));
+            PublishMetadata(RegisterClipboardFormat("VI.NativeDelivery.Transaction"), Guid.NewGuid().ToByteArray());
             clock.Start();
         } finally {
             if (began) sequence = GetClipboardSequenceNumber();
-            CloseClipboard();
+            publicationBeforeCloseSequence = GetClipboardSequenceNumber();
+            publicationCloseSucceeded = CloseClipboard();
+            publicationCloseNativeError = publicationCloseSucceeded ? 0 : Marshal.GetLastWin32Error();
+            if (publicationCloseSucceeded && began && publication.Count == 4 && publicationClosed != null)
+                publicationClosed(Handle);
+            publicationAfterCloseSequence = GetClipboardSequenceNumber();
+            publicationOwnerObservedAfterClose = Handle != IntPtr.Zero && GetClipboardOwner() == Handle;
         }
+        SealPublication();
     }
     public bool WaitForRead() {
         while (clock.ElapsedMilliseconds < 2500 || rendered && clock.ElapsedMilliseconds - renderedAt < 350) {
@@ -183,17 +347,89 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     public void Restore() {
         if (!began) return;
         Application.DoEvents();
-        if (GetClipboardOwner() != Handle || GetClipboardSequenceNumber() != sequence) return;
-        // A new user copy wins. Restore only while this transaction still owns the clipboard.
-        Clipboard.SetDataObject(saved, true, 5, 20);
-        began = false;
+        bool opened = false;
+        int openError = 0;
+        for (int attempt = 0; attempt < 5 && !opened; attempt++) {
+            opened = OpenClipboard(Handle);
+            if (!opened) { openError = Marshal.GetLastWin32Error(); Application.DoEvents(); Thread.Sleep(20); }
+        }
+        if (!opened) throw new ClipboardPreparationException("restore-failed", openError, "restore-open");
+        bool authorized = false, restored = false, abandoned = false;
+        Exception primary = null;
+        try {
+            // Check ownership under the same lock as restoration so a newer copy cannot be overwritten.
+            if (GetClipboardOwner() != Handle) { abandoned = true; return; }
+            uint current = GetClipboardSequenceNumber();
+            if (current != sequence) throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence", 0, sequence, current);
+            authorized = true;
+            restoring = true;
+            try {
+                saved.RestoreWhileOpen(() => {
+                    restoreMutated = true;
+                    sequence = GetClipboardSequenceNumber();
+                });
+                restored = true;
+            } finally {
+                sequence = GetClipboardSequenceNumber();
+            }
+        } catch (Exception failure) {
+            primary = failure;
+            throw;
+        } finally {
+            uint candidate = sequence;
+            ClipboardPreparationException cleanup = null;
+            try {
+                SetLastError(0);
+                if (!restoreClose()) throw new ClipboardPreparationException("restore-failed", Marshal.GetLastWin32Error(), "restore-close");
+                if (abandoned) began = false;
+                else if (authorized) {
+                    if (GetClipboardOwner() != Handle) began = false;
+                    else {
+                        uint current = GetClipboardSequenceNumber();
+                        if (current != candidate)
+                            throw new ClipboardPreparationException("restore-failed", 0, "restore-sequence", 0, candidate, current);
+                        if (restored) began = false;
+                    }
+                }
+            } catch (ClipboardPreparationException failure) { cleanup = failure; }
+            catch (Exception failure) {
+                cleanup = new ClipboardPreparationException("restore-failed", 0, "restore-close", 0, 0, 0, failure);
+            } finally { restoring = false; }
+            if (cleanup != null) {
+                if (primary != null) throw new AggregateException("Clipboard restore and close both failed.", primary, cleanup);
+                throw cleanup;
+            }
+        }
     }
     public void Dispose() {
-        try { Restore(); } finally { DestroyHandle(); }
+        if (disposed) return;
+        try { Restore(); }
+        catch { deferred = this; throw; }
+        if (deferred == this) deferred = null;
+        disposed = true;
+        if (saved != null) saved.Dispose();
+        DestroyHandle();
+    }
+    public static void RecoverPending() {
+        var previous = deferred;
+        if (previous == null) return;
+        previous.Restore();
+        previous.Dispose();
     }
 }
 '@
+Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($clipboardSource + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-clipboard-snapshot.cs')))
+Write-ViStartup 'clipboard-ready'
 [ViNativeDiagnostics]::Record('compile', 'end', 0)
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-clipboard-errors.ps1'))
+function Set-ClipboardFailureDetail([Exception]$Exception,[switch]$Cleanup){
+    $projection=ConvertTo-ClipboardFailure $Exception
+    if($Cleanup){$script:clipboardCleanupFailure=$projection}else{$script:clipboardFailure=$projection}
+    $first=$projection.causes[0]
+    $script:clipboardErrorNumber=$first.errorNumber
+    $script:clipboardErrorStage=$first.stage
+    $script:clipboardErrorFormat=$first.format
+}
 function Capture-Target {
     $target = [VoiceInput]::Capture()
     [uint32] $owner = 0
@@ -223,14 +459,22 @@ function Assert-Target($target) {
     if ([VoiceInput]::CompositionActive([long]$current.focus)) { throw 'composition-active' }
     $current
 }
+Write-ViStartup 'protocol-ready'
 while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
     $request = $null
     $script:failureCheck = $null
+    $script:clipboardErrorStage = 'unspecified'
+    $script:clipboardErrorFormat = 0
+    $script:clipboardErrorNumber = 0
+    $script:clipboardFailure = $null
+    $script:clipboardCleanupFailure = $null
+    $script:pasteRequested = $false
     try {
         if ($line.Length -gt 1600000) { throw 'invalid-request' }
         $request = $line | ConvertFrom-Json
         [ViNativeDiagnostics]::Request([long]$request.id)
         if ($request.action -ne 'held') { [ViNativeDiagnostics]::Record([string]$request.action, 'begin', 0) }
+        [TranscriptClipboard]::RecoverPending()
         $value = switch ($request.action) {
             'ready' { @{ ready = $true } }
             'capture' { Capture-Target }
@@ -246,7 +490,10 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
                 $transaction = [TranscriptClipboard]::new()
                 $transaction.TargetOwner = [uint32]$request.target.pid
                 try {
-                    try { $transaction.Begin([string]$request.text) } catch { throw 'clipboard-unavailable' }
+                    try { $transaction.Begin([string]$request.text) } catch {
+                        Set-ClipboardFailureDetail $_.Exception
+                        throw $script:clipboardFailure.causes[0].code
+                    }
                     $current = Assert-Target $request.target
                     if ([VoiceInput]::ModifiersHeld() -or [VoiceInput]::MouseHeld()) { throw 'modifiers-held' }
                     if (-not [VoiceInput]::TargetReady([long]$current.window,[long]$current.focus)) {
@@ -254,14 +501,21 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
                         throw 'target-changed'
                     }
                     $transaction.PasteStarted()
+                    $script:pasteRequested = $true
                     [VoiceInput]::PasteChord()
                     $transaction.PasteFinished()
                     if (-not $transaction.WaitForRead()) { throw 'paste-unconfirmed' }
                     @{ requested = $true; clipboardRead = $true; readerMatched = $transaction.ReaderMatched;
                        readerUnknown = $transaction.ReaderUnknown; renderedBeforePaste = $transaction.RenderedBeforePaste;
                        clipboardHoldMs = $transaction.HoldMilliseconds }
+                } catch {
+                    if(-not $script:clipboardFailure){Set-ClipboardFailureDetail $_.Exception}
+                    throw
                 } finally {
-                    try { $transaction.Dispose() } catch { throw 'restore-failed' }
+                    try { $transaction.Dispose() } catch {
+                        Set-ClipboardFailureDetail $_.Exception -Cleanup
+                        throw 'restore-failed'
+                    }
                 }
             }
             default { throw 'invalid-request' }
@@ -269,11 +523,25 @@ while ($null -ne ($line = [VoiceCommands]::ReadNext())) {
         if ($request.action -ne 'held') { [ViNativeDiagnostics]::Record([string]$request.action, 'end', 0) }
         @{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5
     } catch {
-        [ViNativeDiagnostics]::Record([string]$request.action, 'failure', 0)
         $code = $_.Exception.Message
+        if(-not $script:clipboardFailure -and -not $script:clipboardCleanupFailure){
+            Set-ClipboardFailureDetail $_.Exception
+        }
+        if($script:clipboardCleanupFailure){$code='restore-failed'}
+        elseif($script:clipboardFailure){$code=$script:clipboardFailure.causes[0].code}
+        [ViNativeDiagnostics]::Record([string]$request.action, 'failure', $script:clipboardErrorNumber)
         if ($code -notin @('window-order','target-changed','secure-field','no-input','clipboard-changed','clipboard-unavailable',
+            'clipboard-busy','clipboard-format','clipboard-snapshot-failed',
             'modifiers-held','composition-active','paste-unconfirmed','restore-failed')) { $code = 'native-error' }
-        @{ id = $request.id; ok = $false; code = $code; check = $script:failureCheck } | ConvertTo-Json -Compress
+        $operationCauses=@()
+        $cleanupCauses=@()
+        if($script:clipboardFailure){$operationCauses=@($script:clipboardFailure.causes)}
+        if($script:clipboardCleanupFailure){$cleanupCauses=@($script:clipboardCleanupFailure.causes)}
+        @{ id = $request.id; ok = $false; code = $code; errorNumber=$script:clipboardErrorNumber;
+            clipboardStage=$script:clipboardErrorStage; clipboardFormat=$script:clipboardErrorFormat;
+            clipboardCauses=$operationCauses; clipboardCausesTruncated=($script:clipboardFailure.truncated -eq $true);
+            clipboardCleanupCauses=$cleanupCauses; clipboardCleanupCausesTruncated=($script:clipboardCleanupFailure.truncated -eq $true);
+            pasteRequested=$script:pasteRequested; check = $script:failureCheck } | ConvertTo-Json -Compress -Depth 6
     }
 }
 [ViNativeDiagnostics]::Record('native-exit', 'exit', 0)

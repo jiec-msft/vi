@@ -2,7 +2,8 @@ const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
-const { NativeTrace } = require('./native-diagnostics.cjs');
+const { NativeTrace, nativeHelperEnvironment } = require('./native-diagnostics.cjs');
+const { clipboardCauses } = require('./clipboard-faults.cjs');
 let generation = 0;
 
 class NativeDelivery {
@@ -12,7 +13,8 @@ class NativeDelivery {
     const args = platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
       '-File', path.join(resources, 'windows-delivery.ps1'), ...this.trace.arguments(process.pid)] : [];
     this.trace.emit('spawn', {}, true);
-    try { this.process = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    try { this.process = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: platform === 'win32' ? nativeHelperEnvironment() : process.env }); }
     catch (error) { this.trace.emit('failure', { fault: 'spawn' }, true); throw error; }
     this.trace.attach(this.process);
     this.trace.emit('spawned');
@@ -30,12 +32,28 @@ class NativeDelivery {
         const reply = JSON.parse(line);
         fault = !this.pending ? 'late-reply' : reply.id !== this.pending.id ? 'wrong-id' : 'invalid-shape';
         if (!this.pending || reply.id !== this.pending.id || typeof reply.ok !== 'boolean') throw new Error();
+        const causes = clipboardCauses(reply.clipboardCauses);
+        const cleanupCauses = clipboardCauses(reply.clipboardCleanupCauses);
+        if (!causes || !cleanupCauses ||
+            ['clipboardCausesTruncated', 'clipboardCleanupCausesTruncated'].some((key) =>
+              reply[key] !== undefined && typeof reply[key] !== 'boolean')) throw new Error();
         const pending = this.pending;
         this.pending = undefined;
         clearTimeout(pending.timer);
+        const clipboardStage = ['unspecified', 'restore-open', 'restore-sequence', 'restore-copy', 'restore-empty', 'restore-write', 'restore-text', 'restore-close',
+          'publication-open', 'publication-close', 'publication-owner', 'publication-sequence', 'publication-state', 'publication-write',
+          'snapshot-format', 'snapshot-format-name', 'snapshot-copy', 'snapshot-release']
+          .includes(reply.clipboardStage) ? reply.clipboardStage : undefined;
+        const clipboardFormat = clipboardStage && Number.isInteger(reply.clipboardFormat) && reply.clipboardFormat >= 0 && reply.clipboardFormat <= 65535
+          ? reply.clipboardFormat : undefined;
         if (pending.action !== 'held' || !reply.ok || performance.now() - pending.started > 250) {
           this.trace.emit('reply', { action: pending.action, requestId: pending.id,
-            spanMs: Math.round(performance.now() - pending.started), ...(reply.ok ? {} : { fault: 'native-error' }) });
+            spanMs: Math.round(performance.now() - pending.started), ...(reply.ok ? {} : { fault: 'native-error' }),
+            ...(Number.isInteger(reply.errorNumber) ? { errorNumber: reply.errorNumber } : {}),
+            ...(clipboardStage ? { clipboardStage, clipboardFormat } : {}),
+            clipboardCauses: causes, clipboardCleanupCauses: cleanupCauses,
+            clipboardCausesTruncated: reply.clipboardCausesTruncated === true,
+            clipboardCleanupCausesTruncated: reply.clipboardCleanupCausesTruncated === true });
         }
         if (reply.ok) pending.resolve(reply.value);
         else pending.reject(Object.assign(new Error({
@@ -45,13 +63,25 @@ class NativeDelivery {
           'no-input': 'No editable text field is focused. Use Copy result.',
           'clipboard-changed': 'The clipboard changed while preparing delivery. Use Copy result.',
           'clipboard-unavailable': 'The clipboard is busy or contains a format that cannot be preserved. Use Copy result.',
+          'clipboard-busy': 'Another application is holding the clipboard. Nothing was pasted. The result remains in preview; retry after releasing the clipboard.',
+          'clipboard-format': 'Windows could not safely preserve every clipboard format. Nothing was pasted and the clipboard was left unchanged. Use Copy result only when ready to replace it.',
+          'clipboard-snapshot-failed': 'Windows could not capture a safe clipboard backup. Nothing was pasted. The result remains available in preview.',
           'modifiers-held': 'Release keyboard modifiers and mouse buttons before pasting. Use Copy result.',
           'composition-active': 'Finish the input-method candidate selection, then use Copy result.',
           'paste-unconfirmed': 'The target did not read the transcript. Review the field before pasting manually.',
-          'restore-failed': 'Paste was requested, but the previous clipboard could not be restored. Review the field before retrying.',
+          'restore-failed': reply.pasteRequested === false
+            ? 'The previous clipboard could not be restored. No additional paste was requested; review the previous field and release the clipboard lock before retrying.'
+            : 'Paste was requested, but the previous clipboard could not be restored. Review the field before retrying.',
           'permission': 'Allow Accessibility access for VI in macOS System Settings.',
         }[reply.code] || 'Desktop delivery failed. Review the target before using Copy result.'),
         { code: reply.code || 'native-error',
+          pasteRequested: reply.pasteRequested === true,
+          errorNumber: Number.isInteger(reply.errorNumber) && reply.errorNumber >= 0 && reply.errorNumber <= 2147483647
+            ? reply.errorNumber : undefined,
+          clipboardStage, clipboardFormat,
+          clipboardCauses: causes, clipboardCleanupCauses: cleanupCauses,
+          clipboardCausesTruncated: reply.clipboardCausesTruncated === true,
+          clipboardCleanupCausesTruncated: reply.clipboardCleanupCausesTruncated === true,
           check: ['foreground-window', 'foreground-process', 'accessible-focus', 'native-focus'].includes(reply.check)
             ? reply.check : undefined }));
       } catch {

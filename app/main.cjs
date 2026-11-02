@@ -10,6 +10,7 @@ const { DesktopInput } = require('./desktop.cjs');
 const { APP_ID, preferences, overlayPosition, applyLoginSettings } = require('./preferences.cjs');
 const { ShortcutBindings, ShortcutPress, shortcutKeys } = require('./shortcuts.cjs');
 const { OverlayDrag } = require('./overlay-drag.js');
+const { OverlayVisibility, overlayWindowOptions } = require('./overlay-visibility.cjs');
 const { AudioTurn } = require('./audio-turn.cjs');
 const { OverlayPointer } = require('./overlay-pointer.cjs');
 const { Diagnostics, safeError } = require('./diagnostics.cjs');
@@ -17,10 +18,11 @@ const os = require('node:os');
 const { Registry } = require('./plugins/registry.cjs');
 const { PluginRuntime } = require('./plugins/pipeline.cjs');
 const { pluginPreferences, failure } = require('./plugins/manifest.cjs');
-const { TranscriptOutput } = require('./transcript-output.cjs');
+const { TranscriptOutput, autoCopyPreview } = require('./transcript-output.cjs');
 
 const uiUrl = pathToFileURL(path.join(__dirname, 'index.html')).href;
 const overlayUrl = pathToFileURL(path.join(__dirname, 'overlay.html')).href;
+const runtimeLabel = `${process.platform === 'win32' ? 'Windows' : 'macOS'} ${process.arch === 'arm64' ? 'ARM64' : process.arch}`;
 const profile = app.commandLine.getSwitchValue('user-data-dir');
 if (profile) app.setPath('userData', path.resolve(profile));
 if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
@@ -38,6 +40,7 @@ let status = { phase: 'idle', message: 'Enable cloud dictation, then use the glo
 let checkingAuth = false;
 let authProbe;
 let overlayDrag;
+let overlayVisibility;
 let overlayMoveTimer;
 let overlayPointer;
 let diagnostics = { record() {}, flush: () => Promise.resolve() };
@@ -99,7 +102,8 @@ function initializeDiagnostics() {
 
 function snapshot() {
   const { plugins, ...publicSettings } = settings;
-  return { ...status, ...publicSettings, version: app.getVersion(), preferenceError, loginEnabled, loginManaged: !profile,
+  return { ...status, ...publicSettings, version: app.getVersion(), architecture: process.arch, targetLabel: runtimeLabel,
+    preferenceError, loginEnabled, loginManaged: !profile,
     pluginCount: plugins.entries.filter((entry) => entry.enabled).length,
     pluginPrivacy: Boolean(active?.pipeline?.privacy),
     pluginWarnings: [...pluginWarnings], pluginChanging,
@@ -299,13 +303,11 @@ function publish(phase, message, text = status.text, details = {}) {
   for (const target of [window, overlay]) {
     if (target && !target.isDestroyed()) target.webContents.send('status', snapshot());
   }
-  tray?.setToolTip(`VI: ${phase} (v${app.getVersion()})`);
+  tray?.setToolTip(`VI: ${phase} (v${app.getVersion()}, ${runtimeLabel})`);
   const visible = settings.consent || phase === 'error';
   const bindingInput = pluginLoading?.fromShortcut || active?.origin === 'shortcut' &&
     ['preparing', 'binding'].includes(active.inputState) && ['preparing', 'recording'].includes(phase);
-  if (!quitting && visible) {
-    if (overlay && !overlay.isVisible() && !bindingInput) overlay.showInactive();
-  } else if (overlay?.isVisible()) overlay.hide();
+  overlayVisibility?.update(!quitting && visible, Boolean(bindingInput));
 }
 
 function trusted(event, allowOverlay = false) {
@@ -332,7 +334,10 @@ async function abort(message = 'Dictation cancelled.', failed = false, reason = 
   run.cancelled = true;
   if (run.pipeline.enabled && !retainedOutput?.sealed) {
     status.text = '';
-    if (failed && run.pipeline.privacy && !message.startsWith('Plugin ')) message = `Dictation failed (${reason}).`;
+    if (failed && run.pipeline.privacy && !message.startsWith('Plugin ') &&
+        !['clipboard-busy', 'clipboard-format', 'clipboard-snapshot-failed', 'restore-failed'].includes(reason)) {
+      message = `Dictation failed (${reason}).`;
+    }
   }
   logEvent(failed ? 'error' : 'cancel', run, { reason: failed ? reason : 'cancel' });
   run.controller.abort();
@@ -425,6 +430,7 @@ async function begin(fromShortcut) {
     run.pipeline = pluginRuntime.begin(run.id, settings.plugins.profile, run.controller.signal);
   }
   run.output = new TranscriptOutput(run.pipeline);
+  overlayVisibility?.allow();
   active = run;
   logEvent('turn-start', run);
   run.audio = new AudioTurn({
@@ -583,12 +589,14 @@ async function finalize(run) {
       result = { kind: await run.deliveryPending ? 'requested' : 'preview' };
     } catch (error) {
       inputError = error;
-      logEvent('input-error', run, { reason: error.code || 'native-error', check: error.check });
+      if (error.pasteRequested) run.onceWrites = 1;
+      logEvent('input-error', run, { reason: error.code || 'native-error', check: error.check, errorNumber: error.errorNumber });
     } finally { run.deliveryPending = undefined; }
     if (active !== run || run.cancelled) return;
     if (!inputError && result.kind === 'requested') run.onceWrites = 1;
     let copyFailed = false;
-    if (run.autoCopy) {
+    const copyPreview = autoCopyPreview(run);
+    if (copyPreview) {
       publish('finishing', 'Copying the final transcript to the clipboard...', text);
       run.copyPending = true;
       try { await clipboard.writeText(text); }
@@ -599,11 +607,13 @@ async function finalize(run) {
       finally { run.copyPending = false; }
     }
     if (active !== run || run.cancelled) return;
-    const copyMessage = !run.autoCopy ? ''
+    const copyMessage = !copyPreview ? ''
       : copyFailed ? ' Automatic clipboard copy failed; use Copy result to try again.'
         : ' Final transcript copied to clipboard.';
     if (inputError) {
-      await abort(`${inputError.message}${copyMessage}`, true, 'input');
+      const reason = ['clipboard-busy', 'clipboard-format', 'clipboard-snapshot-failed', 'restore-failed'].includes(inputError.code)
+        ? inputError.code : 'input';
+      await abort(`${inputError.message}${copyMessage}`, true, reason);
       return;
     }
     logEvent('done', run, { reason: skippedReason || run.stopReason, outcome: result.kind, transcriptChars: text.length });
@@ -614,7 +624,7 @@ async function finalize(run) {
       ? 'Paste requested in the original window. Ready for the next recording.'
         : run.origin === 'preview' ? 'Preview transcript ready. No automatic typing was requested.'
           : `Automatic paste skipped (${[skippedReason || 'target-changed', run.inputCheck].filter(Boolean).join(': ')}).`;
-    const clipboardMessage = run.autoCopy ? copyMessage
+    const clipboardMessage = copyPreview ? copyMessage
       : result.kind === 'requested' ? ' The previous clipboard was restored unless a newer copy replaced it.'
         : ' Use Copy result to copy the final transcript.';
     publish(copyFailed ? 'error' : 'done', message + clipboardMessage, text,
@@ -780,6 +790,11 @@ function installIpc() {
     return snapshot();
   });
   handle('toggle', async () => { await begin(false); });
+  handle('show-floating', () => {
+    overlayVisibility.allow();
+    publish(status.phase, status.message);
+    return snapshot();
+  });
   handle('overlay-stop', async () => {
     if (pluginLoading) { await abort(); return; }
     if (active && !active.stopRequested) requestStop(active);
@@ -803,7 +818,7 @@ function installIpc() {
   }, true);
   handle('cancel', () => {
     if (active || pluginLoading) return abort();
-    overlay?.hide();
+    overlayVisibility?.hideByUser();
   }, true);
   handle('copy-result', async () => {
     if (pluginChanging) throw new Error('Wait for plugin configuration to finish.');
@@ -924,6 +939,8 @@ async function launch() {
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Windows and macOS only.');
   desktop = new DesktopInput({ diagnostics });
   diagnostics.checkpoint('app-start', { version: app.getVersion() });
+  app.setAboutPanelOptions({ applicationName: 'VI',
+    applicationVersion: `${app.getVersion()} (${runtimeLabel})`, version: app.getVersion() });
   if (process.platform === 'darwin') app.dock?.hide();
   powerMonitor.on('lock-screen', () => {
     diagnostics.checkpoint('lifecycle', { component: 'main', state: 'lock' });
@@ -967,11 +984,32 @@ async function launch() {
   const displays = screen.getAllDisplays().sort((a, b) => Number(b.id === primary.id) - Number(a.id === primary.id));
   const position = overlayPosition(settings.overlay, displays);
   overlay = new BrowserWindow({
-    width: 224, height: 54, ...position, frame: false, focusable: false, alwaysOnTop: true,
-    skipTaskbar: true, show: false, resizable: false, movable: true, transparent: true, acceptFirstMouse: true,
-    backgroundColor: '#00000000',
+    ...overlayWindowOptions(process.platform), ...position,
     webPreferences: { preload: path.join(__dirname, 'overlay-preload.cjs'), contextIsolation: true,
       sandbox: true, backgroundThrottling: false },
+  });
+  overlayVisibility = new OverlayVisibility(overlay, () => {
+    const primary = screen.getPrimaryDisplay();
+    return screen.getAllDisplays().sort((a, b) => Number(b.id === primary.id) - Number(a.id === primary.id));
+  }, (data) => diagnostics.record('overlay-health', { component: 'overlay', ...data }));
+  for (const event of ['display-added', 'display-removed', 'display-metrics-changed']) {
+    screen.on(event, () => {
+      if (quitting || overlay.isDestroyed()) return;
+      cancelOverlayInteraction();
+      overlayVisibility.displayChanged();
+    });
+  }
+  overlay.webContents.on('did-finish-load', () => {
+    overlayVisibility.rendererReady();
+    overlay.webContents.send('status', snapshot());
+  });
+  overlay.webContents.on('render-process-gone', () => {
+    cancelOverlayInteraction();
+    try { overlayVisibility.rendererGone(); }
+    catch (error) { overlayControlError = error.message; publish(status.phase, status.message); }
+  });
+  powerMonitor.on('resume', () => {
+    if (!quitting && !overlay.isDestroyed()) overlayVisibility.displayChanged();
   });
   overlayDrag = new OverlayDrag({
     window: overlay,
@@ -993,7 +1031,10 @@ async function launch() {
   });
   overlay.on('hide', () => {
     cancelOverlayInteraction();
+    overlayVisibility.record('hidden');
   });
+  overlay.on('show', () => overlayVisibility.record('visible'));
+  overlay.on('resize', () => overlayVisibility.record('bounds'));
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
     callback(contents === window.webContents && contents.getURL() === uiUrl &&
       permission === 'media' && (Boolean(testingMic) || settings.consent && Boolean(active)) &&
@@ -1059,6 +1100,7 @@ async function launch() {
   tray = new Tray(trayIcon());
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open VI', click: showSettings },
+    { label: 'Show floating controls', click: () => { overlayVisibility.allow(); publish(status.phase, status.message); } },
     { label: 'Stop dictation', click: () => { if (active) requestStop(active); } },
     { label: 'Cancel dictation', click: () => abort() },
     { type: 'separator' },

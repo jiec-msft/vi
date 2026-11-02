@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('voice', {
   consent: (value) => request('set-consent', value),
   toggle: () => request('toggle'),
   cancel: () => request('cancel'),
+  showFloating: () => request('show-floating'),
   copy: () => request('copy-result'),
   plugins: () => request('get-plugins'),
   setPluginEnabled: (id, enabled) => request('set-plugin-enabled', id, enabled),

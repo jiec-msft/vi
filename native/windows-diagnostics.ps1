@@ -1,3 +1,5 @@
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-bootstrap.ps1'))
+Write-ViStartup 'script-entry'
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
@@ -140,3 +142,4 @@ public static class ViNativeDiagnostics {
     }
 }
 '@
+Write-ViStartup 'diagnostics-ready'

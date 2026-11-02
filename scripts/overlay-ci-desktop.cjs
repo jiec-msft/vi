@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
+const { nativeHelperEnvironment } = require('../app/native-diagnostics.cjs');
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 function nodeEvent(report, kind, extra = {}) {
@@ -32,7 +33,7 @@ function createRequest(report, role, generation, caseId) {
   return value;
 }
 function requestEnvironment(request, base = process.env) {
-  return { ...base, VI_CI_NATIVE_GENERATION: String(request.generation),
+  return { ...nativeHelperEnvironment(base), VI_CI_NATIVE_GENERATION: String(request.generation),
     VI_CI_NATIVE_SPAWN_REQUEST: request.requestId, VI_CI_NATIVE_REQUEST_SEQUENCE: String(request.requestSequence),
     VI_CI_NATIVE_REQUEST_NONCE: request.requestNonce, VI_CI_NATIVE_CALLER_PID: String(request.callerPid) };
 }
@@ -74,10 +75,21 @@ async function consumeCommitted(directory, stem, request, report) {
     jobBytesBase64: jobBytes.toString('base64'), consumed };
 }
 async function executeOwnedDriver(report, request, args, outputDirectory) {
+  const started = process.hrtime.bigint();
   const resultPromise = new Promise((resolve) => {
     const child = execFile('powershell.exe', args, { timeout: 15000, windowsHide: true, env: requestEnvironment(request) },
       (error, stdout, stderr) => {
-        request.callback = nodeEvent(report, 'driver-callback', { requestId: request.requestId });
+        const stderrText = String(stderr || '');
+        request.callback = nodeEvent(report, 'driver-callback', { requestId: request.requestId, pid: request.returnedPid,
+          code: error ? (Number.isInteger(error.code) ? error.code : null) : 0,
+          errorCode: typeof error?.code === 'string' ? error.code.slice(0, 64) : undefined,
+          signal: error?.signal || null, killed: error?.killed === true, budgetMs: 15000,
+          spanMs: Math.round(Number(process.hrtime.bigint() - started) / 1e6),
+          stdoutBytes: Buffer.byteLength(String(stdout || '')), stderrBytes: Buffer.byteLength(stderrText),
+          stderrTail: stderrText.slice(-4096), stderrTruncated: stderrText.length > 4096,
+          driverStartup: stderrText.split(/\r?\n/).filter((line) =>
+            /^VI_DRIVER_STAGE (script-entry|bootstrap-ready|mouse-compiled|authority-ready|input-begin|input-returned) \d+$/.test(line) &&
+            line.endsWith(` ${request.returnedPid}`)).slice(-8) });
         if (error) { error.stdout = stdout; error.stderr = stderr; }
         resolve({ error, stdout, stderr });
       });
@@ -92,18 +104,36 @@ async function executeOwnedDriver(report, request, args, outputDirectory) {
   const result = await resultPromise;
   await request.closed;
   delete request.closed;
-  if (!result.stdout.trim()) {
-    throw result.error || new Error('Owned driver produced no complete final response.');
+  let receipt, validationStage = 'empty-response';
+  try {
+    if (!result.stdout.trim()) throw new Error('Owned driver produced no complete final response.');
+    validationStage = 'response-json';
+    const value = JSON.parse(result.stdout);
+    request.response = nodeEvent(report, 'driver-response-consumed', { requestId: request.requestId });
+    validationStage = 'receipt-commit';
+    const ack = await consumeCommitted(outputDirectory, `driver-response-${request.requestNonce}`, request, report);
+    validationStage = 'receipt-pipe';
+    assert.equal(JSON.stringify(ack.value), JSON.stringify(value), 'Pipe response differs from committed native response.');
+    receipt = { ...value, processExitObservedAt: request.exit.at, processExitObservedTicks: request.exit.ticks,
+      causalRequest: request, committedAck: ack };
+  } catch (validationError) {
+    request.validationFailure = nodeEvent(report, 'driver-response-rejected', { requestId: request.requestId, stage: validationStage });
+    if (result.error) {
+      delete result.error.nativeReceipt;
+      result.error.receiptValidationStage = validationStage;
+      Object.defineProperty(result.error, 'receiptValidationError', { value: validationError, configurable: true });
+      throw result.error;
+    }
+    throw validationError;
   }
-  const value = JSON.parse(result.stdout);
-  request.response = nodeEvent(report, 'driver-response-consumed', { requestId: request.requestId });
-  const ack = await consumeCommitted(outputDirectory, `driver-response-${request.requestNonce}`, request, report);
-  assert.equal(JSON.stringify(ack.value), JSON.stringify(value), 'Pipe response differs from committed native response.');
-  const receipt = { ...value, processExitObservedAt: request.exit.at, processExitObservedTicks: request.exit.ticks,
-    causalRequest: request, committedAck: ack };
   if (result.error) { result.error.nativeReceipt = receipt; throw result.error; }
-  assert.equal(value.responseOutcome, 'success');
+  assert.equal(receipt.responseOutcome, 'success');
   return receipt;
+}
+function rethrowDriverError(platform, error, recordInput) {
+  if (error.nativeReceipt) recordInput(error.nativeReceipt);
+  else if (platform !== 'win32' && error.stdout?.trim()) recordInput(error.stdout);
+  throw error;
 }
 function downAuthority(value) {
   return { ownedDownInjected: value.ownedDownInjected, ownerVerified: value.ownerVerified, leftHeldAfter: value.leftHeldAfter,
@@ -678,5 +708,5 @@ function assertDesktopChain(report, desktop) {
 }
 
 module.exports = { assertDesktopChain, assertWrapperOutcome, nodeEvent, createRequest, requestEnvironment,
-  consumeCommitted, executeOwnedDriver, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath,
+  consumeCommitted, executeOwnedDriver, rethrowDriverError, downAuthority, armOwnedEarlyInjection, helperCheckpointQueue, assertJobReceiptPath,
   selfReceiptStem, assertRootReport, committedHelperReady };

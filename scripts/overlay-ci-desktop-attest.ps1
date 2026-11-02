@@ -12,6 +12,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     throw 'Desktop attestation requires the current isolated owned CI desktop.'
 }
 if ($Role -ne 'os-mouse-driver' -and $Generation -gt 4) { throw 'Native helper lifetime generation cap exceeded.' }
+. ([IO.Path]::Combine($PSScriptRoot, '..', 'native', 'windows-bootstrap.ps1'))
 [IO.File]::WriteAllText((Join-Path $Output "native-init-$Role-$PID.json"), (@{
     phase = 'attestor-compile-start'; pid = $PID; role = $Role; generation = $Generation;
     requestId = $env:VI_CI_NATIVE_SPAWN_REQUEST; requestNonce = $env:VI_CI_NATIVE_REQUEST_NONCE;

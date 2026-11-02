@@ -2,7 +2,7 @@ const waveform = new VoiceWaveform(document.getElementById('wave'));
 const labels = { preparing: 'Starting mic', recording: 'Listening', finishing: 'Finishing', cancelling: 'Cancelling' };
 let nativePointer = false;
 let recording = false;
-let nativeButton;
+let completedPointer;
 const failure = (error) => {
   document.getElementById('message').textContent = 'Position not saved';
   document.getElementById('drag-handle').title = error.message;
@@ -22,6 +22,8 @@ window.floatingVoice.onStatus((value) => {
   document.getElementById('message').textContent = value.overlayControlError ? 'Mouse fallback'
     : value.phase === 'error' ? ({ 'input-confirmation': 'Input not confirmed', input: 'Input error',
       microphone: 'Audio interrupted', cloud: 'Connection error', provider: 'Provider setup error',
+      'clipboard-busy': 'Clipboard busy', 'clipboard-format': 'Clipboard preserved',
+      'clipboard-snapshot-failed': 'Clipboard unavailable', 'restore-failed': 'Review paste',
       'no-speech': 'No speech detected',
       plugin: 'Result blocked by plugin' }[value.errorKind] || 'Stopped: error')
     : value.phase === 'done' ? value.insertionResult === 'preview'
@@ -55,30 +57,37 @@ async function cancel() {
   const reply = await window.floatingVoice.cancel();
   if (!reply.ok) document.getElementById('message').textContent = 'Open settings';
 }
-const nativeHandled = (name, event) => {
-  const handled = event?.detail !== 0 && nativeButton?.name === name;
-  nativeButton = undefined;
-  return handled;
-};
+// Buttons use one DOM gesture stream. The polling observer is only a drag fallback.
 for (const name of ['stop', 'cancel']) {
-  document.getElementById(name).addEventListener('pointerdown', (event) => {
-    if (!nativePointer && event.pointerType === 'mouse' && event.button === 0) nativeButton = undefined;
+  const button = document.getElementById(name);
+  let pressed, hovered = false;
+  const action = name === 'stop' ? stop : cancel;
+  button.addEventListener('pointerenter', (event) => { hovered = event.buttons === 0; });
+  button.addEventListener('pointerleave', () => { hovered = false; pressed = undefined; });
+  button.addEventListener('pointerdown', (event) => {
+    if (event.pointerType !== 'mouse' || event.button !== 0) return;
+    completedPointer = undefined;
+    pressed = event.pointerId;
   });
+  button.addEventListener('pointercancel', () => { pressed = undefined; hovered = false; });
+  button.addEventListener('pointerup', (event) => {
+    if (event.pointerType !== 'mouse' || event.button !== 0) return;
+    if (pressed !== event.pointerId && !hovered) return;
+    pressed = undefined;
+    completedPointer = { name, id: event.pointerId };
+    void action();
+  });
+  button.onclick = (event) => {
+    const completed = event.detail !== 0 && completedPointer?.name === name &&
+      (event.pointerId === undefined || event.pointerId === completedPointer.id);
+    completedPointer = undefined;
+    if (!completed) void action();
+  };
 }
-document.getElementById('stop').onclick = (event) => { if (!nativeHandled('stop', event)) void stop(); };
-document.getElementById('cancel').onclick = (event) => { if (!nativeHandled('cancel', event)) void cancel(); };
 window.floatingVoice.onPointerDown(({ x, y }) => {
   if (!nativePointer) return;
-  nativeButton = undefined;
   const target = document.elementFromPoint(x, y);
-  if (target?.closest('#stop')) {
-    nativeButton = { name: 'stop' };
-    void stop();
-  } else if (target?.closest('#cancel')) {
-    nativeButton = { name: 'cancel' };
-    void cancel();
-  }
-  else if (target?.closest('#drag-handle')) {
+  if (target?.closest('#drag-handle')) {
     void window.floatingVoice.drag('start').then((reply) => {
       if (!reply.ok) throw new Error(reply.error);
     }).catch(failure);

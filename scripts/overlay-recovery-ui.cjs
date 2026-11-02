@@ -1,13 +1,14 @@
 const { app, BrowserWindow, clipboard, systemPreferences, nativeImage, screen, ipcMain } = require('electron');
 const fs = require('node:fs/promises');
-const { writeFileSync } = require('node:fs');
+const { writeFileSync, renameSync } = require('node:fs');
+const { parseNativeStartup } = require('../app/native-diagnostics.cjs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const readline = require('node:readline');
 const { promisify } = require('node:util');
 const { recordDesktop } = require('./desktop-evidence.cjs');
-const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, downAuthority,
+const { nodeEvent, createRequest, requestEnvironment, consumeCommitted, executeOwnedDriver, rethrowDriverError, downAuthority,
   armOwnedEarlyInjection, helperCheckpointQueue, selfReceiptStem, committedHelperReady } = require('./overlay-ci-desktop.cjs');
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !process.env.VI_OUTPUT ||
@@ -51,6 +52,18 @@ let ownedDownReceipt;
 let shows = 0, hides = 0, focusChanges = 0;
 let stage = 'startup';
 report.windowEvents = [];
+let startupPublications = 0;
+function startupCheckpoint(phase) {
+  if (!expectedDesktop) return;
+  assert.ok(++startupPublications <= 96, 'Owned startup progress publication bound exceeded.');
+  const file = path.join(desktopReceipt, 'startup-progress.json');
+  writeFileSync(`${file}.tmp`, JSON.stringify({ pid: process.pid, caseId: expectedDesktop, phase,
+    at: Date.now(), ticks: process.hrtime.bigint().toString(),
+    helpers: report.helpers.map(({ pid, role, generation, startup, events }) => ({
+      pid, role, generation, startup: startup || [], readyCount: events.filter(({ type }) => type === 'ready').length,
+    })) }));
+  renameSync(`${file}.tmp`, file);
+}
 const checkpointQueue = helperCheckpointQueue((file, text) => fs.writeFile(file, text), (helper, error) => {
   helper.proofError = `CI helper checkpoint failed: ${error.message}`; console.error(error);
 }, earlyRecovery);
@@ -61,6 +74,7 @@ function helperCheckpoint(helper, phase) {
       phase, at: Date.now(), ticks: process.hrtime.bigint().toString(), clock: 'Node-process-hrtime',
       pid: helper.pid, role: helper.role, generation: helper.generation, requestId: helper.requestId,
       requestNonce: helper.requestNonce, stderrBytes: helper.stderrBytes, stderrTail: helper.stderrTail || '',
+      startup: helper.startup || [],
       readyCount: helper.events.filter(({ type }) => type === 'ready').length,
       completedAcks: helper.readyAcks.length, proofError: helper.proofError, exit: helper.exit, close: helper.close,
     }, null, 2), helper);
@@ -138,9 +152,7 @@ async function mouse(mode, point) {
         [String(process.pid), mode, String(location.x), String(location.y)], { timeout: 10000 });
     }
   } catch (error) {
-    if (error.nativeReceipt) recordInput(error.nativeReceipt);
-    else if (error.stdout?.trim()) recordInput(error.stdout);
-    throw error;
+    rethrowDriverError(process.platform, error, recordInput);
   }
   const input = recordInput(process.platform === 'win32' ? result : result.stdout);
   assert.equal(input.ownerVerified, true);
@@ -222,16 +234,25 @@ async function interruptedButton(name) {
   await mouse('hover', point);
   await mouse('down', point);
   const terminal = name === 'stop' ? 'done' : 'idle';
-  await until(async () => (await status()).phase === terminal && await evaluate('capture === undefined'),
-    `native ${name} action completed before release`);
-  assert.equal(actionCount(name), count + 1);
+  assert.equal(report.osInputs.at(-1).leftHeldAfter, true, 'Physical button must remain held.');
+  assert.equal(actionCount(name), count, `${name} committed on press rather than release.`);
+  assert.equal((await status()).phase, 'recording');
   await fs.writeFile(unavailable, 'cursor sampling unavailable');
-  await until(async () => (await status()).nativePointerState === 'suspended', `native ${name} press interrupted`);
+  await until(async () => {
+    const current = await status();
+    assert.equal(actionCount(name), count, `${name} committed while the physical press was held.`);
+    assert.equal(current.phase, 'recording');
+    return current.nativePointerState === 'suspended';
+  }, `native ${name} press interrupted without committing`);
   await mouse('up', point);
+  await until(async () => (await status()).phase === terminal && await evaluate('capture === undefined'),
+    `physical ${name} action completed after release`);
   await pause(200);
   assert.equal(actionCount(name), count + 1, `Interrupted ${name} dispatched again on DOM click.`);
   assert.equal((await status()).phase, terminal);
   assert.equal(overlay.isVisible(), true);
+  (report.releaseCommits ||= []).push({ name, heldWithoutAction: true, actionCount: actionCount(name) - count,
+    terminal, physicalReleaseVerified: report.osInputs.at(-1).leftHeldAfter === false });
   report.checks.push(`${name}-physical-press-owned-across-native-suspension`);
   const fallback = name === 'stop' ? 'cancel' : 'stop', fallbackCount = actionCount(fallback);
   stage = `fresh-fallback-${fallback}-after-interrupted-${name}`;
@@ -259,6 +280,7 @@ function markerVisible(png, cyan = false) {
   return count >= 8;
 }
 async function run() {
+  startupCheckpoint('module-entry');
   assert.equal(process.arch, process.env.VI_EXPECTED_ARCH);
   const provider = path.resolve(process.env.VI_PROVIDER_DIR);
   service = await require(path.join(provider, 'fixtures', 'provider-service.cjs')).createService();
@@ -288,11 +310,13 @@ async function run() {
     }
 `;
     assert.ok(original.includes('if (!GetCursorPos(out point))'));
-    let injected = original.replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+    let injected = original.replace("([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))", quote(path.resolve('native', 'windows-diagnostics.ps1')))
       .replace('    POINT last;', `    POINT last;${seam}`)
       .replace('if (!GetCursorPos(out point))', 'if (!ReadCursor(out point))');
     if (expectedDesktop) {
-      const attest = (role) => `& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role} -Generation $env:VI_CI_NATIVE_GENERATION`;
+      const attest = (role) => `[Console]::Error.WriteLine("VI_STARTUP ci-attest-begin $PID $([IntPtr]::Size) $($PSVersionTable.PSVersion.Major) $($PSVersionTable.PSEdition)")
+& ${quote(path.resolve('scripts', 'overlay-ci-desktop-attest.ps1'))} -DesktopName ${quote(expectedDesktop)} -Output ${quote(directory)} -JobOutput ${quote(desktopReceipt)} -Role ${role} -Generation $env:VI_CI_NATIVE_GENERATION
+[Console]::Error.WriteLine("VI_STARTUP ci-attest-end $PID $([IntPtr]::Size) $($PSVersionTable.PSVersion.Major) $($PSVersionTable.PSEdition)")`;
       injected = injected.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'\n${attest('overlay-pointer')}`);
       injected = injected.replace('return !System.IO.File.Exists(', `bool confirmed = false;
         foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()) {
@@ -323,7 +347,9 @@ async function run() {
       await fs.writeFile(deliveryFile, delivery.replace("$ErrorActionPreference = 'Stop'",
         `$ErrorActionPreference = 'Stop'\n${attest('desktop-delivery')}`)
         .replace("(Join-Path $PSScriptRoot 'windows-input.ps1')", quote(path.resolve('native', 'windows-input.ps1')))
-        .replace("(Join-Path $PSScriptRoot 'windows-diagnostics.ps1')", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+        .replace("([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))", quote(path.resolve('native', 'windows-diagnostics.ps1')))
+        .replace("([IO.Path]::Combine($PSScriptRoot, 'windows-clipboard-errors.ps1'))", quote(path.resolve('native', 'windows-clipboard-errors.ps1')))
+        .replace("(Join-Path $PSScriptRoot 'windows-clipboard-snapshot.cs')", quote(path.resolve('native', 'windows-clipboard-snapshot.cs')))
         .replace('while ($null -ne ($line = [VoiceCommands]::ReadNext()))',
           '[OverlayDesktopAttestor]::ConfirmExecution()\nwhile ($null -ne ($line = [VoiceCommands]::ReadNext()))')
         .replace('@{ id = $request.id; ok = $true; value = $value } | ConvertTo-Json -Compress -Depth 5',
@@ -338,6 +364,7 @@ async function run() {
     await fs.writeFile(helperFile, injected);
   }
   const spawn = childProcess.spawn;
+  startupCheckpoint('native-sources-prepared');
   childProcess.spawn = (file, args, options) => {
     const pointer = args?.some((arg) => typeof arg === 'string' && arg.endsWith('windows-overlay.ps1'));
     const delivery = file.endsWith('macos-delivery') ||
@@ -369,6 +396,7 @@ async function run() {
         spawnClock: 'Node-process-hrtime', startedAtClock: 'Node-Date.now-not-native-FILETIME',
         startedAtMeaning: 'observer-after-synchronous-spawn-return-before-spawn-event' };
       report.helpers.push(helper);
+      startupCheckpoint('helper-created');
       pendingHelperAcks.set(helper, []);
       helperCheckpoint(helper, 'returned-pid');
       child.once('spawn', () => {
@@ -426,6 +454,17 @@ async function run() {
       child.stderr.on('data', (bytes) => {
         helper.stderrBytes += bytes.length;
         helper.stderrTail = ((helper.stderrTail || '') + bytes.toString('utf8')).slice(-8192);
+        const lines = ((helper.startupTail || '') + bytes.toString('utf8')).split(/\r?\n/);
+        helper.startupTail = lines.pop().slice(-256);
+        for (const line of lines) {
+          const entry = parseNativeStartup(line, child.pid);
+          if (entry) {
+            helper.startup ||= [];
+            assert.ok(helper.startup.length < 16, 'Owned native startup stage bound exceeded.');
+            helper.startup.push({ ...entry, observedAt: Date.now() });
+            startupCheckpoint('native-startup');
+          }
+        }
         helperCheckpoint(helper, 'native-stderr');
       });
       child.once('error', () => { helper.errorAt = Date.now(); });
@@ -448,8 +487,10 @@ async function run() {
     }
     return listener(event, ...args);
   });
+  startupCheckpoint('requiring-application');
   require('../app/main.cjs');
   await app.whenReady();
+  startupCheckpoint('waiting-native-readiness');
   await until(async () => {
     mainWindow = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/index.html'));
     overlay = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/overlay.html'));
@@ -457,6 +498,7 @@ async function run() {
       (process.platform !== 'win32' || (await status()).nativePointer);
   }, 'full application and native pointer startup', 35000);
   checkpointQueue.release();
+  startupCheckpoint('application-pointer-ready');
   report.initialPointerRestarts = (await status()).nativePointerRestarts;
   if (earlyRecovery) {
     assert.equal(report.initialPointerRestarts, 1);
@@ -516,6 +558,7 @@ async function run() {
     await fs.writeFile(path.join(desktopReceipt, 'ready.tmp'), JSON.stringify({ pid: process.pid, desktop: expectedDesktop,
       mainWindow: report.windowIds.main, overlayWindow: report.windowIds.overlay }));
     await fs.rename(path.join(desktopReceipt, 'ready.tmp'), path.join(desktopReceipt, 'ready.json'));
+    startupCheckpoint('root-ready');
     report.desktopScope = 'ordinary owned CI desktop; not default user desktop acceptance';
   }
   stopVideo = await recordDesktop(directory, (png) => {

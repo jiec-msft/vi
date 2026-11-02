@@ -6,7 +6,7 @@ const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { fileInventory } = require('../scripts/distribution-files.cjs');
 const { distributionVersion, childEnv, electronDistribution, packagingShellContext,
-  validatePackagingShell, probePackagingShell } = require('../scripts/distribution.cjs');
+  validatePackagingShell, probePackagingShell, finalDesktopLaunch, finalDesktopDiagnostics } = require('../scripts/distribution.cjs');
 
 test('Windows packaging uses the native runner PowerShell family with an isolated module path', () => {
   const programFiles = path.resolve('synthetic-program-files');
@@ -130,6 +130,114 @@ test('native distribution child cannot inherit credentials, module search paths 
   }
   assert.equal(env.USERPROFILE, 'synthetic-profile');
   assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
+});
+
+test('final desktop starts the locked browser host with early isolated paths and unchanged strict budgets', () => {
+  const root = path.resolve('synthetic final launch');
+  const executable = path.join(root, 'electron.exe'), entry = path.join(root, 'fixture.cjs');
+  const resources = path.join(root, 'fresh resources'), authority = path.join(root, 'authority.json');
+  const profile = path.join(root, 'owned profile'), progress = path.join(root, 'progress.jsonl');
+  const log = path.join(profile, 'chromium.log');
+  const launch = finalDesktopLaunch(executable, entry, resources, authority, profile, progress, log);
+  assert.equal(launch.executable, executable);
+  assert.deepEqual(launch.args, ['--enable-logging=file', '--log-level=2', `--log-file=${log}`, `--user-data-dir=${profile}`,
+    entry, '--ci-final-native-delivery', resources, authority]);
+  assert.equal(launch.options.cwd, profile);
+  assert.equal(launch.options.timeout, 65000);
+  assert.equal(launch.options.maxBuffer, 262144);
+  assert.equal(launch.options.windowsHide, true);
+  assert.equal(launch.options.env.GITHUB_ACTIONS, 'true');
+  assert.equal(launch.options.env.VI_FIXTURE_PROFILE, profile);
+  assert.equal(launch.options.env.VI_FIXTURE_PROGRESS, progress);
+  assert.equal(launch.options.env.ELECTRON_RUN_AS_NODE, undefined);
+  assert.equal(launch.options.env.USERPROFILE, profile);
+  for (const name of Object.keys(launch.options.env)) {
+    assert.doesNotMatch(name, /TOKEN|PASSWORD|SECRET|CREDENTIAL|NODE_PATH|NODE_OPTIONS|DISABLE_SANDBOX/i);
+  }
+  assert.doesNotMatch(launch.args.join(' '), /no-sandbox|disable-gpu|ignore-certificate/);
+  assert.throws(() => finalDesktopLaunch('relative.exe', entry, resources, authority, profile, progress, log), /absolute/);
+});
+
+test('final desktop launch diagnostics distinguish absent JS entry from native log sites without raw content', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vi-final-launch-contract-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const progress = path.join(root, 'progress.jsonl'), log = path.join(root, 'native.log');
+  const result = { pid: 42, status: 0x80000003, signal: null, stdout: '\r\n', stderr: '' };
+  const absent = finalDesktopDiagnostics(result, progress, log);
+  assert.equal(absent.progress.status, 'absent');
+  assert.equal(absent.stdoutBytes, 2);
+  assert.equal(absent.stderrBytes, 0);
+  assert.equal(absent.windowsStatusHex, '0x80000003');
+  assert.deepEqual(absent.progress.entries, []);
+  fs.writeFileSync(progress, '');
+  assert.equal(finalDesktopDiagnostics(result, progress, log).progress.status, 'empty');
+  fs.writeFileSync(progress, `${JSON.stringify({ pid: 42, stage: 'js-entry' })}\n`);
+  fs.writeFileSync(log, `${'PRIVATE_PREFIX\n'.repeat(4000)}[42:17:FATAL:base\\owned_check.cc:123] PRIVATE_PAYLOAD\n`);
+  const entered = finalDesktopDiagnostics(result, progress, log);
+  assert.equal(entered.progress.status, 'verified');
+  assert.deepEqual(entered.progress.entries, [{ pid: 42, stage: 'js-entry' }]);
+  assert.equal(entered.nativeLog.sampledBytes, 32768);
+  assert.equal(entered.nativeLog.truncated, true);
+  assert.deepEqual(entered.nativeLog.sites, [{ severity: 'fatal', file: 'owned_check.cc', line: 123 }]);
+  assert.doesNotMatch(JSON.stringify(entered), /PRIVATE|PAYLOAD|PREFIX|base\\|text/);
+  for (const entry of [{ pid: 99, stage: 'js-entry' }, { pid: 42, stage: 'PRIVATE_STAGE' },
+    { pid: 42, stage: 'js-entry', message: 'PRIVATE_MESSAGE' }]) {
+    fs.writeFileSync(progress, JSON.stringify(entry));
+    const invalid = finalDesktopDiagnostics(result, progress, log);
+    assert.equal(invalid.progress.status, 'invalid');
+    assert.deepEqual(invalid.progress.entries, []);
+    assert.doesNotMatch(JSON.stringify(invalid), /PRIVATE/);
+  }
+  fs.writeFileSync(progress, 'x'.repeat(9000));
+  assert.equal(finalDesktopDiagnostics(result, progress, log).progress.status, 'invalid');
+  assert.equal(finalDesktopDiagnostics({ ...result, status: -2147483645 }, progress, log).windowsStatusHex, '0x80000003');
+  const timedOut = finalDesktopDiagnostics({ ...result, status: null, signal: 'SIGTERM',
+    error: { code: 'ETIMEDOUT', message: 'PRIVATE_SPAWN_PATH' } }, progress, log);
+  assert.equal(timedOut.spawnError, 'ETIMEDOUT');
+  assert.equal(timedOut.signal, 'SIGTERM');
+  assert.equal(timedOut.windowsStatusHex, null);
+  assert.doesNotMatch(JSON.stringify(timedOut), /PRIVATE/);
+  const nonFile = path.join(root, 'non-file');
+  fs.mkdirSync(nonFile);
+  const readFailure = finalDesktopDiagnostics(result, nonFile, log);
+  assert.equal(readFailure.progress.status, 'read-error');
+  assert.ok(['not-file', 'EISDIR', 'EPERM', 'EACCES'].includes(readFailure.progress.readError));
+  assert.equal(readFailure.exitStatus, result.status);
+  fs.writeFileSync(log, Array.from({ length: 20 }, (_, line) =>
+    `[42:17:ERROR:base\\owned_check.cc:${line + 1}] PRIVATE_PAYLOAD`).join('\n'));
+  const bounded = finalDesktopDiagnostics(result, progress, log);
+  assert.equal(bounded.nativeLog.sites.length, 8);
+  assert.doesNotMatch(JSON.stringify(bounded), /PRIVATE/);
+});
+
+test('final extracted gate retains entry stages, exact native HWND and all delivery and cleanup assertions', () => {
+  const source = fs.readFileSync(path.resolve('scripts', 'distribution-desktop.cjs'), 'utf8');
+  const lifecycle = fs.readFileSync(path.resolve('scripts', 'distribution-desktop-lifecycle.cjs'), 'utf8');
+  const entry = source.indexOf("lifecycle.publish('js-entry')");
+  assert.ok(entry >= 0 && entry < source.indexOf("require('electron')"));
+  for (const text of ['authority.electronSourceExecutableSha256', 'authority.sourceFiles',
+    'target.pid, process.pid', 'target.window, editor.getNativeWindowHandle()', "progress('paste-verified')",
+    'actualMixedClipboardRestored', 'appMainExercised: false', 'new FinalDesktopLifecycle',
+    'lifecycle.finish(error)', 'lifecycle.deadline()']) {
+    assert.ok(source.includes(text));
+  }
+  for (const text of ["this.publish('complete')", 'this.report.helperExited', '2500']) assert.ok(lifecycle.includes(text));
+  assert.ok(source.includes('60000'));
+  assert.ok(source.includes("app.commandLine.getSwitchValue('user-data-dir'), process.env.VI_FIXTURE_PROFILE"));
+  assert.ok(!source.includes("app.commandLine.appendSwitch('user-data-dir'"));
+  assert.equal((source.match(/await writeMixedClipboard\(clipboard, ClipboardItem\)/g) || []).length, 1);
+  assert.equal((source.match(/await readMixedClipboard\(clipboard\)/g) || []).length, 2);
+  assert.ok(source.includes('assert.deepEqual(await readMixedClipboard(clipboard), original)'));
+  assert.doesNotMatch(source, /clipboard\.readHTML|clipboard\.write\(/);
+  const setup = source.indexOf("require('./owned-foreground.cjs')"), baseline = source.indexOf('const before = new Set');
+  const warmup = source.indexOf('await driver.warmup()'), acquisition = source.indexOf('await acquireOwnedForeground(');
+  assert.ok([setup, baseline, warmup, acquisition].every((index) => index >= 0));
+  assert.ok(setup < baseline && warmup < acquisition);
+  assert.ok(source.includes('document.activeElement.tagName'));
+  assert.ok(!source.includes('editor.focus()'));
+  const workflow = fs.readFileSync(path.resolve('.github', 'workflows', 'native-distribution.yml'), 'utf8');
+  assert.ok(workflow.includes('artifacts-ci/distribution/final-desktop.launch.json'));
+  assert.ok(!workflow.includes('final-desktop.chromium.log'));
 });
 
 test('native base production is manual, read-only and declares exactly the supported native hosts', () => {

@@ -1,0 +1,42 @@
+name: Windows native startup comparison (nonrelease)
+on:
+  push:
+    branches: [ci/windows-native-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  startup:
+    name: Native startup ${{ matrix.arch }} / ${{ matrix.variant }} (nonrelease)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-11-arm, arch: arm64, variant: candidate}
+          - {runner: windows-2025, arch: x64, variant: candidate}
+    env:
+      VI_EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+      - name: Fresh process startup and engine provenance
+        run: node scripts/native-startup-probe.cjs "${{ matrix.variant }}"
+      - name: Actual owned clipboard and native diagnostic fixtures
+        if: always() && matrix.variant == 'candidate'
+        run: |
+          node --test --test-concurrency=1 test/framework/clipboard-transaction.test.cjs test/framework/native-diagnostics.test.cjs test/framework/native-types.test.cjs test/framework/diagnostics.test.cjs test/framework/native-delivery.test.cjs 2>&1 |
+            Tee-Object -FilePath artifacts-ci/native-startup/candidate/fixtures.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-startup-${{ matrix.arch }}-${{ matrix.variant }}
+          path: artifacts-ci/native-startup
+          if-no-files-found: error

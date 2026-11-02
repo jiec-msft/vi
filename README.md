@@ -2,6 +2,340 @@
 
 Voice Input.
 
+## 0.6.4 Windows floating controls and clipboard delivery
+
+Windows 浮窗改用 compact opaque native surface，仍然不激活、不抢焦点，
+不关闭 GPU 或 sandbox。display/work-area 变化会按当前真实 work area
+重新 clamp 224×54 DIP 边界；renderer 退出仅允许一次有界 reload，不重启
+录音。主动 Hide 是独立用户意图，display/status 更新不能撤销；可从
+settings 的 Show floating controls 或 tray 菜单显式恢复。
+诊断只记录 owned overlay 的 show/hide、bounds、display、renderer 状态，
+不记录其它窗口标题、全局光标或内容。Native `IsVisible`/topmost/bounds
+不是实际像素证据；opaque surface 和这些 recovery path 的改变，也不等于
+已证明某次历史窗口消失的唯一 compositor 原因。
+Stop/Cancel 以 DOM pointerup/click 为唯一 action stream，不再把 polling
+observer 的 ready 当作“必然会收到每次 press”。同一 pointerup 的后续 click
+只消费该 DOM gesture，下一次 pointerdown 开新 gesture，无时间窗去重；
+只有 mouse-down 被非激活窗口吞掉时，已 hover 的 pointerup 仍可完成首击。
+native polling 仅保留 drag fallback，不再与 DOM 各自派发 Stop/Cancel。
+真实物理首击与完整 quick press 仍须 native CI 证明，不能靠伪造 nativeDown。
+
+Windows paste 在同一个 clipboard lock 内枚举并建立原生 backup，不再依赖
+managed OLE 数据投影/反序列化。已知 bitmap/metafile/palette 按原生类型
+clone；Unicode、rich formats、streams、registered HGLOBAL metadata 保留
+原始 backed bytes。空 clipboard（没有格式）和零值 metadata 都有 roundtrip；
+不能把 `GlobalAlloc(GMEM_MOVEABLE, 0)` 产生的 discarded handle 当作可复制的
+空 buffer。discarded/零容量 HGLOBAL 或无法 render 的格式在修改前明确拒绝，
+不填充伪造 bytes 或忽略格式。OLE 的 DataObject/Ole Private Data
+仅为原 owner 的 marshalling bookkeeping，不可移交给新 owner；其它可用
+用户格式仍须保留。owner-specific/non-HGLOBAL/不可保留格式明确失败，不
+清空原剪贴板继续粘贴。上限为 256 formats、单项 64 MiB、总 backup
+256 MiB；超限同样保留 preview，不进行不安全的部分 snapshot。
+此规则不宣称 universal OLE restore。真实 managed OLE text/RTF/HTML producer
+有单独 fixture；virtual-file `FileContents`/descriptor、embedded/link-source
+等依赖 stream/storage contract 的格式，明确在读取 payload 前拒绝，不把
+一个 HGLOBAL 或跳过 bookkeeping 当作支持全部第三方 OLE 的证据。
+
+恢复时在同一 lock 内重新检查 owner/sequence，再交还 clone；用户的新 copy
+优先。恢复被暂时阻塞时，helper 保留一个 bounded backup，在下一命令前
+继续恢复，绝不重新发送 paste。helper 被强制结束或系统持续拒绝 clipboard
+访问时不能保证恢复完成，必须报告错误，不宣称成功。busy、unpreservable
+format、snapshot failure、changed 和 restore failure 分开；只有实际 API
+返回的 Win32 code 才记录，0 不作为具体 Windows 故障证据。
+EmptyClipboard 和每个 restore setter（包括失败）都在同一个 lock 内更新
+本 transaction 的 sequence。部分 restore 是自己的 mutation，不能当作
+新的 user copy 丢弃 backup；未确认的 same-owner sequence drift 也保留
+backup 并报错。fixture 在清空后、首个 format 后注入失败，验证完整原始
+bytes 恢复、late render 不重写 transcript，以及 genuinely new copy 优先。
+
+Targeted paste 仍经过原有 focus/secure-field/modifier/IME guards，只发送一次
+批准后的结果，不替换整个字段。失败后 approved preview 保留。Auto-copy
+明确仅适用于 preview recording：targeted delivery 后不再额外覆盖 clipboard，
+否则会破坏 native restore 或覆盖用户的新 copy；显式 Copy result 仍可用。
+完整 0.6.4 必须是同源、同版本的三个真实目标：
+`VI-0.6.4-windows-x64.zip`、`VI-0.6.4-windows-arm64.zip`、
+`VI-0.6.4-macos-arm64.zip`。UI/About/tray 显示 runtime architecture，
+`distribution-info.json` 明确为五个字段：`version`、`platform`、
+`architecture`、`target`、`sourceRevision`；旧 `build-info.json` 仍为两字段。
+不能给旧包改名代替。
+
+CI-only Windows fixture 使用实际 transaction 类测试 empty/Unicode/rich/
+image/zero-valued metadata、暂时/持续占用、不可保留格式、新 copy、early reader
+和 restore failure；没有向真实用户字段发送输入。framework UI 另用 owned
+editor 验证实际 caret 单次粘贴与 clipboard restore；浮窗检查从原生 desktop
+capture 验证实际 controls pixels、受控越界/resize、renderer failure 及主动
+Hide/Show，不把 `isVisible` mock 当成完整验收。Hide 的物理负对照必须在
+同一 rectangle 捕获超过 90% 的 CI-owned red underlay，并让同一 painted
+predicate 返回 false；不能用黑图、无 capture 或 window flag 代替。
+display notification 是
+synthetic seam，不宣称真实硬件 DPI/monitor/RDP/compositor incident 已复现。
+这些新 gates 需要在 Windows x64/ARM64 CI 实际运行；旧 head 的 green
+packaging receipts 不证明本功能修复通过，也不授权本机交互测试或发布。
+零长度 allocation 有独立的真实 `SetClipboardData` probe（先验证相同 owner
+可发布 backed text/metadata），记录 numeric format、allocation flags/bytes、
+实际 API 返回值与立即捕获的 Win32 error。若系统接受该 discarded handle，
+仍须验证 transaction 在修改前拒绝；若系统拒绝发布，明确记录该原生拒绝，
+不冒称已经 roundtrip。另有真实 delayed/unrenderable producer 的无 mutation
+负例。fixture 的 allocation/lock/set 失败包含 bounded case/stage/format/size/
+nativeError，不输出 payload 或 format names；raw bytes 与 transaction 前
+实际分配的原始 bytes 比较，不假设 `GlobalSize` 等于请求长度。
+参见 [GlobalAlloc 的零长度契约](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalalloc)
+和 [SetClipboardData 的 ownership/返回值](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setclipboarddata)。
+Electron clipboard 的读写在 UI 与 final-extracted gate 中均等待完成；text/HTML
+baseline 必须先验证为实际内容，再检查 targeted paste 后的恢复，不能用 Promise
+对象代替 clipboard 内容。上述契约修正不定位任何历史用户 clipboard 故障。
+
+Windows unit 先单独运行真实 cold helper READY 测试，再串行执行其余 files，
+避免原生编译与共享 desktop/clipboard fixture 并发；任一失败仍使整个 unit
+失败，不以预热后的成功替代 cold readiness。生产初始化 20 s、action 8 s、
+pointer 重启上限 3 次及既有 CI budgets 不变。helper 在加载 diagnostics 之前、
+各编译边界、protocol loop 之前输出有限 startup markers；只接收实际 child PID、
+固定 stage、pointer size 和 PowerShell major/edition，不记录环境路径或内容。
+fixture 另记录 engine/assembly/transaction/owned-fixture/case 边界，超时保留这些
+标量证据。没有 marker 只表示尚未观察到该边界，不能归因为 host noise 或某个 API。
+CI actor 子进程同样隔离 inherited `PSModulePath`，不改调用者或要求用户安装 Core。
+隔离不是简单删除该变量后依赖默认搜索：child environment 固定到 Windows inbox
+module directory，bootstrap 用实际 `$PSHOME\Modules` 的完整 manifest 路径导入
+Management/Utility，再禁用隐式 module autoload。bootstrap 之前只用 .NET path
+组合，不先调用尚未加载的 `Join-Path`。这避免 Core/user/all-users module
+discovery 影响内部 helper；不修改用户、父进程或 registry。规则依据
+[Windows PowerShell 模块路径构造契约](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath?view=powershell-5.1)，
+但不能仅凭原先空 stderr 或某次超时就断定历史根因。
+
+`Windows native startup comparison (nonrelease)` 是单独的有限诊断，不是发布：
+由维护者 push `ci/windows-native-probe` 或在 workflow 注册后手动触发。
+默认只运行 x64／ARM64 两个 candidate，各用独立 hosted VM、每格 3 min。
+早先 inherited／deleted／inbox-autoload 对照属于其原 source head 的测量，
+不因无关根修复重新执行，也不迁移成当前版本的通过证据。candidate 首先
+启动真实生产 `NativeDelivery`，保留原始 20 s READY deadline，再运行实际 clipboard、
+native-diagnostics、native-types、diagnostics、native-delivery selectors。早期失败仍使整格失败。
+CI-only observer 在 5 s 内核对该 helper
+的真实 PID/parent/creation/image/PE machine；该观察与 readiness 重叠，会明确记录，
+不宣称 uncached OS/disk 或最终 app GUI 测试。只准备源码不等于已执行此比较。
+
+恢复失败使用固定 `restore-open/sequence/copy/empty/write/text/close` stage、numeric format
+和实际 Win32 code，绝不记录 format names/bytes。OLE roundtrip 的 operation
+与 Dispose 异常分别保留；两者都失败时保留 aggregate，而不是用 cleanup 覆盖
+原始故障。没有证明的 restore failure 仍使 fixture/CI 失败：不会吞错、跳过 OLE、
+放宽 owner/sequence 检查、释放 pending backup 或再次发送 paste。
+所有 transaction 分支统一独立保留 operation／cleanup 异常，而不仅是 OLE 分支；
+setter fault 的 hook 仍先恢复再 Dispose，最终 fixture cleanup 也不能覆盖原始异常。
+成功 JSON 只在完整 cleanup 后输出。assertion 有明确的内部标记；其它 managed/API
+异常按白名单 class、实际 HRESULT／可用的 Win32 code 记录，不一律归为断言失败。
+fixture 的 case ID 不是 checks 分组序号：case 13/14/15 分别是 partial-restore
+的 0/1/2 setter 边界，均属于第 12 组；seal-race 的第 15 组在 case 18–21。
+partial-restore 尚未恢复完成时的五个断言仅附固定 `partial-failure/writes/sequence/locale/text`
+check ID，随已有 fixture-assertion 记录传递；不输出 assertion message 或 payload，
+不新增 native call、不改变条件或调用顺序。该 ID 用来区分失败检查，不能将已观察到的
+sequence 漂移自行归因为 Close、格式合成或外部修改，也不是恢复问题已修复的证明。
+最早 mixed-format 分支分别记录 Begin 返回、原有一次临时 text 读取返回、
+Restore 返回及异常点的只读状态。observed sequence／owner 是分开采样的观察，
+不是原子 ownership 证明；render 的 expected/observed sequence 与写入开始／完成
+标量只描述最近一次 eligible callback，不额外调用 GetClipboardData 或发起 render。
+新增 render 标量通过只读 bool／uint property 提供并由 fixture 实际消费；
+不能仅用 reflection 读取 private 字段，让严格 PS5 Add-Type 将其判为未使用字段，
+也不能通过忽略 compiler warning 来绕过真实 helper 编译门槛。
+若该分支先失败，后面的 OLE 与其余分组属于未执行，不能沿用旧失败阶段推断。
+初始 publication 另保留 CloseClipboard 调用前／返回后的序列、真实 BOOL 返回、
+失败时立即捕获的 Win32 error，以及返回后的 owner 观察。它们只回答变化是否
+跨越 close 边界，单独不能成为 authority；不能仅凭固定增量就认定某种合成格式、
+补偿计数或接受未知变化。Close 观察值仅是一次 provisional receipt。
+
+初始 publication 现在有明确的 publishing→sealed 阶段。持锁写入临时 locale、
+history/cloud flags 和每次新建的 opaque transaction nonce，保留实际发布的完整
+metadata bytes；Unicode 仍延迟提供。Close 后重新取得 lock，必须同时确认：
+owner 是本 transaction，sequence 仍等于 receipt，格式集合只有这些 metadata
+及 Unicode/系统 ANSI/OEM text aliases，metadata 的完整 bytes（包括 nonce）
+逐项相等，三个 text format 尚无 materialized handle。metadata 最大 4 KiB/项、
+格式数严格有界，不反序列化任何内容，也不读取／记录未知 text bytes。
+验证 text handle 时每次 GetClipboardData 都创建独立 active probe，记录本次请求
+及 Unicode backing format。只有该 native call 内、owned HWND 上对应 canonical
+Unicode 的 WM_RENDERFORMAT 可以确认拒绝；NULL+error0 本身不构成证明，
+WM_RENDERALL、过期或无关 format callback 均不能确认本次请求。任何非 NULL
+都拒绝；无法取得关联证明的原生 alias 同样 fail closed，不扩大错误码白名单。
+publishing renderer 明确拒绝生成数据，blocked callback 另计数，不伪称没有请求。
+同一 lock 内验证前后 owner/sequence 必须不变，之后才建立初始 sequence authority；
+renderer 在只读 seal Close 及最终 owner/sequence 检查期间仍禁写；比较的是不再
+变化的 locked candidate，不是 callback 可更新的 shared sequence。全部 native
+检查结束后，以无 native call 的 STA managed transition 同时提交 sequence、
+sealed 并启用 renderer。Close/validation 失败保持禁写和 backup。后续 render/Restore
+仍使用原严格 owner/sequence checks，不以 nonce 或内容一致为由接受后续漂移。
+
+这不是把任意 post-close sequence 作为 baseline，也不推断 Close 的增量来源。
+新 owner 表示真实新 copy，原样保留；同 owner 的未知格式、已写入 text、
+nonce/metadata 改动或 receipt 后的 sequence 改动均明确失败并保留 pending backup。
+失败时不 clear/re-paste。fixture 在真实 Close 与 receipt 之间注入未知格式、
+materialized text、nonce 改写和外部新 copy，验证这些竞争不能被初始 seal 吞掉。
+所有 token/bytes 都不进入日志，只有固定 stage、numeric format 和验证结果。
+临时 Unicode clipboard 现在在同一 owned lock 内显式发布当前输入语言的
+`CF_LOCALE`，再采样 sequence。Windows 能从 Unicode 合成 ANSI/OEM text，
+并可在 `CloseClipboard` 时补充缺失的 locale；不能把这类自有发布边界上的
+系统写入当作未知 user copy，也不能简单在 Restore 时重置 sequence。
+参见 [系统格式转换](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats)
+与 [CF_LOCALE 的 close 契约](https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats)。
+restore 仍严格检查 owner/sequence；delayed renderer 在任何写入前也检查
+expected sequence，避免自有 render 掩盖先前未知修改。24 项真实 fixture 保留
+原 13 项，并增加实际 same-owner mutation：render 不得覆盖／归属该变化，
+backup 必须仍 pending，随后真正的新 copy 优先。OLE case 保留
+Begin→Restore、不预读临时 text 的原路径，另测 render-all／真实读取后恢复；两条路径都检查
+发布后的 sequence 与实际 locale，额外保留原始 HTML/locale bytes。
+恢复时先交还 snapshot 中已有的原始 locale，再按原顺序交还其它格式；
+不制造或改写原始 locale，也不改变其它格式间的优先顺序。这样在部分 setter
+失败后 CloseClipboard 也不会因已恢复 text 但尚缺 locale 而额外合成 metadata。
+真实故障 seam 覆盖 empty、locale 首项、首个 text 三个 mutation 边界，之后
+RecoverPending 必须恢复完整原始 bytes；外部新 copy 的负例也经过首个 text。
+上述 locale／sequence 处理仍需实际全分组通过；更早边界的失败仍是 blocker，
+不能仅凭契约解释、源码通过或新增日志就声称原始恢复问题已解决。
+另外两个新增组覆盖 seal-window 的四类真实 Win32 竞争，以及 Unicode/ANSI/OEM
+读者。转换仍交给 Windows，没有自行选择编码或改变原始 locale；测试保留
+非 ASCII 的 canonical Unicode、ANSI/OEM ASCII prefix 和完整原始 backup bytes。
+原 16 组之后再追加四组：逐调用 probe 的 NULL0/过期/无关/RenderAll/非 NULL
+负例；第二次 readonly Close 与最终 seal 的真实 render/新 owner 竞争；
+GlobalCopy 的 post-allocation/post-lock 控制故障与实际 free 一次证明；
+真实 validation+readonly-close 双失败的恰好两个 scalar causes。
+这 20 组顺序保持，再追加两组：全部已知 registered format 的大小写分类与
+真实注册 ID 相等、unsupported virtual/embed/link 拒绝及原生名称查询失败；
+capture/restore 两条 copy 路径上，post-allocation/post-lock 故障与 release
+异常／受控非零返回的双因保留。所有组必须实际执行通过，新增源码不是运行证据。
+
+partial restore 已交还任一 text 表示、随后 setter 失败时，在同一 lock 内完成
+snapshot 中**已经复制并备份**、尚未移交的原始 text 表示（仅实际存在的 1/7/13，
+最多其余两项）。这是独立 cleanup 写入，不改变原 0/1/2 setter seam 的计数与失败
+结果；新增 fixture 单独核对 cleanup 的实际 transfer 次数与格式。不重试完整恢复、
+不发送第二次 paste，不自行编码，不读取临时 transcript 或调用 GetClipboardData
+来强制转换，也不补造 snapshot 没有的格式。非 text/raw metadata 仍留给 pending
+master 的后续完整恢复。每次成功 transfer 后清空 copy handle，失败的 copy 仍由本地
+finally 释放；私有 master 不移交。completion 本身失败时保留原 write 与 cleanup
+两因，原操作绝不因为 cleanup 成功而变为成功。
+
+Restore 的 renderer 在 Close 及最终检查期间仍禁写；只比较持锁结束时的不变
+candidate，不采用 Close 后的 current sequence。Close false（包括 error0）明确
+失败；Close 或 post-close 校验不能覆盖原始故障。只有完整恢复并验证成功，或确认
+真正新 owner 优先，才提交 began=false。未知 same-owner format/text/bytes/nonce
+修改仍以严格 sequence guard 拒绝，保留 exact master；不增加 post-close adoption
+或容许固定增量。这一候选针对未完成 text publication 的持锁生命周期，不把观察到
+的增量归因于特定 OS 格式或 actor。
+
+原 22 组之后追加两组，共 24 组：partial text 原始 native bytes／额外 transfer
+计数、恢复 Close 窗口的四类 same-owner mutation 与真正新 copy；completion／Close
+故障双因，以及完整恢复后 Close 失败仍不能提交 began=false 或丢失 master。
+新增 byte 对照只在 Begin 前采样 CI-owned 原始数据；原 case 15 不增加任何读取。
+Close 控制先实际成功关闭，再返回受控 false+error0，
+不声称真实 Win32 Close 失败，也不留下测试锁。completion 故障控制在 transfer 前
+返回 NULL+error0；若随后另有 sequence 故障，bounded projection 显式 truncated，
+不能假称只有两因。所有原始强断言、初始 seal 与 legacy native 13/1/7 读者保留。
+
+注册格式的身份按 Win32 case-insensitive 契约分类：OLE owner bookkeeping 不
+跨 owner 克隆，virtual/embed/link 无论大小写均拒绝。名称查询返回 0 同样拒绝，
+保留立即捕获的真实 numeric error/format，不以空名称进入 generic HGLOBAL 分支。
+fixture 只注册 bookkeeping 名称来验证 ID，不构造假的 OLE bookkeeping payload；
+unsupported 格式拒绝前后检查 owner、sequence 和全部原始 allocation bytes。
+参见 [注册格式身份](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerclipboardformatw)
+与 [名称查询返回值](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboardformatnamew)。
+
+GlobalCopy 从 GlobalAlloc 到成功完成两个 unlock 始终持有 allocation，任何
+异常都在解锁后由唯一 finally 尝试一次释放；成功返回才移交给 snapshot Item。
+释放抛异常或返回非 NULL 都明确失败，不重试、不声称已释放；copy 主因与 release
+cleanup 组成两个 typed causes，原 exception 对象仍由各自 InnerException 保留。
+Begin 不把此 pair 压成单因，Restore 也保留 copy/release 两因及原 restore-failed
+策略；PS 投影把 typed exception 作为固定 scalar 边界，不向日志展开其原始 inner。
+`snapshot-format`、`snapshot-format-name`、`snapshot-copy`、`snapshot-release`
+固定 stage 同步经过 wire、JS error 和 privacy log。
+故障 fixture 只用小型 owned buffer，真实 GlobalFree 必须恰好成功一次后才注入
+managed error 或非零返回；受控状态只覆盖返回值处理，不宣称原生 free 真实失败，
+也不把 managed fault 伪造为 Win32 code。Win32 明确允许释放 locked object，
+不能用加锁制造 failed-free 对照；见 [GlobalFree 契约](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalfree)。
+名称查询负例则调用真实查询 API 的 predefined-format 失败路径，保留实际 error。
+不制造 OOM、巨大分配、double-free 或无效 native pointer。
+CI-owned fixture 的单格式 byte[][] 使用 unary comma 保留完整 byte[]；
+`[byte[][]]@($bytes)` 会逐 byte 转成多个单字节 payload，不能作为单格式输入。
+Put 在任何 Open/Empty/native allocation 前校验 format/payload 数量、非 null
+byte[]，以及 Unicode 的偶数字节数和末尾双零；不填充、转码或重写原始 payload。
+case 8 保留原 transient-lock 路径，并先断言完整单元素 byte[][] 的类型、原 byte[]
+引用和精确长度；旧 flattening、null row、单字节、奇数字节、缺 terminator 输入
+必须明确拒绝，owner/sequence 与原始完整 allocation bytes 不变。原 22 组及顺序不变。
+参见 [PowerShell comma/array operators](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_operators?view=powershell-5.1)。
+CI-owned 原始状态读取只为一次 Read 获取 lock，最多 40 次尝试、200 ms monotonic
+acquisition budget；不重跑 transaction 或整个测试。已识别的 same-thread/process
+opener 立即拒绝，不能用等待掩盖自有锁泄漏；其它／不可识别 opener 仅有限等待。
+获取前、成功后与睡眠前共用 Stopwatch timestamp/frequency 形成的同一 tick deadline，
+不以向下取整的 ElapsedMilliseconds 判断预算。remaining<=0 不再等待或重试，睡眠
+时长向下取整；late-acquired lock 明确失败并经 checked Close 释放。受控 clock
+覆盖 exact deadline、整数毫秒仍显示 200 的 200.x ms 成功返回，以及睡眠前已过期。
+获取成功后必须在锁内仍匹配开始时的 owner/sequence，变化即失败，不采纳新 copy。
+Put/Read 的 Close BOOL 也检查，operation 与 close 双失败保持 aggregate。有限
+诊断只含固定 read stage、numeric format/error、尝试数、耗时和 opener 分类；
+NULL opener 只表示不可识别，不能认定没有 opener 或断言来自外部进程。
+case 8 用实际 owned lock 验证释放后获取与预算耗尽两条路径，核对完整原始 bytes、
+owner/sequence 不变；原 Hold(80) 的 production Begin 路径和 24 组顺序保持。
+参见 [OpenClipboard](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openclipboard)
+与 [GetOpenClipboardWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getopenclipboardwindow)。
+异常投影最多遍历 32 个节点，每个 operation/cleanup phase 各保留两个 leaf，
+越界显式标记 truncated；Aggregate 的两个成员不会被 InnerException 首项替代。
+wire、JS error 和 privacy log 只接受固定 code/stage、numeric format/native code，
+不包含 message/token/metadata，格式错误的 cause schema 明确拒绝为 protocol fault。
+
+diagnostic `flush()` 是 200 ms bounded best effort，不是文件存在或持久化 ACK。
+native privacy/content fixture 复用已有真实 writer fixture，先等 initialization
+与目标 write sequence 的实际 ACK，再调用原来的 flush 和读取文件。测试故意
+延迟消息 300 ms，验证不是靠固定 sleep 或 worker 启动快才通过；writer 错误、
+exit 或 fixture ACK deadline 都明确失败。生产 checkpoint 25 ms／flush 200 ms
+及失败通知不变，不把缺文件当空日志，不清除 warning。
+
+Overlay recovery UI 在唯一的 CI-owned 初始 focus 请求后，有界等待 renderer/focus 状态；
+Framework UI 的 setup 先等待真实 native helper READY，再仅对该 CI 进程的可见、
+focusable main/editor window 做最多 5 s 的显式 foreground acquisition。只有实际
+capture 的 PID 与精确 HWND 都匹配、且 owned renderer ready 才建立 baseline；
+foreign／zero owner 和 Electron-only focus 不构成成功，late/stalled capture 明确失败。
+诊断只保留固定 phase、次数、owner 分类、window-match／renderer-ready 与失败类别。
+这不是 overlay 的 refocus 能力：baseline 建立之后的 bounds／renderer recovery
+检查仍只观察并断言，不重新激活窗口，不调整 foreground lock 或系统策略。
+每个 overlay recovery 边界仍须由真实 native capture 确认 foreground PID/HWND
+未变，不通过再次 focus 或移除断言掩盖问题。物理 Stop/Cancel 的 held case
+必须在按住及 native suspension 期间保持 recording 且零 action，实际释放后
+恰好提交一次，后续 fresh gesture 仍可用。native polling 不重新成为按钮事件源。
+owned-desktop wrapper 保留 PID/desktop 匹配的 bounded startup progress；
+progress 写入 wrapper 实际读取的 desktop receipt directory，而非相邻 evidence root；
+helper/attestor/renderer readiness 未完成时仍失败，不接受仅启动进程作为 READY。
+OS mouse driver 在首个 Add-Type 前显式使用相同 inbox bootstrap，而不是等后续
+attestor 才初始化模块。driver callback 保留实际 PID/code/signal/killed、monotonic
+耗时、配置的 15 s budget、stdout/stderr byte count、末尾最多 4096 characters 的
+CI-owned stderr 与 truncated 标记，以及最多 8 条 PID 匹配的固定 startup stage。
+这只是 CI 诊断，不是 desktop/input proof；没有完整 committed response 仍失败，
+不能据 stage、进程启动或退出时间伪造 osInputs，也不延长 15 s 或放宽 foreground、
+NoActivate、owned-down/first-click/held gesture 和 recovery 的原 gate。
+Console negative checks 仍同时要求非零 child exit、独立 live registry readback
+与原始状态完全一致、以及预期 failure marker 和 reason 都出现；不能用 rollback
+成功替代预期注入路径。failureWitness 只保存 expected marker、两项匹配 bool
+和固定 observed stage，区分“更早阶段失败”与“marker/reason 缺失”，不导出 raw output。
+owned console probe 的原 5000 ms exit wait 另保存 waitCompleted、实际可读取的
+exitCode、elapsed 与固定 outcome（timeout／exited-nonzero／API error 等）。
+ready receipt 不等于 clean exit；旧 coarse error 不能据此推断 timeout 或非零原因，
+也不能将通用 negative failure 总标题误读为 live rollback 已失败。所有 probe、
+registry restore、五个负例及原见证强度不变；pure contract 只提取指定函数并用
+mock probe 验证，不运行真实 console prepare／restore 或访问用户终端设置。
+console probe 不再以固定 5 s sleep 作为退出协议：fresh、session-local manual-reset
+event 在 child ready 前打开，child 以原 5000 ms 存活 lease 等待请求；parent 完成
+原 live host/client PID、birth、session／parent 采样后才 signal，随后仍只等原
+5000 ms clean exit。这样 exit budget 不再同时支付人为存活 padding 与 teardown。
+signal／lease 失败、真实非零 exit 或 timeout 都仍失败，不能 kill 成成功或造 exit0；
+ready 20 s、host absence 2 s、child/reap budgets 不变。事件仅是一次 owned completion
+协议，不代替 actor identity 证明；parent 与 child handle 分别独立清理，cleanup
+故障仍与原 prepare 故障保留。纯控制执行同一 parent completion 与实际生成的 child
+wait 函数，覆盖未验证身份、signal failure、lease expiry、nonzero 与 timeout。
+readiness 的原 20 s／100 ms 条件循环同时等待 ready 文件与本 watch 的真实 client
+start event，而不是退出后才第一次取队列。live CIM 采样后还须核对唯一 start record
+的 PID、parent、session、exe 与 birth 时间；只有两种证明均成立才发 completion。
+当前 CIM 不能替代 event，旧 generation／其它 source／ambiguous event 均不能成为
+proof；退出后的 receipt／actor 检查仍保留。没有新增 sleep、延长 lease 或 exit
+budget；事件未到、进程先退出或 deadline 到期都必须失败，不把诊断补采变成成功。
+execFile 已失败时，partial JSON、缺失／损坏／不匹配的 ACK 或 pipe/commit 不一致
+均继续抛同一个原始 process error；validation error 以非枚举属性另存，公开事件只
+增加固定 rejection stage。只有全部 receipt 验证完成才附 nativeReceipt；Windows
+caller 不能把保留的未验证 stdout 升格为 osInputs，macOS 原有错误输出路径不变。
+这些阶段证据与 CI 生成脚本的源文件重定位修正，都不等于已证明 ARM 冷启动
+或真实用户历史浮窗问题修复；仍需 exact-head native CI 和最终包 gates。
+
 MIT-licensed application and provider-interface experiments. CI uses a local
 fixture service and synthetic audio; no account or external speech service is
 needed. Regular checks do not publish application download packages. The explicit
@@ -149,7 +483,7 @@ executable plugin root，并默认不读取 sibling data；显式 `--provider-co
 `Neutral native distribution bases` 是原“不生成下载包”规则的明确、手动
 CI artifact 例外。它只在 `workflow_dispatch` 执行，使用标准
 Windows x64、Windows ARM64、macOS ARM64 runner，同一次输入版本生成
-三个 neutral bases；默认应用版本为 `0.6.4-preview`。没有自动 release、
+三个 neutral bases；默认应用版本为 `0.6.4`，且必须与 source package version 一致。没有自动 release、
 production endpoint、账户、外部语音请求或额外 repository checkout。
 源码、测试、安装和 native build 仍只在 GitHub Actions 执行。
 
@@ -209,10 +543,56 @@ PowerShell 的八位十六进制 `0xf0000000` 是有符号 Int32 负数，不能
 进程 cwd/profile 独立，module/preload/credential environment 不继承，
 模块来源逐文件与 bundle 内 provider inventory 比较。fresh native archive
 解包后重复该检查，保存 archive SHA256、source revision、架构、helper/
-payload 文件 hash、原始来源与 cleanup receipt。此 headless gate 不证明
-GUI、TCC、硬件麦克风、notarization 或下游组合后的全部 native 行为。
-Windows PowerShell helper 与 macOS compiled helper 的 bytes/架构被记录，
-但此 manual headless gate 不启动 desktop helper；receipt 明确标为未执行。
+payload 文件 hash、原始来源与 cleanup receipt。Windows 另有最终解包
+native-delivery gate：matching、hash-pinned generic Electron host 加载实际
+final package 的 DesktopInput/NativeDelivery 模块，验证所有模块与 native
+PS/CS 的 final-path/hash 来源，执行实际 helper Add-Type/ready/capture，
+再向唯一 owned editor 做 caret 单次粘贴并恢复 text/HTML clipboard。
+rich clipboard fixture 使用 Electron 45 的实际 MIME API：单次原子
+`clipboard.write([new ClipboardItem(...)])` 同时提供 `text/plain` 与 `text/html`，
+不使用旧 `{text,html}` dictionary、`readHTML()` 或两次覆盖式 write。
+两个 readback 都通过 `clipboard.read()` 的同一单项 ClipboardItem，先要求两种
+MIME 齐全，再取各自 Blob 的完整 bytes；种子内容须真实存在，native 单次 paste
+之后两种表示的 bytes 必须与原 snapshot 完全相同，不能只比较 plain text、
+decode 后相同或用 dummy HTML 绕过恢复 gate。见 [ClipboardItem](https://www.electronjs.org/docs/latest/api/clipboard-item)。
+final fixture 同样在真实 helper READY 后复用既有 5 s owned-foreground setup，
+再核对 editor 的 native PID／精确 HWND／textarea renderer-ready；不依赖启动
+helper 之前的一次 focus。CI setup helpers 在 final-module cache baseline 前加载，
+不混入或替代实际 final payload 的模块 hash 来源。
+这属于明确的 final-module/native-path equivalent gate，不冒称启动了最终
+app main；raw stdout/stderr 和实际 helper exit 保存，失败阻断 producer。
+最终 host 的单次启动在 argv 中提前指定同一个 isolated user-data directory。
+不能仅在 fixture JS 中 appendSwitch 才选择 profile：Chromium 的原生初始化已在
+此之前开始；entry 必须校验收到正确的 native switch，不能用迟到的 JS 设置兜底。
+同时启用仅 error/fatal 的 Electron 原生文件日志；原生日志留在
+临时 profile，最多读取尾部 32 KiB，只导出至多八个 error/fatal 的源码 basename、
+line 与 severity，不上传原始内容或路径。JS 另用同步文件记录至多 16 个固定 stage
+和实际 PID，最早 entry 标记位于 require Electron 之前，不依赖 stdout 收尾。
+`final-desktop.launch.json` 在退出断言前保存实际 child PID/status/hex/signal、
+spawn error 分类、byte counts、耗时、host/entry SHA 和经过 schema/PID 校验的阶段。
+empty／absent、无原生日志、unknown nonzero status 都是证据边界，不推断为
+helper、clipboard、架构或网络成因；诊断不触发 retry 或提供成功 fallback。
+文件读取错误以固定类别显式记录，不覆盖原始 process status；空 marker 文件也不能
+证明 JS 从未执行，只能说明未观察到该 entry publication。
+stage publication 与 mandatory lifecycle 共用实际执行、可注入故障的 cleanup 路径：
+append 失败不能阻止 helper close／最多 2500 ms exit wait、editor destroy、final
+JSON 和明确 app.exit 被分别尝试；任一项 cleanup 失败也不能跳过后面的项。
+60 s deadline 则独立尝试 close、destroy、失败输出与 exit，不为等待 helper 而延长
+该 deadline，也不伪称 helper 已退出。正常完成仍必须实际观察 helper exit。
+所有原始 operation／publication／cleanup error 对象在内存中按身份保留，多个
+故障用 AggregateError 返回；输出仅含固定 stage/phase、error class/code，不含
+原始 message/profile/path。append 或 cleanup 失败始终使 status=failed、exit=1，
+complete stage 不替代成功 JSON 或真实 native proof，也不会用 65 s parent kill
+替代本应发生的 JS deadline／cleanup。
+原始 Chromium log 不进入 artifacts，profile 按既有 finally 清理。JS 60 s／父进程
+65 s deadline、sandbox/GPU、安全策略、fresh-extraction inventory 和全部实际
+delivery gates 保持；零退出还须有完整 JSON、最后 complete 阶段、精确 owned HWND、
+单次 caret paste、text/HTML 恢复与真实 helper exit，stage 不替代这些证明。
+原生 logging 契约见 [Electron command-line switches](https://www.electronjs.org/docs/latest/api/command-line-switches#--enable-loggingfile)。
+Windows receipt 的 helperRuntimeExercised 只在此 gate 真正通过后为 true。
+macOS 保持 strict signing/ditto/headless provider gate，不把 compiled helper
+bytes 记录当作已执行；headlessOnly/helperRuntimeExercised 继续如实区分。
+以上都不证明真实用户 GUI/TCC/硬件麦克风、notarization 或所有下游行为。
 三个同版本 native bases、各自 receipts 与下游配置/下载校验未齐全前，
 不能称为完整三平台 release。
 

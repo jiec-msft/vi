@@ -1,5 +1,14 @@
 const { performance } = require('node:perf_hooks');
 const { safeError } = require('./diagnostics.cjs');
+const path = require('node:path');
+const startupStages = new Set(['host-entry', 'inbox-ready', 'script-entry', 'diagnostics-ready', 'input-begin', 'input-ready',
+  'forms-ready', 'clipboard-ready', 'pointer-ready', 'protocol-ready', 'ci-attest-begin', 'ci-attest-end']);
+function parseNativeStartup(line, pid) {
+  const match = /^VI_STARTUP ([a-z-]+) ([1-9]\d{0,9}) ([48]) ([1-9]\d?) (Desktop|Core|unknown)$/.exec(line);
+  if (!match || !startupStages.has(match[1]) || Number(match[2]) !== pid) return undefined;
+  return { startupStage: match[1], pointerBytes: Number(match[3]),
+    powerShellMajor: Number(match[4]), powerShellEdition: match[5] };
+}
 
 class NativeTrace {
   constructor(diagnostics, component, generation) {
@@ -10,6 +19,7 @@ class NativeTrace {
     this.tail = '';
     this.stderrBytes = 0;
     this.stderrClasses = new Set();
+    this.startup = [];
   }
 
   emit(state, data = {}, critical = false) {
@@ -32,6 +42,15 @@ class NativeTrace {
       const lines = text.split(/\r?\n/);
       this.tail = lines.pop().slice(-4096);
       for (const line of lines) {
+        if (line.startsWith('VI_STARTUP ')) {
+          const entry = parseNativeStartup(line, child.pid);
+          if (!entry || this.startup.length >= 16) this.emit('stderr', { fault: 'protocol', stderrBytes: this.stderrBytes });
+          else {
+            this.startup.push({ ...entry, spanMs: Math.round(performance.now() - this.started) });
+            this.emit('compile', { api: 'compile', ...entry }, true);
+          }
+          continue;
+        }
         if (line === 'VI_DIAGNOSTIC_FAILURE') {
           if (!this.sidecarFailed) {
             this.sidecarFailed = true;
@@ -70,4 +89,19 @@ class NativeTrace {
   }
 }
 
-module.exports = { NativeTrace };
+function nativeHelperEnvironment(supplied = process.env) {
+  const env = { ...supplied };
+  for (const name of Object.keys(env)) if (name.toUpperCase() === 'PSMODULEPATH') delete env[name];
+  const root = Object.entries(env).find(([name]) => name.toUpperCase() === 'SYSTEMROOT')?.[1];
+  if (root !== undefined) {
+    if (typeof root !== 'string' || !/^[a-z]:[\\/]/i.test(root) || !path.win32.isAbsolute(root)) {
+      throw new Error('The native Windows system root must be a drive-qualified absolute path.');
+    }
+    env.PSModulePath = path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  } else if (process.platform === 'win32') {
+    throw new Error('The native Windows system root is unavailable.');
+  }
+  return env;
+}
+
+module.exports = { NativeTrace, nativeHelperEnvironment, parseNativeStartup };

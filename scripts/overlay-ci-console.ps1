@@ -26,6 +26,44 @@ function Save-Report {
     if ($Mode -eq 'restore' -and $FailRestoreReportWrite) { throw 'Injected restore report write failure.' }
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding utf8
 }
+function Assert-OverlayConsoleProbeExit($Probe, $Report) {
+    $observation = @{ budgetMilliseconds = 5000; outcome = 'waiting'; waitCompleted = $false; exitCode = $null }
+    $Report.probeProcess.exitWait = $observation
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        try { $observation.waitCompleted = $Probe.WaitForExit(5000) }
+        catch { $observation.outcome = 'wait-error'; throw }
+        if (!$observation.waitCompleted) {
+            $observation.outcome = 'timeout'
+            throw 'Owned console probe did not exit cleanly.'
+        }
+        try { $observation.exitCode = $Probe.get_ExitCode() }
+        catch { $observation.outcome = 'exit-code-error'; throw }
+        $observation.outcome = if ($observation.exitCode -eq 0) { 'exited-zero' } else { 'exited-nonzero' }
+        if ($observation.exitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
+    } finally { $observation.elapsedMilliseconds = $clock.ElapsedMilliseconds }
+}
+function Complete-OverlayConsoleProbe($Probe, $Release, $Report) {
+    $Report.probeProcess.exitRequested = $false
+    if (!$Report.probeProcess.identityVerified) {
+        $Report.probeProcess.exitRequestOutcome = 'identity-unverified'
+        throw 'Owned console probe completion requires verified live identity.'
+    }
+    if (!$Report.probeProcess.startReceipt.verified) {
+        $Report.probeProcess.exitRequestOutcome = 'start-unverified'
+        throw 'Owned console probe completion requires a verified process-start receipt.'
+    }
+    try {
+        if (!$Release.Set()) { throw 'Owned console probe completion signal failed.' }
+    } catch { $Report.probeProcess.exitRequestOutcome = 'signal-error'; throw }
+    $Report.probeProcess.exitRequested = $true
+    $Report.probeProcess.exitRequestOutcome = 'requested'
+    Assert-OverlayConsoleProbeExit $Probe $Report
+}
+function Wait-OverlayConsoleProbeRelease {
+    param($Release)
+    if (!$Release.WaitOne(5000)) { throw 'Owned console probe completion request lease expired.' }
+}
 function Read-Selection {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($registryPath)
     try {
@@ -94,6 +132,46 @@ function Read-ProcessStarts($identifier, $baseline) {
             createdAt = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null } }
     })
     return @{ starts = $starts; existingParents = $existingParents; capturedAt = [DateTime]::UtcNow.ToString('o') }
+}
+function Wait-OverlayConsoleProbeReady($Probe, $Report, $ProbeFile, $Identifier, $Baseline, $Deadline) {
+    $observation = @{ readinessFile = $false; startObserved = $false; polls = 0 }
+    $Report.probeProcess.readiness = $observation
+    while (!$Probe.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
+        $observation.polls++
+        $observation.readinessFile = Test-Path -LiteralPath $ProbeFile
+        $Report.processStarts = Read-ProcessStarts $Identifier $Baseline
+        $observation.startObserved = [bool] @($Report.processStarts.starts | Where-Object { $_.pid -eq $Probe.Id }).Count
+        if ($observation.readinessFile -and $observation.startObserved -and
+            !$Probe.HasExited -and [DateTime]::UtcNow -lt $Deadline) { return }
+        Start-Sleep -Milliseconds 100
+    }
+    if (!$observation.readinessFile) { throw 'Owned console host probe did not produce a readiness receipt.' }
+    throw 'Owned console probe process-start receipt missing.'
+}
+function Assert-OverlayConsoleProbeStart($Probe, $Report, $Client) {
+    $observation = @{ verified = $false; outcome = 'validating' }
+    $Report.probeProcess.startReceipt = $observation
+    $matches = @($Report.processStarts.starts | Where-Object { $_.pid -eq $Probe.Id })
+    if ($matches.Count -ne 1) {
+        $observation.outcome = 'missing-or-ambiguous'
+        throw 'Owned console probe process-start receipt missing or ambiguous.'
+    }
+    $start = $matches[0]
+    $birth = [DateTime]::MinValue
+    $eventTime = [DateTime]::MinValue
+    if (!$Report.probeProcess.identityVerified -or !(Identity-Key $Client) -or $Probe.HasExited -or
+        $Client.pid -ne $Probe.Id -or $start.parentPid -ne $Client.parentPid -or
+        $null -eq $start.session -or $start.session -ne $Client.session -or $start.exe -ne $Client.exe -or
+        ![DateTime]::TryParse($Client.createdAt, [ref] $birth) -or
+        !$start.observedAt -or ![DateTime]::TryParse($start.observedAt, [ref] $eventTime) -or
+        $eventTime.ToUniversalTime() -lt $birth.ToUniversalTime() -or
+        $eventTime.ToUniversalTime() -gt [DateTime]::UtcNow) {
+        $observation.outcome = 'generation-conflict'
+        throw 'Owned console probe process-start receipt conflicts with live CIM generation.'
+    }
+    $observation.verified = $true
+    $observation.outcome = 'verified-live-generation'
+    $observation.observedAt = $start.observedAt
 }
 
 if ($Mode -eq 'restore') {
@@ -174,6 +252,7 @@ Save-Report
 if (!$env:GITHUB_OUTPUT) { throw 'Workflow output channel unavailable; terminal choice was not changed.' }
 Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'state_saved=true'
 $probe = $null
+$probeRelease = $null
 $prepareFailure = $null
 $watchId = $null
 $baselineInventory = @()
@@ -217,6 +296,10 @@ try {
     $watchId = $identifier
     $report.processStartWatchRegisteredAt = [DateTime]::UtcNow.ToString('o')
     $probeFile = Join-Path $directory "$([IO.Path]::GetFileNameWithoutExtension($ReportName))-console-probe.json"
+    $releaseName = "Local\vi-console-release-$PID-$([guid]::NewGuid().ToString('N'))"
+    $releaseCreated = $false
+    $probeRelease = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $releaseName, [ref] $releaseCreated)
+    if (!$releaseCreated) { throw 'Owned console completion event was not freshly created.' }
     $probeScript = @'
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @"
@@ -238,18 +321,19 @@ public static class OwnedConsoleProbe {
 }
 "@
 '@
-    $probeScript += "`n[OwnedConsoleProbe]::Read() | Set-Content -LiteralPath '$($probeFile.Replace("'", "''"))' -Encoding utf8`nStart-Sleep -Seconds 5"
+    $probeScript += "`nfunction Wait-OverlayConsoleProbeRelease {`n$(${function:Wait-OverlayConsoleProbeRelease}.ToString())`n}`n"
+    $probeScript += "`$release=[Threading.EventWaitHandle]::OpenExisting('$releaseName')`ntry {`n"
+    $probeScript += "[OwnedConsoleProbe]::Read() | Set-Content -LiteralPath '$($probeFile.Replace("'", "''"))' -Encoding utf8`n"
+    $probeScript += "Wait-OverlayConsoleProbeRelease `$release`n} finally { `$release.Dispose() }`n"
     $probeStarted = [DateTime]::UtcNow.ToString('o')
     $probe = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') `
         -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand',
             [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))) -WindowStyle Normal -PassThru
     $report.probeProcess = @{ pid = $probe.Id; role = 'owned-console-probe'; startedAt = $probeStarted;
-        scope = 'new console before app or OS mouse input'; windowStyle = 'Normal'; launchAPI = 'Start-Process' }
+        scope = 'new console before app or OS mouse input'; windowStyle = 'Normal'; launchAPI = 'Start-Process';
+        completionProtocol = 'owned-release-after-live-identity'; releaseLeaseMilliseconds = 5000 }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
-    while (!(Test-Path -LiteralPath $probeFile) -and !$probe.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 100
-    }
-    if (!(Test-Path -LiteralPath $probeFile)) { throw 'Owned console host probe did not produce a readiness receipt.' }
+    Wait-OverlayConsoleProbeReady $probe $report $probeFile $watchId $baselineInventory $deadline
     $report.probe = Get-Content -Raw -LiteralPath $probeFile | ConvertFrom-Json -AsHashtable
     $report.duringProbe = Process-Snapshot
     $hosts = @($report.duringProbe.chains | Where-Object {
@@ -273,7 +357,9 @@ public static class OwnedConsoleProbe {
     $report.probe.hostVerification = 'live Win32_Process host/client parent identity'
     $report.probeProcess.parentPid = $hosts[0].chain[1].parentPid
     $report.probeProcess.createdAt = $hosts[0].chain[1].createdAt
-    if (!$probe.WaitForExit(5000) -or $probe.ExitCode -ne 0) { throw 'Owned console probe did not exit cleanly.' }
+    $report.probeProcess.identityVerified = $true
+    Assert-OverlayConsoleProbeStart $probe $report $clientIdentity
+    Complete-OverlayConsoleProbe $probe $probeRelease $report
     $report.probeProcess.exitedAt = [DateTime]::UtcNow.ToString('o')
     $clientIdentity.exitedAt = $report.probeProcess.exitedAt
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
@@ -315,6 +401,10 @@ public static class OwnedConsoleProbe {
             }
             $probe.Dispose()
         } catch { $cleanupErrors += "Owned console probe cleanup failed: $($_.Exception.Message)" }
+    }
+    if ($probeRelease) {
+        try { $probeRelease.Dispose() }
+        catch { $cleanupErrors += "Owned console completion event cleanup failed: $($_.Exception.Message)" }
     }
     if ($watchId) {
         try { $report.processStarts = Read-ProcessStarts $watchId $baselineInventory }

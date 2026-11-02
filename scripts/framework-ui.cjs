@@ -4,6 +4,8 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { recordDesktop } = require('./desktop-evidence.cjs');
 const { fiveMarkersVisible } = require('./visible-markers.cjs');
+const { DesktopInput } = require('../app/desktop.cjs');
+const { acquireOwnedForeground } = require('./owned-foreground.cjs');
 
 if (process.argv.find((arg) => arg.startsWith('--ci-mode=')) !== '--ci-mode=framework-ui' ||
     !process.env.VI_OUTPUT || !process.env.VI_PROVIDER_DIR) {
@@ -15,6 +17,7 @@ app.commandLine.appendSwitch('user-data-dir', profile);
 app.commandLine.appendSwitch('provider-dir', path.join(directory, 'fixture-provider'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
+if (process.platform === 'win32') app.commandLine.appendSwitch('force-renderer-accessibility');
 app.commandLine.appendSwitch('use-file-for-fake-audio-capture', path.join(directory, 'input.wav'));
 if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
@@ -68,6 +71,160 @@ async function record(finalText) {
     return current.phase === 'done' && current.text === finalText;
   }, 'final result');
   await until(() => evaluate('capture === undefined'), 'microphone release');
+}
+async function overlayPixels(overlay, display) {
+  const sources = await desktopCapturer.getSources({ types: ['screen'],
+    thumbnailSize: { width: display.bounds.width, height: display.bounds.height } });
+  const source = sources.find((item) => item.display_id === String(display.id)) ||
+    (sources.length === 1 ? sources[0] : undefined);
+  if (!source) throw new Error('Owned overlay primary desktop capture is unavailable.');
+  const image = source.thumbnail, size = image.getSize(), data = image.toBitmap();
+  const bounds = overlay.getBounds();
+  let dark = 0, light = 0, red = 0, sampled = 0;
+  for (let y = bounds.y + 3; y < bounds.y + bounds.height - 3; y++) {
+    for (let x = bounds.x + 3; x < bounds.x + bounds.width - 3; x++) {
+      const px = Math.floor((x - display.bounds.x) * size.width / display.bounds.width);
+      const py = Math.floor((y - display.bounds.y) * size.height / display.bounds.height);
+      if (px < 0 || py < 0 || px >= size.width || py >= size.height) continue;
+      const index = (py * size.width + px) * 4;
+      const b = data[index], g = data[index + 1], r = data[index + 2];
+      sampled++;
+      if (r > 200 && g < 60 && b > 20 && b < 90) red++;
+      if (r < 70 && g < 80 && b < 100) dark++;
+      if (r > 120 && g > 120 && b > 120) light++;
+    }
+  }
+  return { dark, light, red, sampled, bounds, painted: dark > 100 && light > 10 };
+}
+async function confirmOwnedFocus(driver, phase) {
+  report.stage = phase;
+  await until(async () => BrowserWindow.getFocusedWindow() === mainWindow &&
+    !mainWindow.webContents.isLoading() && await evaluate('document.hasFocus()'), phase, 5000);
+  const actual = await driver.capture();
+  assert.equal(actual.pid, process.pid, `${phase}: foreground must belong to this CI process.`);
+  assert.equal(actual.window, mainWindow.getNativeWindowHandle().readBigUInt64LE().toString(),
+    `${phase}: native foreground must remain the owned settings HWND.`);
+  (report.focusChecks ||= []).push({ phase, ownerVerified: true, nativeForegroundVerified: true });
+}
+async function establishOwnedFocus(driver, window, phase, rendererReady) {
+  report.stage = phase;
+  const acquisition = { phase, budgetMs: 5000, attempts: 0, state: 'warming', nativeOwner: 'unobserved' };
+  (report.focusAcquisitions ||= []).push(acquisition);
+  try {
+    const target = await acquireOwnedForeground({ driver, window, ownerPid: process.pid, rendererReady,
+      onAttempt: (value) => Object.assign(acquisition, value, { state: 'acquiring' }) });
+    acquisition.state = 'verified';
+    return target;
+  } catch (error) {
+    acquisition.state = 'failed';
+    acquisition.failure = ['owned-focus-timeout', 'owned-focus-unavailable'].includes(error.code) ? error.code : 'native-error';
+    throw error;
+  }
+}
+async function verifyWindowsOverlay(driver) {
+  if (process.platform !== 'win32') return;
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
+  await establishOwnedFocus(driver, mainWindow, 'overlay-owned-foreground-baseline', async () =>
+    BrowserWindow.getFocusedWindow() === mainWindow && !mainWindow.webContents.isLoading() && await evaluate('document.hasFocus()'));
+  await confirmOwnedFocus(driver, 'overlay-owned-foreground-baseline');
+  const overlay = BrowserWindow.getAllWindows().find((item) => item.webContents.getURL().endsWith('/overlay.html'));
+  assert.ok(overlay);
+  const display = screen.getPrimaryDisplay(), area = display.workArea;
+  const bounds = { x: area.x + area.width - 230, y: area.y + 70, width: 224, height: 54 };
+  const underlay = new BrowserWindow({ ...bounds, show: false, frame: false, focusable: false,
+    alwaysOnTop: true, backgroundColor: '#ee1234', skipTaskbar: true,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  try {
+    await underlay.loadURL('data:text/html,<body style="margin:0;background:rgb(238,18,52)">');
+    underlay.showInactive();
+    overlay.setBounds(bounds);
+    overlay.moveTop();
+    report.stage = 'overlay-physical-paint';
+    await until(async () => (await overlayPixels(overlay, display)).painted, 'actual floating controls desktop pixels');
+    const before = await overlayPixels(overlay, display);
+    overlay.setBounds({ x: area.x + area.width + 500, y: area.y + area.height + 500, width: 240, height: 80 });
+    screen.emit('display-metrics-changed', {}, display, ['workArea', 'scaleFactor']);
+    underlay.setBounds(overlay.getBounds());
+    await until(async () => {
+      const current = overlay.getBounds();
+      return current.width === 224 && current.height === 54 && (await overlayPixels(overlay, display)).painted;
+    }, 'display-notification bounds and desktop pixel recovery');
+    await confirmOwnedFocus(driver, 'overlay-bounds-nonactivation');
+    assert.notEqual(overlay.webContents.getOSProcessId(), mainWindow.webContents.getOSProcessId(),
+      'Renderer-crash fixture must not share the settings/audio renderer.');
+    let loadedAgain = false;
+    overlay.webContents.once('did-finish-load', () => { loadedAgain = true; });
+    overlay.webContents.forcefullyCrashRenderer();
+    await until(async () => loadedAgain && !overlay.webContents.isLoading() && (await overlayPixels(overlay, display)).painted,
+      'isolated floating renderer recovery and actual desktop pixels');
+    await confirmOwnedFocus(driver, 'overlay-renderer-recovery-nonactivation');
+    await overlay.webContents.executeJavaScript('window.floatingVoice.cancel()');
+    await until(() => !overlay.isVisible(), 'explicit floating hide');
+    screen.emit('display-metrics-changed', {}, display, ['workArea']);
+    assert.equal(overlay.isVisible(), false, 'Display recovery undid an intentional hide.');
+    let hiddenPixels;
+    await until(async () => {
+      hiddenPixels = await overlayPixels(overlay, display);
+      return !hiddenPixels.painted && hiddenPixels.sampled > 100 &&
+        hiddenPixels.red / hiddenPixels.sampled > 0.9;
+    }, 'physical negative: same rectangle contains the owned red underlay, not the widget');
+    await evaluate('window.voice.showFloating()');
+    await until(async () => (await overlayPixels(overlay, display)).painted, 'explicit floating show and painted controls');
+    report.overlaySurface = { before, hidden: hiddenPixels, after: await overlayPixels(overlay, display),
+      scope: 'CI-owned Windows desktop capture; synthetic display notification and isolated renderer failure',
+      actualHardwareDpiTransitionTested: false };
+    report.checks.push('floating-controls-native-desktop-pixels', 'floating-bounds-recovery', 'floating-renderer-recovery-no-focus');
+  } finally { underlay.destroy(); }
+}
+async function verifyWindowsPaste(driver) {
+  if (process.platform !== 'win32') return;
+  report.stage = 'owned-native-caret-paste';
+  const area = screen.getPrimaryDisplay().workArea;
+  const editor = new BrowserWindow({ x: area.x + area.width - 420, y: area.y + 100, width: 400, height: 240,
+    title: 'VI synthetic paste fixture', alwaysOnTop: true,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  try {
+    await editor.loadURL('data:text/html,<textarea aria-label="Owned synthetic text" style="width:95%;height:90%"></textarea>');
+    editor.show();
+    await editor.webContents.executeJavaScript(`(() => {
+      const field=document.querySelector('textarea');field.value='Prefix  Suffix';field.focus();field.setSelectionRange(7,7);
+    })()`);
+    await clipboard.writeText('Owned previous clipboard');
+    assert.equal(await clipboard.readText(), 'Owned previous clipboard');
+    const target = await establishOwnedFocus(driver, editor, 'owned-editor-foreground-baseline', async () =>
+      BrowserWindow.getFocusedWindow() === editor &&
+      await editor.webContents.executeJavaScript("document.hasFocus() && document.activeElement.tagName === 'TEXTAREA'"));
+    report.stage = 'owned-native-caret-paste';
+    assert.equal(target.pid, process.pid, 'Only the CI-owned editor may receive this paste.');
+    assert.equal(target.window, editor.getNativeWindowHandle().readBigUInt64LE().toString(),
+      'Native target must match the CI-owned editor HWND.');
+    assert.equal(await driver.paste('Approved final fixture', target), true);
+    await until(async () => await editor.webContents.executeJavaScript("document.querySelector('textarea').value") ===
+      'Prefix Approved final fixture Suffix', 'one approved caret paste without replacing surrounding text');
+    assert.equal(await clipboard.readText(), 'Owned previous clipboard');
+    report.checks.push('actual-native-approved-caret-paste-once', 'actual-native-clipboard-restored');
+  } finally { editor.destroy(); }
+}
+async function verifyFloatingDomControls() {
+  if (process.platform !== 'win32') return;
+  const overlay = BrowserWindow.getAllWindows().find((item) => item.webContents.getURL().endsWith('/overlay.html'));
+  for (const [button, outcome] of [['stop', 'done'], ['cancel', 'idle']]) {
+    await click('#toggle');
+    await until(async () => (await status()).phase === 'recording', 'owned recording for floating DOM control');
+    const point = await overlay.webContents.executeJavaScript(`(() => {
+      const r=document.getElementById(${JSON.stringify(button)}).getBoundingClientRect();
+      return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};
+    })()`);
+    // Renderer input intentionally has no corresponding GetAsyncKeyState polling gesture.
+    overlay.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+    overlay.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+    overlay.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+    await until(async () => (await status()).phase === outcome, 'floating DOM-only quick gesture');
+    await overlay.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    assert.equal((await status()).phase, outcome, 'A duplicate floating action restarted recording.');
+  }
+  report.checks.push('floating-dom-only-stop-cancel-no-polling-dependency');
 }
 async function run() {
   assert.equal(process.arch, process.env.VI_EXPECTED_ARCH);
@@ -127,12 +284,18 @@ async function run() {
   await click('#consent');
   await until(async () => (await status()).consent, 'consent');
   report.checks.push('consent-controls-recording');
+  const nativeProbe = process.platform === 'win32' ? new DesktopInput() : undefined;
+  try {
+    await verifyWindowsOverlay(nativeProbe);
+    await verifyWindowsPaste(nativeProbe);
+  } finally { nativeProbe?.close(); }
   await click('#test-mic');
   await until(() => evaluate("Number(document.getElementById('mic-level').value)>0"), 'local microphone meter');
   assert.equal(service.bytes(), 0);
   await click('#test-mic');
   await until(async () => !(await status()).testingMic && await evaluate('micTest === undefined'), 'microphone-test release');
   report.checks.push('microphone-test-without-network');
+  await verifyFloatingDomControls();
   await record('Fixture final text');
   await click('#copy');
   await until(async () => (await clipboard.readText()) === 'Fixture final text', 'copy result');

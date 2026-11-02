@@ -1,6 +1,6 @@
 {
   "name": "vi",
-  "version": "0.6.4-preview",
+  "version": "0.6.4",
   "private": true,
   "description": "Voice Input",
   "license": "MIT",

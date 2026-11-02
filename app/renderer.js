@@ -17,7 +17,7 @@ function cue(kind) {
 
 function showStatus(value) {
   recording = value.phase === 'recording';
-  byId('version').textContent = `v${value.version}`;
+  byId('version').textContent = `v${value.version} (${value.targetLabel})`;
   byId('status').textContent = value.message;
   byId('status').classList.toggle('error', value.phase === 'error');
   byId('input-state').textContent = ['idle', 'error'].includes(value.phase) ? '' : ['preparing', 'binding'].includes(value.inputState)
@@ -73,6 +73,7 @@ window.voice.providerOptions().then((options) => {
   byId('provider-state').textContent = options.available ? 'Service provider installed.' : 'Install a compatible service provider to transcribe.';
   byId('provider-endpoint').value = options.endpointOverride || '';
 }).catch(displayError);
+byId('show-floating').onclick = () => window.voice.showFloating().catch(displayError);
 byId('save-provider').onclick = async () => {
   try { byId('provider-result').textContent = await window.voice.saveProvider(byId('provider-endpoint').value.trim()); }
   catch (error) { byId('provider-result').textContent = error.message; }

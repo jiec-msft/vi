@@ -4,6 +4,9 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'OS input is restricted to an isolated GitHub-hosted Windows runner.' }
 if ($DesktopName -and $DesktopName -notmatch '^vi-ci-[0-9]+-[0-9]+-[a-f0-9]{32}$') { throw 'Invalid owned desktop name.' }
+[Console]::Error.WriteLine("VI_DRIVER_STAGE script-entry $PID")
+. ([IO.Path]::Combine($PSScriptRoot, '..', '..', '..', 'native', 'windows-bootstrap.ps1'))
+[Console]::Error.WriteLine("VI_DRIVER_STAGE bootstrap-ready $PID")
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -185,12 +188,14 @@ public static class OverlayCiMouse {
     }
 }
 '@
+[Console]::Error.WriteLine("VI_DRIVER_STAGE mouse-compiled $PID")
 if ($DesktopName) {
     if (!$JobOutput -or !$ProofOutput) { throw 'Driver committed Job/response output is required.' }
     & (Join-Path $PSScriptRoot '..\..\..\scripts\overlay-ci-desktop-attest.ps1') `
         -DesktopName $DesktopName -Output $ProofOutput -JobOutput $JobOutput -Role os-mouse-driver -Generation $env:VI_CI_NATIVE_GENERATION
     [OverlayDesktopAttestor]::ConfirmExecution()
 }
+[Console]::Error.WriteLine("VI_DRIVER_STAGE authority-ready $PID")
 $precondition = ''
 if ($CleanupOwnedDown) {
     try {
@@ -204,7 +209,9 @@ if ($CleanupOwnedDown) {
         if ($DesktopName) { [OverlayDesktopAttestor]::ValidateAuthority($OwnedDownReceipt,$Window,$Owner) }
     } catch { $precondition = $_.Exception.Message }
 }
+[Console]::Error.WriteLine("VI_DRIVER_STAGE input-begin $PID")
 $json = [OverlayCiMouse]::Execute($Window,$Foreground,$Owner,$Mode,$X,$Y,[bool]$CleanupOwnedDown,$DesktopName,$precondition)
+[Console]::Error.WriteLine("VI_DRIVER_STAGE input-returned $PID")
 if ($DesktopName) { $json = [OverlayDesktopAttestor]::CommitResponse($json) }
 $value = $json | ConvertFrom-Json
 [Console]::WriteLine($json)

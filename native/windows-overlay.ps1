@@ -7,7 +7,7 @@ param(
     [int] $DiagnosticParent = 0
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-diagnostics.ps1')
+. ([IO.Path]::Combine($PSScriptRoot, 'windows-diagnostics.ps1'))
 [ViNativeDiagnostics]::Configure($DiagnosticsDirectory, $DiagnosticRun, 'pointer', $DiagnosticGeneration, $DiagnosticParent, $true)
 [ViNativeDiagnostics]::Record('compile', 'begin', 0)
 Add-Type -TypeDefinition @'
@@ -102,6 +102,7 @@ public sealed class OverlayMouse {
 }
 '@
 [ViNativeDiagnostics]::Record('compile', 'end', 0)
+Write-ViStartup 'pointer-ready'
 try { [OverlayMouse]::Run($Window, $Parent); [ViNativeDiagnostics]::Record('native-exit', 'exit', 0) }
 catch { [Console]::Error.WriteLine('Floating window pointer observer failed.'); exit 1 }
 finally { [ViNativeDiagnostics]::Close() }
