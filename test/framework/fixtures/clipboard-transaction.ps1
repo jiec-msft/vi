@@ -192,9 +192,10 @@ function Report-TransactionState([ValidateSet('begin-return','text-read-return',
     $observed=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
     $ownerObserved=$Transaction.Handle -ne [IntPtr]::Zero -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $Transaction.Handle
     $state="VI_CLIP_STATE $Phase case=$([OwnedClipboardFixture]::CaseId) expected=$expected observed=$observed ownerObserved=$ownerObserved"
-    foreach($name in @('began','rendered','renderFailed','restoreMutated','renderAttempted','renderExpectedSequence','renderObservedSequence','renderWriteStarted','renderWriteCompleted')){
+    foreach($name in @('began','rendered','renderFailed','restoreMutated')){
         $state+=" $name=$($type.GetField($name,$flags).GetValue($Transaction))"
     }
+    $state+=" renderAttempted=$($Transaction.RenderAttempted) renderExpectedSequence=$($Transaction.RenderExpectedSequence) renderObservedSequence=$($Transaction.RenderObservedSequence) renderWriteStarted=$($Transaction.RenderWriteStarted) renderWriteCompleted=$($Transaction.RenderWriteCompleted)"
     [Console]::Error.WriteLine($state)
 }
 function Report-OperationFailure($Transaction,$Exception){

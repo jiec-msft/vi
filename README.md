@@ -126,6 +126,9 @@ setter fault 的 hook 仍先恢复再 Dispose，最终 fixture cleanup 也不能
 Restore 返回及异常点的只读状态。observed sequence／owner 是分开采样的观察，
 不是原子 ownership 证明；render 的 expected/observed sequence 与写入开始／完成
 标量只描述最近一次 eligible callback，不额外调用 GetClipboardData 或发起 render。
+新增 render 标量通过只读 bool／uint property 提供并由 fixture 实际消费；
+不能仅用 reflection 读取 private 字段，让严格 PS5 Add-Type 将其判为未使用字段，
+也不能通过忽略 compiler warning 来绕过真实 helper 编译门槛。
 若该分支先失败，后面的 OLE 与其余分组属于未执行，不能沿用旧失败阶段推断。
 临时 Unicode clipboard 现在在同一 owned lock 内显式发布当前输入语言的
 `CF_LOCALE`，再采样 sequence。Windows 能从 Unicode 合成 ANSI/OEM text，

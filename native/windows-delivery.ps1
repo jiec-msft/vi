@@ -52,6 +52,11 @@ public sealed class TranscriptClipboard : NativeWindow, IDisposable {
     long holdAt = -1;
     public uint TargetOwner;
     public bool ReaderMatched, ReaderUnknown;
+    public bool RenderAttempted { get { return renderAttempted; } }
+    public uint RenderExpectedSequence { get { return renderExpectedSequence; } }
+    public uint RenderObservedSequence { get { return renderObservedSequence; } }
+    public bool RenderWriteStarted { get { return renderWriteStarted; } }
+    public bool RenderWriteCompleted { get { return renderWriteCompleted; } }
     public bool RenderedBeforePaste { get { return rendered && (pasteAt < 0 || renderedAt < pasteAt); } }
     public long HoldMilliseconds { get { return holdAt < 0 ? 0 : clock.ElapsedMilliseconds - holdAt; } }
     public void PasteStarted() { pasteAt = clock.ElapsedMilliseconds; }
