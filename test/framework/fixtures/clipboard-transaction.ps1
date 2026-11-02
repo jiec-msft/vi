@@ -161,6 +161,15 @@ public sealed class OwnedClipboardFixture : NativeWindow, IDisposable {
   }finally{CloseClipboard();}
  }
  public void Put(uint[] formats,byte[][] payloads){
+  if(formats==null)throw new ArgumentNullException("formats");
+  if(payloads==null)throw new ArgumentNullException("payloads");
+  if(formats.Length!=payloads.Length)throw new ArgumentException("Owned payload count must match format count.","payloads");
+  for(int i=0;i<payloads.Length;i++){
+   byte[] bytes=payloads[i];
+   if(bytes==null)throw new ArgumentException("Owned payload must be a byte array.","payloads");
+   if(formats[i]==13&&(bytes.Length<2||bytes.Length%2!=0||bytes[bytes.Length-2]!=0||bytes[bytes.Length-1]!=0))
+    throw new ArgumentException("Owned Unicode payload must contain complete null-terminated UTF-16 bytes.","payloads");
+  }
   if(!OpenClipboard(Handle))throw Failure("open",0,0,Marshal.GetLastWin32Error());
   try{
    if(!EmptyClipboard())throw Failure("empty",0,0,Marshal.GetLastWin32Error());
@@ -462,8 +471,32 @@ try{
     }finally{$bitmap.Dispose()}
     $checks.Add('image-pixel-preservation')
     [OwnedClipboardFixture]::CaseId=8
-    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+    $singleText=[byte[][]](,$text)
+    Check ($text -is [byte[]] -and $text.Length -eq 42 -and $singleText -is [byte[][]] -and $singleText.Length -eq 1 -and $singleText[0] -is [byte[]]) 'Single-format Unicode setup lost its byte-array shape or exact length.'
+    Check ([Object]::ReferenceEquals($singleText[0],$text)) 'Single-format setup replaced or converted the original bytes.'
+    $fixture.Put([uint32[]]@(13),$singleText)
     $expectedText=[Convert]::ToBase64String($fixture.Read(13))
+    $before=[OwnedClipboardFixture]::GetClipboardSequenceNumber()
+    $owner=[OwnedClipboardFixture]::GetClipboardOwner()
+    # Keep the former construction only as a rejected regression input.
+    $flattened=[byte[][]]@($text)
+    Check ($flattened.Length -eq $text.Length -and $flattened[0] -is [byte[]] -and $flattened[0].Length -eq 1) 'Former array construction did not reproduce the incorrect payload cardinality.'
+    foreach($shape in @(0,1,2,3,4)){
+        switch($shape){
+            0 {$invalid=$flattened}
+            1 {$invalid=[byte[][]]::new(1)}
+            2 {$invalid=[byte[][]](,[byte[]]@(79))}
+            3 {$invalid=[byte[][]](,[byte[]]@(79,0,0))}
+            4 {$invalid=[byte[][]](,[byte[]]@(79,0))}
+        }
+        $caught=$null
+        try{$fixture.Put([uint32[]]@(13),$invalid)}catch{$caught=$_.Exception}
+        Check ($null -ne $caught) 'Malformed owned payload unexpectedly reached native publication.'
+        $description=Get-ClipboardExceptionLeaves $caught
+        Check ($description.leaves.Count -eq 1 -and -not $description.truncated -and $description.leaves[0] -is [ArgumentException] -and $description.leaves[0].ParamName -eq 'payloads') 'Malformed owned payload did not fail explicit preflight validation.'
+        Check ([OwnedClipboardFixture]::GetClipboardSequenceNumber() -eq $before -and [OwnedClipboardFixture]::GetClipboardOwner() -eq $owner) 'Rejected payload shape changed original clipboard identity.'
+        Check ([Convert]::ToBase64String($fixture.Read(13)) -eq $expectedText) 'Rejected payload shape changed full original allocation bytes.'
+    }
     $fixture.Hold(80)
     $transaction=[TranscriptClipboard]::new()
     $operationFailure=$null
@@ -499,7 +532,7 @@ try{
     finally{Close-Transaction $transaction $operationFailure}
     $checks.Add('unsupported-format-fails-without-mutation')
     [OwnedClipboardFixture]::CaseId=11
-    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+    $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
     $transaction=[TranscriptClipboard]::new()
     $operationFailure=$null
     try{
@@ -510,7 +543,7 @@ try{
         $transaction.PasteFinished()
         Check ($transaction.WaitForRead()) 'Rendered clipboard data was not retained for a late reader.'
         Check ($transaction.HoldMilliseconds -ge 1000) 'Early history-style read shortened the existing minimum hold.'
-        $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New user copy`0")))
+        $fixture.Put([uint32[]]@(13),[byte[][]](,[Text.Encoding]::Unicode.GetBytes("New user copy`0")))
         $transaction.Restore()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New user copy') 'A newer clipboard copy was overwritten.'
     }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
@@ -585,14 +618,14 @@ try{
         try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected restore failure.'}
         Check ([OwnedClipboardFixture]::Writes -eq 2) 'External-copy fixture did not reach restored locale and first text.'
         $setter.SetValue($null,$original)
-        $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New external copy wins`0")))
+        $fixture.Put([uint32[]]@(13),[byte[][]](,[Text.Encoding]::Unicode.GetBytes("New external copy wins`0")))
         [TranscriptClipboard]::RecoverPending()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New external copy wins') 'Deferred backup overwrote a genuinely newer external copy.'
     }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
     finally{Close-Transaction $transaction $operationFailure { $setter.SetValue($null,$original) }}
     $checks.Add('external-new-copy-wins-after-partial-restore')
     [OwnedClipboardFixture]::CaseId=17
-    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+    $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
     $transaction=[TranscriptClipboard]::new()
     $operationFailure=$null
     try{
@@ -613,7 +646,7 @@ try{
         try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected pending mutation failure.'}
         $pending=[TranscriptClipboard].GetField('deferred',[Reflection.BindingFlags]'Static,NonPublic').GetValue($null)
         Check ([Object]::ReferenceEquals($pending,$transaction)) 'Unknown mutation discarded the pending transaction.'
-        $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New copy after unknown mutation`0")))
+        $fixture.Put([uint32[]]@(13),[byte[][]](,[Text.Encoding]::Unicode.GetBytes("New copy after unknown mutation`0")))
         [TranscriptClipboard]::RecoverPending()
         Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy after unknown mutation') 'Pending backup overwrote a newer external copy.'
     }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
@@ -624,7 +657,7 @@ try{
     [OwnedClipboardFixture]::PublicationFormat=$format
     foreach($mutation in @(0,1,2,3)){
         [OwnedClipboardFixture]::CaseId=18+$mutation
-        $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+        $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
         [OwnedClipboardFixture]::PublicationMutation=$mutation
         $transaction=[TranscriptClipboard]::new()
         $operationFailure=$null
@@ -642,7 +675,7 @@ try{
                 try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected retained seal failure.'}
                 $pending=[TranscriptClipboard].GetField('deferred',[Reflection.BindingFlags]'Static,NonPublic').GetValue($null)
                 Check ([Object]::ReferenceEquals($pending,$transaction)) 'Unknown seal mutation discarded its pending backup.'
-                $fixture.Put([uint32[]]@(13),[byte[][]]@([Text.Encoding]::Unicode.GetBytes("New copy after seal failure`0")))
+                $fixture.Put([uint32[]]@(13),[byte[][]](,[Text.Encoding]::Unicode.GetBytes("New copy after seal failure`0")))
                 [TranscriptClipboard]::RecoverPending()
                 Check ([Windows.Forms.Clipboard]::GetText() -eq 'New copy after seal failure') 'Pending seal backup overwrote a genuine new copy.'
             }
@@ -679,7 +712,7 @@ try{
     [OwnedClipboardFixture]::RealPublicationRead=$realProbe
     foreach($mode in @(0,1,2,3,4,5)){
         [OwnedClipboardFixture]::CaseId=23+$mode
-        $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+        $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
         $transaction=[TranscriptClipboard]::new()
         $operationFailure=$null
         [OwnedClipboardFixture]::ProbeMode=$mode
@@ -698,7 +731,7 @@ try{
             Check (-not $transaction.PublicationSealed) 'An unproven probe marked publication sealed.'
             $probeReader.SetValue($null,$realProbe)
             $publicationHook.SetValue($null,$null)
-            $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+            $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
             [TranscriptClipboard]::RecoverPending()
         }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
         finally{Close-Transaction $transaction $operationFailure { $probeReader.SetValue($null,$realProbe);$publicationHook.SetValue($null,$null) }}
@@ -738,7 +771,7 @@ try{
                     try{$transaction.Dispose()}catch{Check ((Fault-Code $_.Exception) -eq 'restore-failed') 'Unexpected final-seal recovery failure.'}
                     $pending=[TranscriptClipboard].GetField('deferred',$static).GetValue($null)
                     Check ([Object]::ReferenceEquals($pending,$transaction)) 'Final-seal mutation discarded its pending master.'
-                    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+                    $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
                     [TranscriptClipboard]::RecoverPending()
                     Check ([Windows.Forms.Clipboard]::GetText() -eq 'Owned Unicode sample') 'Final-seal recovery overwrote a newer owner.'
                 }
@@ -778,7 +811,7 @@ try{
     }
     $checks.Add('post-allocation-and-post-lock-copy-faults-release-native-allocation-once')
     [OwnedClipboardFixture]::CaseId=35
-    $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+    $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
     $closeSetter=[TranscriptClipboard].GetField('sealClose',$static)
     $realClose=$closeSetter.GetValue($null)
     [OwnedClipboardFixture]::RealSealClose=$realClose
@@ -811,7 +844,7 @@ try{
         Check (($bounded|ConvertTo-Json -Depth 6) -notmatch 'PRIVATE_SYNTHETIC_CAUSE') 'Bounded projection exposed raw exception content.'
         $probeReader.SetValue($null,$realProbe)
         $closeSetter.SetValue($null,$realClose)
-        $fixture.Put([uint32[]]@(13),[byte[][]]@($text))
+        $fixture.Put([uint32[]]@(13),[byte[][]](,$text))
         [TranscriptClipboard]::RecoverPending()
     }catch{$operationFailure=$_.Exception;Report-OperationFailure $transaction $operationFailure;throw}
     finally{Close-Transaction $transaction $operationFailure { $probeReader.SetValue($null,$realProbe);$closeSetter.SetValue($null,$realClose) }}

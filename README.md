@@ -214,6 +214,14 @@ managed error 或非零返回；受控状态只覆盖返回值处理，不宣称
 不能用加锁制造 failed-free 对照；见 [GlobalFree 契约](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalfree)。
 名称查询负例则调用真实查询 API 的 predefined-format 失败路径，保留实际 error。
 不制造 OOM、巨大分配、double-free 或无效 native pointer。
+CI-owned fixture 的单格式 byte[][] 使用 unary comma 保留完整 byte[]；
+`[byte[][]]@($bytes)` 会逐 byte 转成多个单字节 payload，不能作为单格式输入。
+Put 在任何 Open/Empty/native allocation 前校验 format/payload 数量、非 null
+byte[]，以及 Unicode 的偶数字节数和末尾双零；不填充、转码或重写原始 payload。
+case 8 保留原 transient-lock 路径，并先断言完整单元素 byte[][] 的类型、原 byte[]
+引用和精确长度；旧 flattening、null row、单字节、奇数字节、缺 terminator 输入
+必须明确拒绝，owner/sequence 与原始完整 allocation bytes 不变。22 组及顺序不变。
+参见 [PowerShell comma/array operators](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_operators?view=powershell-5.1)。
 异常投影最多遍历 32 个节点，每个 operation/cleanup phase 各保留两个 leaf，
 越界显式标记 truncated；Aggregate 的两个成员不会被 InnerException 首项替代。
 wire、JS error 和 privacy log 只接受固定 code/stage、numeric format/native code，
