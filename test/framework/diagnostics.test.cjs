@@ -3,16 +3,52 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { Diagnostics } = require('../../app/diagnostics.cjs');
+const { Diagnostics, safeError } = require('../../app/diagnostics.cjs');
 const { EventEmitter } = require('node:events');
 const { spawn } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
+const { Worker } = require('node:worker_threads');
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-diagnostics-'));
   const failures = [];
-  const diagnostics = new Diagnostics(root, (error) => failures.push(error));
-  t.after(async () => { diagnostics.close(); await fs.rm(root, { recursive: true, force: true }); });
+  let writer, ready;
+  const diagnostics = new Diagnostics(root, (error) => failures.push(error), 524288, {
+    createWriter(data) {
+      const module = require.resolve('../../app/diagnostics-writer.cjs');
+      writer = new Worker(`require(${JSON.stringify(module)});
+        const {parentPort,workerData}=require('node:worker_threads');
+        if(Atomics.load(new Int32Array(workerData.control),2))throw new Error('Content writer initialization failed.');
+        parentPort.postMessage({fixtureReady:true});`, { eval: true, workerData: data });
+      ready = new Promise((resolve, reject) => {
+        const finish = (error) => {
+          clearTimeout(timer);
+          writer.off('message', message);
+          writer.off('error', failed);
+          writer.off('exit', exited);
+          if (error) reject(error); else resolve();
+        };
+        const message = (value) => {
+          if (value.failed) finish(new Error('Content writer initialization failed.'));
+          else if (value.fixtureReady) finish();
+        };
+        const failed = (error) => finish(error);
+        const exited = (code) => finish(new Error(`Content writer exited before readiness (${code}).`));
+        const timer = setTimeout(() => finish(new Error('Content writer readiness exceeded 2000 ms.')), 2000);
+        writer.on('message', message);
+        writer.on('error', failed);
+        writer.on('exit', exited);
+      });
+      return writer;
+    },
+  });
+  t.after(async () => {
+    diagnostics.close();
+    if (writer) await writer.terminate();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  assert.ok(ready, 'Content writer was not created.');
+  await ready;
   return { diagnostics, async entries() {
     await diagnostics.flush();
     assert.deepEqual(failures, []);
@@ -27,6 +63,16 @@ test('startup diagnostics retain stable, preview and build versions without arbi
   }
   assert.deepEqual((await f.entries()).map((entry) => entry.version),
     ['0.6.1', '0.6.1-vi-preview', '0.6.1-preview.2+build.3', undefined, undefined]);
+});
+
+test('provider setup diagnostics retain classification without raw paths or error content', async (t) => {
+  const f = await fixture(t);
+  const error = Object.assign(new Error('SYNTHETIC_PATH_AND_MODULE'), { code: 'ERR_PROVIDER_SETUP' });
+  f.diagnostics.record('error', { reason: 'provider', ...safeError(error), message: error.message });
+  const entries = await f.entries();
+  assert.equal(entries[0].reason, 'provider');
+  assert.equal(entries[0].errorCode, 'ERR_PROVIDER_SETUP');
+  assert.doesNotMatch(JSON.stringify(entries), /SYNTHETIC_PATH_AND_MODULE/);
 });
 
 test('native pointer faults retain fixed reason and recovery state, never raw errors', async (t) => {

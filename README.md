@@ -109,6 +109,10 @@ Providers are trusted local code, not a security sandbox. Other providers can
 implement the same interface. Artifact availability is independent of app
 source and no application installer is produced by this CI.
 
+Manifest、配置、依赖加载和 factory 创建失败显示为 **Provider setup error**，
+不再误报 **Connection error**。详细消息保留原始错误与 cause。
+异步 transport 失败仍显示连接错误；setup 失败不会切换 fallback provider。
+
 ## Application framework
 
 `npm start` opens the generic application: microphone preferences, configurable

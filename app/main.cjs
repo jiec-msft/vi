@@ -5,6 +5,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const { createSession, providerAvailable, readOverride } = require('./service-provider.cjs');
+const { providerErrorKind } = require('./provider-error.cjs');
 const { DesktopInput } = require('./desktop.cjs');
 const { APP_ID, preferences, overlayPosition, applyLoginSettings } = require('./preferences.cjs');
 const { ShortcutBindings, ShortcutPress, shortcutKeys } = require('./shortcuts.cjs');
@@ -427,7 +428,7 @@ async function begin(fromShortcut) {
   active = run;
   logEvent('turn-start', run);
   run.audio = new AudioTurn({
-    onFailure: (error) => { if (active === run && !run.cancelled) void abort(error.message, true, 'cloud'); },
+    onFailure: (error) => { if (active === run && !run.cancelled) void abort(error.message, true, providerErrorKind(error)); },
     onConnected: () => { logEvent('cloud-ready', run); updateRecordingStatus(run); },
     onSegmentState: () => {
       if (active !== run || run.cancelled) return;
@@ -492,7 +493,7 @@ async function connectProvider(run) {
   try {
     run.session = createSession();
     run.session.on('failure', (error) => {
-      if (active === run && !run.cancelled) void abort(error.message, true, 'cloud');
+      if (active === run && !run.cancelled) void abort(error.message, true, providerErrorKind(error));
     });
     run.session.on('partial', (text) => {
       if (active !== run || run.cancelled) return;
@@ -621,7 +622,8 @@ async function finalize(run) {
         actualMode, inputState: run.inputState, origin: run.origin, completedSegments });
   } catch (error) {
     if (active === run && !run.cancelled) await abort(error.message, true,
-      error.pluginFailure ? 'plugin' : error.code === 'no-speech' ? 'no-speech' : 'input');
+      error.pluginFailure ? 'plugin' : error.code === 'ERR_PROVIDER_SETUP' ? 'provider'
+        : error.code === 'no-speech' ? 'no-speech' : 'input');
   }
 }
 

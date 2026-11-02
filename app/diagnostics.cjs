@@ -8,7 +8,7 @@ const events = new Set(['app-start', 'turn-start', 'capture-ready', 'cloud-ready
   'overlay-down', 'drag-start', 'drag-end', 'stop', 'capture-ended', 'done', 'error', 'cancel',
   'input-focus-return', 'window-shown', 'quit-start', 'plugin-call', 'plugin-warning', 'startup-stage',
   'lifecycle', 'native', 'event-loop', 'diagnostic-drop']);
-const reasons = new Set(['user', 'limit', 'microphone', 'cloud', 'input', 'cancel', 'unknown',
+const reasons = new Set(['user', 'limit', 'microphone', 'cloud', 'provider', 'input', 'cancel', 'unknown',
   'target-changed', 'native-error', 'foreground-changed', 'native-focus-changed', 'field-changed',
   'owned-text-changed', 'caret-changed', 'user-input-active', 'composition-active', 'paste-unconfirmed',
   'transcript-changed', 'no-speech', 'unsupported', 'app-focused', 'no-target', 'cancelled']);
@@ -40,7 +40,8 @@ function safeError(error) {
     result.errorClass = error.name;
   }
   if (['ENOENT', 'EACCES', 'EPERM', 'EIO', 'ENOSPC', 'EMFILE', 'EPIPE', 'ECONNRESET', 'ETIMEDOUT',
-    'ERR_UNHANDLED_REJECTION', 'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE'].includes(error?.code)) result.errorCode = error.code;
+    'ERR_UNHANDLED_REJECTION', 'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE',
+    'ERR_PROVIDER_SETUP'].includes(error?.code)) result.errorCode = error.code;
   return result;
 }
 
