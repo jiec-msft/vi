@@ -174,6 +174,35 @@ provider 和 helper，再 inside-out ad-hoc signing、strict verification；
 后续服务地址 JSON 只能放 bundle 外，不能修改 sealed macOS bundle，
 也不能将 macOS archive 用 Windows ZIP 工具重新打包。
 
+Electron 45 的 npm package 可以在首次调用公开 `require('electron')` loader
+时才准备 runtime。producer 必须先调用该 loader，再按返回的实际 executable
+确认 Windows runtime directory 或 `Electron.app`，不能将 `npm ci` 成功或
+固定的 `node_modules/electron/dist` 路径当成 binary 已存在的证据。
+receipt 同时记录输入 Electron executable hash 与最终输出 hash；
+不接受 dist override、另一份 runtime 或缺失 binary 的 fallback。
+
+Windows producer 固定使用标准 native runner 的 PowerShell 7
+`ProgramFiles/PowerShell/7/pwsh.exe`，没有 legacy PowerShell fallback。
+版本编辑、读取、archive 和 extraction 共用同一 native Core engine、
+隔离的 inbox module path 和 `-File` 参数边界，不修改 runner 全局环境，
+也不传给应用进程。应用的 desktop helper 不因此更换 engine。
+preflight 验证实际 engine 架构、Core edition，以及 cmdlet/function 的
+实现文件：Security binary assembly 正常位于 engine 根目录，
+Archive function 则来自该 engine 的 inbox `.psm1`。不能假设所有
+`ModuleBase` 都在 `Modules` 子目录，也不能仅凭一个字符串目录前缀放行。
+原始 toolchain JSON 在断言前保存，receipt 记录通过验证的来源。
+签名拒绝、numeric version、完整解包和逐文件 hash gate 均保持不变。
+legacy engine 的空输出超时本身不能定位在 startup、import 或其它阶段；
+不能据此归责机器或推断生产 app 行为。
+Windows ZIP32 容量预算明确用正的 Int64 decimal `4026531840`（3.75 GiB）。
+PowerShell 的八位十六进制 `0xf0000000` 是有符号 Int32 负数，不能直接
+用作该上限。writer 在 receipt 输出实际文件数、总 bytes 与预算；空文件
+仍须完整保留，只有完全没有文件的 payload 才拒绝，错误也保留这些数值。
+数字字面量的 sign-bit 规则见
+<https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_numeric_literals>。
+相关启动规则见
+<https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath>。
+
 每个平台都用实际 packaged Electron 的 Node mode 加载完整 provider、
 两种 factory 和共享 config loader，通过公开 fixture 的 loopback transport
 发送 synthetic PCM。测试不使用真实麦克风、credential lookup 或外部服务；
@@ -215,6 +244,12 @@ The main log has a bounded off-main writer (512 KiB per file, four files). Criti
 markers are sent before synchronous operations, with at most a 25 ms acknowledgement
 wait; queued ordinary records are batched. Pending memory is limited to 128 records
 / 32 KiB and exit flushing to 200 ms. Drops and write failures are explicit.
+内容型 unit fixtures 先等待真实 writer 的持久化 sequence acknowledgement，
+再调用原有 200 ms flush；不会清空错误或延长生产 deadline。专门的 stalled/
+blocked/rotation/filesystem 测试仍独立验证原来的边界。native host-gap 内容测试
+仅控制 fixture 的 pulse/sample bookkeeping，走真实 sampler 和 writer，
+保留 5 秒生产阈值、重复通知断言与原 child deadline；它不把 PowerShell
+cold-start 加上固定 sleep 的总时长冒充 sampler 性能或真实 OS 停顿验收。
 An OS/filesystem stall can still prevent a marker from reaching disk; logging
 cannot guarantee evidence through a power loss or a system-wide freeze.
 `window-shown` is the completed native-order receipt, not the first rendered pixel.

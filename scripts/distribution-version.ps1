@@ -1,7 +1,12 @@
-param([Parameter(Mandatory=$true)][string]$Executable,[Parameter(Mandatory=$true)][string]$Version)
+param([Parameter(Mandatory=$true)][string]$Executable,[Parameter(Mandatory=$true)][string]$Version,[switch]$ReadOnly)
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?:-preview(?:\.\d+)?)?$'){throw 'Unsupported distribution version.'}
 $major=[uint32]$Matches[1];$minor=[uint32]$Matches[2];$patch=[uint32]$Matches[3]
+if($ReadOnly){
+    $actual=[Diagnostics.FileVersionInfo]::GetVersionInfo([IO.Path]::GetFullPath($Executable))
+    @{file=$actual.FileVersion;product=$actual.ProductVersion;name=$actual.ProductName}|ConvertTo-Json -Compress
+    exit
+}
 $originalCopyright=(Get-Item -LiteralPath $Executable).VersionInfo.LegalCopyright
 if((Get-AuthenticodeSignature -LiteralPath $Executable).Status -ne 'NotSigned'){
     throw 'Resource editing requires the unsigned generic Windows Electron runtime.'

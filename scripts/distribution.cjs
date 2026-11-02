@@ -25,6 +25,69 @@ function childEnv(profile) {
   return env;
 }
 
+function electronDistribution(platform, loadExecutable = () => require('electron')) {
+  // Electron's public loader initializes its lazy binary installation.
+  const supplied = loadExecutable();
+  if (typeof supplied !== 'string') throw new Error('Electron did not return an executable path.');
+  const executable = fs.realpathSync(supplied);
+  if (!fs.statSync(executable).isFile()) throw new Error('Electron executable is missing.');
+  if (platform === 'win32' && path.basename(executable).toLowerCase() === 'electron.exe') {
+    return { executable, source: path.dirname(executable) };
+  }
+  const bundle = path.dirname(path.dirname(path.dirname(executable)));
+  if (platform === 'darwin' && path.basename(executable) === 'Electron' &&
+      path.basename(path.dirname(executable)) === 'MacOS' &&
+      path.basename(path.dirname(path.dirname(executable))) === 'Contents' &&
+      path.basename(bundle) === 'Electron.app') return { executable, source: bundle };
+  throw new Error('Unexpected public Electron runtime layout.');
+}
+
+function packagingShellContext(supplied = process.env) {
+  const programFiles = Object.entries(supplied).find(([name]) => name.toUpperCase() === 'PROGRAMFILES')?.[1];
+  if (!programFiles || !path.isAbsolute(programFiles)) throw new Error('Packaging PowerShell requires absolute ProgramFiles.');
+  const home = path.join(programFiles, 'PowerShell', '7');
+  const env = { ...supplied };
+  for (const name of Object.keys(env)) {
+    if (name.toUpperCase() === 'PSMODULEPATH') delete env[name];
+  }
+  env.PSModulePath = path.join(home, 'Modules');
+  return { executable: path.join(home, 'pwsh.exe'), env };
+}
+
+function packagingShell(args, options, supplied = process.env) {
+  const context = packagingShellContext(supplied);
+  return execFileSync(context.executable, args, { ...options, env: context.env });
+}
+
+function probePackagingShell(supplied = process.env) {
+  return JSON.parse(packagingShell(['-NoProfile', '-NonInteractive', '-Command',
+    "$security=Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -PassThru -ErrorAction Stop; " +
+    "$archive=Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Archive\\Microsoft.PowerShell.Archive.psd1') -PassThru -ErrorAction Stop; " +
+    '@{edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString();' +
+    'engineDirectory=$PSHOME;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant();' +
+    'securityModule=$security.ModuleBase;archiveModule=$archive.ModuleBase;' +
+    'securityAssembly=(Get-Command Get-AuthenticodeSignature -ErrorAction Stop).ImplementingType.Assembly.Location;' +
+    'archiveScript=(Get-Command Expand-Archive -ErrorAction Stop).ScriptBlock.File;' +
+    'securityCommand=(Get-Command Get-AuthenticodeSignature -ErrorAction Stop).ModuleName;' +
+    'archiveCommand=(Get-Command Expand-Archive -ErrorAction Stop).ModuleName}|ConvertTo-Json -Compress'],
+  { encoding: 'utf8', timeout: 15000 }, supplied));
+}
+
+function validatePackagingShell(toolchain, context, arch) {
+  const home = path.dirname(context.executable);
+  const same = (left, right) => typeof left === 'string' &&
+    path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+  assert.equal(toolchain.edition, 'Core');
+  assert.equal(toolchain.architecture, arch);
+  assert.equal(toolchain.securityCommand, 'Microsoft.PowerShell.Security');
+  assert.equal(toolchain.archiveCommand, 'Microsoft.PowerShell.Archive');
+  assert.ok(same(toolchain.engineDirectory, home), 'Unexpected packaging PowerShell engine directory.');
+  assert.ok(same(toolchain.securityAssembly, path.join(home, 'Microsoft.PowerShell.Security.dll')),
+    'Signature cmdlet is not implemented by the selected engine assembly.');
+  assert.ok(same(toolchain.archiveScript, path.join(home, 'Modules', 'Microsoft.PowerShell.Archive',
+    'Microsoft.PowerShell.Archive.psm1')), 'Archive function is not defined by the selected inbox script.');
+}
+
 function architecture(file, arch) {
   const fd = fs.openSync(file, 'r');
   try {
@@ -79,12 +142,13 @@ async function main(version, arch) {
   fs.mkdirSync(output, { recursive: true });
   const staging = path.join(output, 'staging');
   fs.mkdirSync(staging);
-  const electronDist = path.join(path.dirname(require.resolve('electron/package.json')), 'dist');
+  if (process.env.ELECTRON_OVERRIDE_DIST_PATH) throw new Error('Neutral bases require the locked public Electron installation.');
+  const electronSource = electronDistribution(process.platform);
   const bundle = process.platform === 'darwin' ? path.join(staging, 'VI.app') : staging;
-  if (process.platform === 'darwin') fs.cpSync(path.join(electronDist, 'Electron.app'), bundle,
+  if (process.platform === 'darwin') fs.cpSync(electronSource.source, bundle,
     { recursive: true, verbatimSymlinks: true });
   else {
-    fs.cpSync(electronDist, staging, { recursive: true });
+    fs.cpSync(electronSource.source, staging, { recursive: true });
     fs.renameSync(path.join(staging, 'electron.exe'), path.join(staging, 'VI.exe'));
   }
   const contents = process.platform === 'darwin' ? path.join(bundle, 'Contents') : bundle;
@@ -102,6 +166,7 @@ async function main(version, arch) {
   const provider = await distributionProvider(path.join(resources, 'providers', 'default'),
     path.join(output, 'public-provider-download'));
   const executable = process.platform === 'darwin' ? path.join(contents, 'MacOS', 'VI') : path.join(contents, 'VI.exe');
+  let powerShell;
   if (process.platform === 'darwin') {
     fs.renameSync(path.join(contents, 'MacOS', 'Electron'), executable);
     const plist = path.join(contents, 'Info.plist');
@@ -114,8 +179,14 @@ async function main(version, arch) {
     fs.writeFileSync(metadata, JSON.stringify(data));
     execFileSync('plutil', ['-convert', 'xml1', '-o', plist, metadata]);
     sealMac(bundle);
-  } else execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts', 'distribution-version.ps1'),
-    '-Executable', executable, '-Version', version], { stdio: 'inherit', timeout: 30000 });
+  } else {
+    powerShell = probePackagingShell();
+    fs.writeFileSync(path.join(output, 'windows-toolchain.json'), JSON.stringify(powerShell, null, 2));
+    console.log(JSON.stringify({ packagingToolchain: powerShell }));
+    validatePackagingShell(powerShell, packagingShellContext(), arch);
+    packagingShell(['-NoProfile', '-NonInteractive', '-File', path.resolve('scripts', 'distribution-version.ps1'),
+      '-Executable', executable, '-Version', version], { stdio: 'inherit', timeout: 30000 });
+  }
   const nativeHeader = architecture(executable, arch);
   if (process.platform === 'darwin') architecture(path.join(app, 'native', 'macos-delivery'), arch);
   const sourceFiles = {};
@@ -128,7 +199,8 @@ async function main(version, arch) {
       { encoding: 'utf8' }).trim() };
   }
   const authority = { sourceRevision: revision, version, architecture: arch,
-    electron: require('../package.json').devDependencies.electron, sourceFiles, provider };
+    electron: require('../package.json').devDependencies.electron,
+    electronSourceExecutableSha256: digest(electronSource.executable), windowsPowerShell: powerShell, sourceFiles, provider };
   const authorityFile = path.join(output, 'authority.json');
   fs.writeFileSync(authorityFile, JSON.stringify(authority, null, 2));
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'vi-native-base-'));
@@ -146,9 +218,9 @@ async function main(version, arch) {
       assert.equal(info.CFBundleShortVersionString, version.split('-')[0]);
       versionMetadata = { bundleVersion: info.CFBundleVersion, shortVersion: info.CFBundleShortVersionString };
     } else {
-      versionMetadata = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
-        '& {param($file) $v=(Get-Item -LiteralPath $file).VersionInfo; @{file=$v.FileVersion;product=$v.ProductVersion;name=$v.ProductName}|ConvertTo-Json -Compress}',
-        target], { encoding: 'utf8', timeout: 10000 }));
+      versionMetadata = JSON.parse(packagingShell(['-NoProfile', '-NonInteractive', '-File',
+        path.resolve('scripts', 'distribution-version.ps1'), '-Executable', target,
+        '-Version', version, '-ReadOnly'], { encoding: 'utf8', timeout: 10000 }));
       assert.equal(versionMetadata.file, `${version.split('-')[0]}.0`);
       assert.equal(versionMetadata.product, version);
       assert.equal(versionMetadata.name, 'VI');
@@ -163,15 +235,21 @@ async function main(version, arch) {
     if (process.platform === 'darwin') execFileSync('codesign', ['--verify', '--deep', '--strict', bundle]);
     const files = fileInventory(staging);
     const zip = path.join(output, `VI-${version}-${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}-neutral.zip`);
+    let archiveWriter;
     if (process.platform === 'darwin') execFileSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', bundle, zip],
       { timeout: 120000 });
-    else execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts', 'distribution-archive.ps1'),
-      '-Root', staging, '-Zip', zip], { timeout: 120000 });
+    else {
+      archiveWriter = JSON.parse(packagingShell(['-NoProfile', '-NonInteractive', '-File',
+        path.resolve('scripts', 'distribution-archive.ps1'), '-Root', staging, '-Zip', zip],
+      { encoding: 'utf8', timeout: 120000 }));
+      assert.equal(archiveWriter.files, Object.keys(files).length);
+      assert.equal(archiveWriter.uncompressedBytes, Object.values(files).reduce((sum, item) => sum + item.bytes, 0));
+      assert.equal(archiveWriter.zip32Budget, 4026531840);
+    }
     const extracted = path.join(output, 'fresh-extraction');
     if (process.platform === 'darwin') execFileSync('ditto', ['-x', '-k', zip, extracted], { timeout: 120000 });
-    else execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      '& {param($file,$directory) Expand-Archive -LiteralPath $file -DestinationPath $directory -ErrorAction Stop}',
-      zip, extracted], { timeout: 120000 });
+    else packagingShell(['-NoProfile', '-NonInteractive', '-File', path.resolve('scripts', 'distribution-archive.ps1'),
+      '-Action', 'extract', '-Zip', zip, '-Root', extracted], { timeout: 120000 });
     try {
       assert.deepEqual(fileInventory(extracted), files, 'Fresh native archive extraction changed payload bytes, links or modes.');
       const freshContents = process.platform === 'darwin' ? path.join(extracted, 'VI.app', 'Contents') : extracted;
@@ -185,7 +263,7 @@ async function main(version, arch) {
     assert.ok(!fs.existsSync(profile));
     fs.writeFileSync(path.join(output, 'receipt.json'), JSON.stringify({ ...authority,
       archive: { file: path.basename(zip), bytes: fs.statSync(zip).size, sha256: digest(zip) },
-      executableSha256: digest(executable), nativeHeader, payload: files, reports,
+      executableSha256: digest(executable), nativeHeader, archiveWriter, payload: files, reports,
       signature: process.platform === 'darwin' ? 'ad-hoc strict verified before and after archive' : 'unsigned',
       helperRuntimeExercised: false, headlessOnly: true,
       cleanup: { packagedElectronChildrenExited: true, syntheticProfileRemoved: !fs.existsSync(profile),
@@ -195,7 +273,8 @@ async function main(version, arch) {
   } finally { fs.rmSync(profile, { recursive: true, force: true }); }
 }
 
-module.exports = { distributionVersion, childEnv };
+module.exports = { distributionVersion, childEnv, electronDistribution,
+  packagingShellContext, validatePackagingShell, probePackagingShell };
 if (require.main === module) main(process.argv[2], process.argv[3]).catch((error) => {
   console.error(error.stack); process.exitCode = 1;
 });

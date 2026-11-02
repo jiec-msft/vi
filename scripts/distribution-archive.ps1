@@ -1,14 +1,22 @@
-param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Zip)
+param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Zip,
+    [ValidateSet('create','extract')][string]$Action='create')
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.IO.Compression
 $Root=[IO.Path]::GetFullPath($Root)
+if($Action -eq 'extract'){
+    if(Test-Path -LiteralPath $Root){throw 'Fresh distribution extraction requires a new directory.'}
+    Expand-Archive -LiteralPath $Zip -DestinationPath $Root -ErrorAction Stop
+    exit
+}
 if(Test-Path -LiteralPath $Zip){throw 'Distribution archives must be new files.'}
 if(@(Get-ChildItem -LiteralPath $Root -Recurse -Force | Where-Object {
     $_.Attributes -band [IO.FileAttributes]::ReparsePoint
 }).Count){throw 'Windows neutral bases cannot contain reparse points.'}
 $files=@(Get-ChildItem -LiteralPath $Root -File -Recurse -Force)
-if($files.Count -eq 0 -or $files.Count -ge 65535 -or ($files | Measure-Object Length -Sum).Sum -ge 0xf0000000){
-    throw 'The neutral Windows payload must fit ZIP32.'
+[long]$zip32Budget=4026531840
+[long]$totalBytes=($files | Measure-Object Length -Sum).Sum
+if($files.Count -eq 0 -or $files.Count -ge 65535 -or $totalBytes -lt 0 -or $totalBytes -ge $zip32Budget){
+    throw "The neutral Windows payload must fit ZIP32 (files=$($files.Count), bytes=$totalBytes, limit=$zip32Budget)."
 }
 $names=@{}
 $stream=[IO.File]::Open($Zip,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
@@ -34,3 +42,4 @@ try{
         }
     }finally{$archive.Dispose()}
 }finally{$stream.Dispose()}
+@{files=$files.Count;uncompressedBytes=$totalBytes;zip32Budget=$zip32Budget}|ConvertTo-Json -Compress

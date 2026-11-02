@@ -32,12 +32,22 @@ test('native diagnostics retain correlation and safe categories, never raw stder
   assert.equal(rows.at(-1).fault, 'owned-close');
 });
 
-test('native sampler independently persists a host pulse gap without a main timer', { skip: process.platform !== 'win32' }, async (t) => {
+test('native sampler persists one host pulse gap from controlled monotonic fixture state', { skip: process.platform !== 'win32' }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vi-native-gap-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
+  // Seed fixture bookkeeping, not the production stopwatch, threshold or writer.
   const script = `$ErrorActionPreference='Stop'\n. '${path.resolve('native', 'windows-diagnostics.ps1').replaceAll("'", "''")}'\n` +
+    `Add-Type -TypeDefinition 'public static class GapSink { public static System.Action<string> Original; public static readonly System.Threading.ManualResetEventSlim Written = new System.Threading.ManualResetEventSlim(false); public static void Write(string line) { Original(line); if(line.Contains("host-gap")) Written.Set(); } }'\n` +
+    `$type=[ViNativeDiagnostics];$flags=[Reflection.BindingFlags]'Static,NonPublic'\n` +
+    `[GapSink]::Original=[Delegate]::CreateDelegate([Action[string]],$type.GetMethod('WriteLine',$flags))\n` +
+    `$type.GetField('sink',$flags).SetValue($null,[Delegate]::CreateDelegate([Action[string]],[GapSink].GetMethod('Write')))\n` +
     `[ViNativeDiagnostics]::Configure('${root.replaceAll("'", "''")}','12345678-1234-1234-1234-123456789abc','pointer',1,$PID,$false)\n` +
-    `Start-Sleep -Milliseconds 5200\n[ViNativeDiagnostics]::Sample()\n[ViNativeDiagnostics]::Sample()\n[ViNativeDiagnostics]::Close()\n`;
+    `$now=$type.GetField('clock',$flags).GetValue($null).ElapsedMilliseconds\n` +
+    `$type.GetField('lastPulse',$flags).SetValue($null,[long]($now-5200))\n` +
+    `$type.GetField('lastCheck',$flags).SetValue($null,[long]($now-1000))\n` +
+    `[ViNativeDiagnostics]::Sample()\n[ViNativeDiagnostics]::Sample()\n` +
+    `if(-not [GapSink]::Written.Wait(2000)){throw 'Actual native writer did not persist the controlled host-gap record.'}\n` +
+    `[ViNativeDiagnostics]::Close()\n`;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from(script, 'utf16le').toString('base64')], { timeout: 15000, stdio: 'pipe' });
   const rows = (await fs.readFile(path.join(root, 'native-pointer.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
