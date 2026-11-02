@@ -67,7 +67,11 @@ test('Windows native packaging archive scripts preserve bytes through whitespace
   const run = (args) => execFileSync(context.executable, ['-NoProfile', '-NonInteractive', '-File',
     path.resolve('scripts', 'distribution-archive.ps1'), ...args],
   { env: context.env, encoding: 'utf8', timeout: 15000 });
-  run(['-Root', payload, '-Zip', zip]);
+  const writer = JSON.parse(run(['-Root', payload, '-Zip', zip]));
+  assert.equal(writer.files, 3);
+  assert.equal(writer.uncompressedBytes, 29);
+  assert.equal(writer.zip32Budget, 4026531840);
+  assert.ok(writer.uncompressedBytes < writer.zip32Budget);
   run(['-Action', 'extract', '-Root', extracted, '-Zip', zip]);
   assert.deepEqual(fileInventory(extracted), fileInventory(payload));
   const bytes = fs.readFileSync(zip);
@@ -75,6 +79,18 @@ test('Windows native packaging archive scripts preserve bytes through whitespace
   assert.equal(bytes.readUInt16LE(bytes.length - 12), 3);
   assert.equal(bytes.subarray(30, 30 + bytes.readUInt16LE(26)).toString('utf8').startsWith('./'), false);
   assert.throws(() => run(['-Action', 'extract', '-Root', extracted, '-Zip', zip]), /new directory/);
+  const emptyPayload = path.join(root, 'zero-byte payload');
+  fs.mkdirSync(emptyPayload);
+  fs.writeFileSync(path.join(emptyPayload, 'empty'), '');
+  const emptyZip = path.join(root, 'zero-byte content.zip');
+  const emptyExtracted = path.join(root, 'fresh zero-byte extraction');
+  const emptyWriter = JSON.parse(run(['-Root', emptyPayload, '-Zip', emptyZip]));
+  assert.deepEqual(emptyWriter, { files: 1, uncompressedBytes: 0, zip32Budget: 4026531840 });
+  run(['-Action', 'extract', '-Root', emptyExtracted, '-Zip', emptyZip]);
+  assert.deepEqual(fileInventory(emptyExtracted), fileInventory(emptyPayload));
+  const noFiles = path.join(root, 'no files');
+  fs.mkdirSync(noFiles);
+  assert.throws(() => run(['-Root', noFiles, '-Zip', path.join(root, 'invalid.zip')]), /files=0, bytes=0, limit=4026531840/);
 });
 
 test('native distribution initializes the public Electron loader before reading its binary layout', (t) => {

@@ -235,10 +235,17 @@ async function main(version, arch) {
     if (process.platform === 'darwin') execFileSync('codesign', ['--verify', '--deep', '--strict', bundle]);
     const files = fileInventory(staging);
     const zip = path.join(output, `VI-${version}-${process.platform === 'win32' ? 'windows' : 'macos'}-${arch}-neutral.zip`);
+    let archiveWriter;
     if (process.platform === 'darwin') execFileSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', bundle, zip],
       { timeout: 120000 });
-    else packagingShell(['-NoProfile', '-NonInteractive', '-File', path.resolve('scripts', 'distribution-archive.ps1'),
-      '-Root', staging, '-Zip', zip], { timeout: 120000 });
+    else {
+      archiveWriter = JSON.parse(packagingShell(['-NoProfile', '-NonInteractive', '-File',
+        path.resolve('scripts', 'distribution-archive.ps1'), '-Root', staging, '-Zip', zip],
+      { encoding: 'utf8', timeout: 120000 }));
+      assert.equal(archiveWriter.files, Object.keys(files).length);
+      assert.equal(archiveWriter.uncompressedBytes, Object.values(files).reduce((sum, item) => sum + item.bytes, 0));
+      assert.equal(archiveWriter.zip32Budget, 4026531840);
+    }
     const extracted = path.join(output, 'fresh-extraction');
     if (process.platform === 'darwin') execFileSync('ditto', ['-x', '-k', zip, extracted], { timeout: 120000 });
     else packagingShell(['-NoProfile', '-NonInteractive', '-File', path.resolve('scripts', 'distribution-archive.ps1'),
@@ -256,7 +263,7 @@ async function main(version, arch) {
     assert.ok(!fs.existsSync(profile));
     fs.writeFileSync(path.join(output, 'receipt.json'), JSON.stringify({ ...authority,
       archive: { file: path.basename(zip), bytes: fs.statSync(zip).size, sha256: digest(zip) },
-      executableSha256: digest(executable), nativeHeader, payload: files, reports,
+      executableSha256: digest(executable), nativeHeader, archiveWriter, payload: files, reports,
       signature: process.platform === 'darwin' ? 'ad-hoc strict verified before and after archive' : 'unsigned',
       helperRuntimeExercised: false, headlessOnly: true,
       cleanup: { packagedElectronChildrenExited: true, syntheticProfileRemoved: !fs.existsSync(profile),

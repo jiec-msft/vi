@@ -194,6 +194,12 @@ Archive function 则来自该 engine 的 inbox `.psm1`。不能假设所有
 签名拒绝、numeric version、完整解包和逐文件 hash gate 均保持不变。
 legacy engine 的空输出超时本身不能定位在 startup、import 或其它阶段；
 不能据此归责机器或推断生产 app 行为。
+Windows ZIP32 容量预算明确用正的 Int64 decimal `4026531840`（3.75 GiB）。
+PowerShell 的八位十六进制 `0xf0000000` 是有符号 Int32 负数，不能直接
+用作该上限。writer 在 receipt 输出实际文件数、总 bytes 与预算；空文件
+仍须完整保留，只有完全没有文件的 payload 才拒绝，错误也保留这些数值。
+数字字面量的 sign-bit 规则见
+<https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_numeric_literals>。
 相关启动规则见
 <https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath>。
 
